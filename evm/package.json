@@ -20,5 +20,10 @@
   },
   "devDependencies": {
     "solhint": "6.2.4"
+  },
+  "overrides": {
+    "solhint": {
+      "glob": "14.0.6"
+    }
   }
 }

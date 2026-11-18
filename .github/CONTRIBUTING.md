@@ -322,3 +322,23 @@ Three things about them worth knowing if you edit one:
 Not here. See `.github/SECURITY.md`. Short version: use the private advisory form rather than a
 public issue, and note that the rails Hyperion routes over are explicitly out of scope, because
 Hyperion does not own them.
+
+## Locked dependency audits
+
+CI checks every committed npm lockfile version, including development and optional
+dependencies, with npm's official Bulk Advisory endpoint and blocks high or critical
+active advisories. No package scripts execute during the audit.
+The audit verifies each finding against GitHub's canonical advisory API. A finding
+is removed only when GitHub confirms that advisory was withdrawn; API errors,
+incomplete evidence, and active findings remain blocking. This handles stale npm
+reports without a repository allowlist or disabling security checks.
+
+Run the audit and its regression tests locally:
+
+```bash
+python3 -B .github/scripts/test_audit_npm_dependencies.py
+python3 -B .github/scripts/audit_npm_dependencies.py packages/protocol --audit-level high
+```
+
+An optional `GITHUB_TOKEN` increases the API rate limit. It is sent only to the
+canonical GitHub API; npm's advisory endpoint receives no GitHub credential.

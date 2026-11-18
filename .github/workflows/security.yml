@@ -154,12 +154,14 @@ jobs:
         # because a compromised formatter or test runner can write whatever it likes into dist.
         # Moderate findings in a linter are not worth blocking a contract fix over.
         #
-        # evm/package-lock.json holds one devDependency, solhint, and is covered by dependabot
-        # rather than by a gate here. If that package ever grows a second dependency, add it.
+        # The contribution security job also audits evm/package-lock.json.
+        # Canonical GitHub withdrawals are verified without exempting active advisories.
         working-directory: packages/protocol
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-          npm audit --audit-level=high | tee npm-audit.txt
+          python3 -B ../../.github/scripts/audit_npm_dependencies.py . --audit-level high | tee npm-audit.txt
 
       - name: Summarise
         if: always()
