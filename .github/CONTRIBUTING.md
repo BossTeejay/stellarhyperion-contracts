@@ -342,3 +342,23 @@ python3 -B .github/scripts/audit_npm_dependencies.py packages/protocol --audit-l
 
 An optional `GITHUB_TOKEN` increases the API rate limit. It is sent only to the
 canonical GitHub API; npm's advisory endpoint receives no GitHub credential.
+
+## Automatic pull request checks
+
+CI runs on opened, updated, and reopened pull requests. The `Automatic PR CI`
+action authorizes waiting fork CI when the author satisfies the issue assignment
+policy, including the documented bot, organization role, and code owner exemptions.
+It checks waiting runs every five minutes and when issues are assigned. GitHub
+may delay scheduled runs; maintainers can also dispatch the action manually.
+
+The authorization job uses only default-branch policy code. It never checks out PR
+code, downloads contributed artifacts, approves a code review, or merges a PR.
+Only the current fork head's `ci.yml` pull request run can be authorized; changed
+heads or unverifiable assignments remain unapproved. The approved CI jobs retain
+read-only permissions and receive no repository deployment or signing secrets.
+
+Run its regression tests locally:
+
+```bash
+python3 -B .github/scripts/test_approve_pr_ci.py
+```
