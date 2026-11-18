@@ -8,6 +8,44 @@ change to a route tag or an error number is never a change to one file.
 Read the two traps near the bottom before you start. They catch almost everybody once, and both of
 them are deliberate.
 
+## Issue assignment requirement
+
+Request assignment from a maintainer before opening a pull request. Reference the issue in
+the PR title or description, preferably with `Closes #42`. You must be a current assignee
+on every referenced issue in the StellarHyperion organization. Local issue numbers,
+`StellarHyperion/repository#42`, full GitHub issue URLs, and GitHub's linked closing issues
+are supported. References inside HTML comments and fenced examples do not count.
+Descriptions pasted entirely inside a code fence are read as PR descriptions.
+References to other pull requests or issues outside StellarHyperion do not grant eligibility.
+
+The `PR assignment enforcement` action closes unauthorized PRs and PRs without a referenced
+issue. It sweeps all open PRs every five minutes and runs when an issue is assigned or
+unassigned. GitHub may delay scheduled runs. Reopened and edited PRs are included in the
+next sweep. Closing a PR leaves its issue open and never merges its changes. Ask for
+assignment before reopening a rejected PR.
+
+Organization owners and members, repository collaborators, users with admin, maintain,
+write, or triage permission, and users named in the default branch's CODEOWNERS are exempt.
+Team code owners qualify through organization membership. Public read access and previous
+contributions alone do not grant an exemption.
+
+Trusted helper bots are Dependabot, Renovate, GitHub Actions, GitHub Copilot, and CodeRabbit.
+Maintainers can add other exact bot or service account logins to the comma-separated
+repository Actions variable `PR_ASSIGNMENT_HELPER_BOTS`. An unknown bot still needs issue
+assignment unless it qualifies through a repository role or code ownership.
+
+The action uses GitHub's built-in token and only executes the policy on the default branch.
+It never checks out a PR branch. API verification errors preserve affected PRs and fail the
+workflow for maintainer review. No personal access token is needed in Actions. The action
+records its decisions in the run log and summary. Use its manual `dry_run` input to inspect
+decisions without closing PRs.
+
+Policy regression tests also run in the required contribution security job. Run them locally:
+
+```bash
+python3 -B .github/scripts/test_enforce_pr_assignments.py
+```
+
 ## Getting set up
 
 Clone with submodules. forge-std and OpenZeppelin live under `evm/lib` as committed git
@@ -259,10 +297,9 @@ rather than after, because two of its questions take thinking rather than typing
 
 ## How CI is arranged
 
-Six workflow files. Five of them are reusable workflows that do one thing: `soroban.yml`,
-`evm.yml`, `protocol.yml`, `deploy-rehearsal.yml` and `security.yml`. `ci.yml` is the only one with
-triggers, it calls the other five, and it has one final job called `gate` that passes only when all
-five passed.
+The build workflows are reusable workflows that do one thing: `soroban.yml`,
+`evm.yml`, `protocol.yml`, `deploy-rehearsal.yml` and `security.yml`. `ci.yml` calls the build
+and security jobs and has a final `gate` job that passes only when all required jobs pass. `pr-assignment.yml` separately enforces contribution assignments.
 
 Branch protection points at `gate` and nothing else, which means renaming or splitting a workflow
 does not quietly stop protecting the branch.
@@ -285,3 +322,43 @@ Three things about them worth knowing if you edit one:
 Not here. See `.github/SECURITY.md`. Short version: use the private advisory form rather than a
 public issue, and note that the rails Hyperion routes over are explicitly out of scope, because
 Hyperion does not own them.
+
+## Locked dependency audits
+
+CI checks every committed npm lockfile version, including development and optional
+dependencies, with npm's official Bulk Advisory endpoint and blocks high or critical
+active advisories. No package scripts execute during the audit.
+The audit verifies each finding against GitHub's canonical advisory API. A finding
+is removed only when GitHub confirms that advisory was withdrawn; API errors,
+incomplete evidence, and active findings remain blocking. This handles stale npm
+reports without a repository allowlist or disabling security checks.
+
+Run the audit and its regression tests locally:
+
+```bash
+python3 -B .github/scripts/test_audit_npm_dependencies.py
+python3 -B .github/scripts/audit_npm_dependencies.py packages/protocol --audit-level high
+```
+
+An optional `GITHUB_TOKEN` increases the API rate limit. It is sent only to the
+canonical GitHub API; npm's advisory endpoint receives no GitHub credential.
+
+## Automatic pull request checks
+
+CI runs on opened, updated, and reopened pull requests. The `Automatic PR CI`
+action authorizes waiting fork CI when the author satisfies the issue assignment
+policy, including the documented bot, organization role, and code owner exemptions.
+It checks waiting runs every five minutes and when issues are assigned. GitHub
+may delay scheduled runs; maintainers can also dispatch the action manually.
+
+The authorization job uses only default-branch policy code. It never checks out PR
+code, downloads contributed artifacts, approves a code review, or merges a PR.
+Only the current fork head's `ci.yml` pull request run can be authorized; changed
+heads or unverifiable assignments remain unapproved. The approved CI jobs retain
+read-only permissions and receive no repository deployment or signing secrets.
+
+Run its regression tests locally:
+
+```bash
+python3 -B .github/scripts/test_approve_pr_ci.py
+```
