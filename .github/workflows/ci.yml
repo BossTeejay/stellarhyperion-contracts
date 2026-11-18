@@ -1,7 +1,7 @@
 name: ci
 
-# The only workflow with real triggers. Everything else in this directory is a reusable workflow
-# that this one calls.
+# Build verification entrypoint. The build and security workflows are reusable workflows
+# called here; pr-assignment.yml separately enforces contribution assignments.
 #
 # Why it is arranged this way. `needs:` cannot reach across workflow files, so a repository with
 # five independent workflow files cannot have one job that waits on all of them, and branch
