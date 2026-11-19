@@ -1,7 +1,7 @@
 //! The way in: Axelar's callback, the note it carries, and everything that can be wrong with it.
 
 use hyperion_core::{HyperionError, RouteKind};
-use soroban_sdk::{xdr::ToXdr, Bytes, BytesN, Env, String};
+use soroban_sdk::{testutils::Ledger, xdr::ToXdr, Bytes, BytesN, Env, String};
 
 use super::setup::{World, HUNDRED, STRANGE_TOKEN_ID};
 
@@ -458,4 +458,154 @@ fn a_delivery_to_a_contract_lands_without_going_anywhere_near_a_claim() {
     );
     assert_eq!(claim_id, 0);
     assert_eq!(w.manager().locked(&w.token_id), HUNDRED);
+}
+
+// ------------------------------------------------------------------------------------------
+// Peer rotation and emergency disable inbound transitions
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn in_flight_messages_transition_during_and_after_peer_rotation() {
+    let w = World::new();
+    let old_peer_bytes = w.peer_bytes();
+    let new_peer: BytesN<20> = BytesN::from_array(&w.env, &[0x77u8; 20]);
+    let new_peer_bytes = Bytes::from_array(&w.env, &new_peer.to_array());
+
+    // Propose rotation
+    w.adapter()
+        .propose_peer_rotation(&w.ethereum(), &new_peer, &3_600);
+
+    // During the delay window (in-flight):
+    // 1. Deliveries from the old (active) peer succeed
+    let id1 = message_id(&w.env, "in-flight-1");
+    let claim1 = w.its().deliver(
+        &w.adapter_id,
+        &w.axelar_ethereum(),
+        &id1,
+        &old_peer_bytes,
+        &w.note_to_recipient(1),
+        &w.burn_id(),
+        &HUNDRED,
+    );
+    assert_eq!(claim1, 0);
+
+    // 2. Deliveries from the new (pending) peer fail because it is not yet effective
+    let id2 = message_id(&w.env, "premature-new");
+    w.fund_adapter(HUNDRED);
+    assert_eq!(
+        w.adapter().try_execute_with_interchain_token(
+            &w.axelar_ethereum(),
+            &id2,
+            &new_peer_bytes,
+            &w.note_to_recipient(2),
+            &w.burn_id(),
+            &w.token_id,
+            &HUNDRED,
+        ),
+        Err(Ok(HyperionError::UnexpectedRailContract))
+    );
+    assert!(w
+        .its()
+        .try_deliver(
+            &w.adapter_id,
+            &w.axelar_ethereum(),
+            &id2,
+            &new_peer_bytes,
+            &w.note_to_recipient(2),
+            &w.burn_id(),
+            &HUNDRED,
+        )
+        .is_err());
+
+    // Advance time past delay window and apply rotation
+    w.env.ledger().with_mut(|li| {
+        li.timestamp += 3_600;
+    });
+    w.adapter().apply_peer_rotation(&w.ethereum());
+
+    // After rotation is applied:
+    // 3. Deliveries from the new peer now succeed!
+    let id3 = message_id(&w.env, "new-peer-success");
+    let claim3 = w.its().deliver(
+        &w.adapter_id,
+        &w.axelar_ethereum(),
+        &id3,
+        &new_peer_bytes,
+        &w.note_to_recipient(3),
+        &w.burn_id(),
+        &HUNDRED,
+    );
+    assert_eq!(claim3, 0);
+
+    // 4. Deliveries from the old (retired) peer now fail closed
+    let id4 = message_id(&w.env, "old-peer-rejected");
+    w.fund_adapter(HUNDRED);
+    assert_eq!(
+        w.adapter().try_execute_with_interchain_token(
+            &w.axelar_ethereum(),
+            &id4,
+            &old_peer_bytes,
+            &w.note_to_recipient(4),
+            &w.burn_id(),
+            &w.token_id,
+            &HUNDRED,
+        ),
+        Err(Ok(HyperionError::UnexpectedRailContract))
+    );
+    assert!(w
+        .its()
+        .try_deliver(
+            &w.adapter_id,
+            &w.axelar_ethereum(),
+            &id4,
+            &old_peer_bytes,
+            &w.note_to_recipient(4),
+            &w.burn_id(),
+            &HUNDRED,
+        )
+        .is_err());
+}
+
+#[test]
+fn disabled_chain_rejects_inbound_deliveries() {
+    let w = World::new();
+    w.fund_adapter(HUNDRED);
+
+    w.adapter().set_chain_enabled(&w.ethereum(), &false);
+
+    let id = message_id(&w.env, "disabled-inbound");
+    assert_eq!(
+        w.adapter().try_execute_with_interchain_token(
+            &w.axelar_ethereum(),
+            &id,
+            &w.peer_bytes(),
+            &w.note_to_recipient(10),
+            &w.burn_id(),
+            &w.token_id,
+            &HUNDRED,
+        ),
+        Err(Ok(HyperionError::RouteDisabled))
+    );
+}
+
+#[test]
+fn unlinked_chain_rejects_inbound_deliveries() {
+    let w = World::new();
+    w.fund_adapter(HUNDRED);
+
+    w.adapter().unlink_chain(&w.ethereum());
+
+    let id = message_id(&w.env, "unlinked-inbound");
+    assert_eq!(
+        w.adapter().try_execute_with_interchain_token(
+            &w.axelar_ethereum(),
+            &id,
+            &w.peer_bytes(),
+            &w.note_to_recipient(20),
+            &w.burn_id(),
+            &w.token_id,
+            &HUNDRED,
+        ),
+        Err(Ok(HyperionError::UnknownChain))
+    );
 }

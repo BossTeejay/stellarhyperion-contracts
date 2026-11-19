@@ -11,6 +11,9 @@ import {
     RailNotConfigured,
     RefundFailed,
     ReplayedMessage,
+    TimelockDelayOutOfRange,
+    TimelockNotQueued,
+    TimelockNotReady,
     TokenNotMapped,
     Unauthorized,
     UnexpectedRailContract,
@@ -72,6 +75,10 @@ contract AxelarItsAdapterTest is Fixture {
 
     event PeerConfigured(string chain, string axelarChain, bytes peer);
     event PeerEnabled(string chain, bool enabled);
+    event PeerRotationQueued(string indexed chain, bytes currentPeer, bytes newPeer, uint64 eta);
+    event PeerRotationApplied(string indexed chain, bytes oldPeer, bytes newPeer);
+    event PeerRotationCancelled(string indexed chain, bytes cancelledPeer);
+    event PeerRemoved(string indexed chain, string axelarChain);
     event TokenLinked(address indexed token, bytes32 tokenId);
     event TransferSubmitted(
         string chain, bytes32 tokenId, uint256 amount, uint64 nonce, uint256 gasValue, bytes note
@@ -257,6 +264,168 @@ contract AxelarItsAdapterTest is Fixture {
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
         adapter.setPeerEnabled(STELLAR, false);
+    }
+
+    function test_propose_peer_rotation_enforces_delay() public {
+        bytes memory newPeer = hex"beef";
+        vm.prank(admin);
+        vm.expectRevert(TimelockDelayOutOfRange.selector);
+        adapter.proposePeerRotation(STELLAR, newPeer, 1 hours - 1);
+
+        vm.prank(admin);
+        adapter.proposePeerRotation(STELLAR, newPeer, 1 hours);
+
+        AxelarItsAdapter.PeerRotation memory rot = adapter.pendingRotationOf(STELLAR);
+        assertEq(rot.newPeer, newPeer);
+        assertEq(rot.eta, block.timestamp + 1 hours);
+        assertEq(rot.queuedAt, block.timestamp);
+    }
+
+    function test_propose_peer_rotation_refuses_unknown_or_empty_or_same() public {
+        vm.prank(admin);
+        vm.expectRevert(UnknownChain.selector);
+        adapter.proposePeerRotation("unknown", hex"beef", 1 hours);
+
+        vm.prank(admin);
+        vm.expectRevert(ZeroAddress.selector);
+        adapter.proposePeerRotation(STELLAR, "", 1 hours);
+
+        vm.prank(admin);
+        vm.expectRevert(AlreadyConfigured.selector);
+        adapter.proposePeerRotation(STELLAR, peerAddress, 1 hours);
+    }
+
+    function test_apply_peer_rotation_enforces_timelock_delay() public {
+        bytes memory newPeer = hex"cafe";
+
+        vm.prank(admin);
+        vm.expectRevert(TimelockNotQueued.selector);
+        adapter.applyPeerRotation(STELLAR);
+
+        vm.prank(admin);
+        adapter.proposePeerRotation(STELLAR, newPeer, 1 hours);
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(TimelockNotReady.selector, uint64(block.timestamp + 1 hours)));
+        adapter.applyPeerRotation(STELLAR);
+
+        vm.warp(block.timestamp + 1 hours);
+
+        vm.expectEmit(true, true, true, true, address(adapter));
+        emit PeerRotationApplied(STELLAR, peerAddress, newPeer);
+
+        vm.prank(admin);
+        adapter.applyPeerRotation(STELLAR);
+
+        assertEq(adapter.peerOf(STELLAR).peer, newPeer);
+        assertEq(adapter.pendingRotationOf(STELLAR).eta, 0);
+    }
+
+    function test_cancel_peer_rotation_cancels_pending() public {
+        bytes memory newPeer = hex"cafe";
+
+        vm.prank(admin);
+        adapter.proposePeerRotation(STELLAR, newPeer, 1 hours);
+
+        vm.expectEmit(true, true, true, true, address(adapter));
+        emit PeerRotationCancelled(STELLAR, newPeer);
+
+        vm.prank(admin);
+        adapter.cancelPeerRotation(STELLAR);
+
+        assertEq(adapter.pendingRotationOf(STELLAR).eta, 0);
+
+        vm.prank(admin);
+        vm.expectRevert(TimelockNotQueued.selector);
+        adapter.applyPeerRotation(STELLAR);
+    }
+
+    function test_in_flight_messages_transition_during_and_after_peer_rotation() public {
+        bytes memory newPeer = hex"feed";
+
+        vm.prank(admin);
+        adapter.proposePeerRotation(STELLAR, newPeer, 1 hours);
+
+        // In-flight window: delivery from active peer succeeds
+        _fund(DELIVERY);
+        bytes32 res1 = its.deliver(
+            address(adapter),
+            keccak256("cmd1"),
+            AXELAR_STELLAR,
+            peerAddress,
+            _outboundNote(recipient, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+        assertEq(res1, adapter.EXECUTE_SUCCESS());
+
+        // Delivery from pending peer fails
+        _fund(DELIVERY);
+        vm.expectRevert(UnexpectedRailContract.selector);
+        its.deliver(
+            address(adapter),
+            keccak256("cmd2"),
+            AXELAR_STELLAR,
+            newPeer,
+            _outboundNote(recipient, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+
+        // Apply rotation
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(admin);
+        adapter.applyPeerRotation(STELLAR);
+
+        // After rotation: delivery from new peer succeeds
+        bytes32 res3 = its.deliver(
+            address(adapter),
+            keccak256("cmd3"),
+            AXELAR_STELLAR,
+            newPeer,
+            _outboundNote(recipient, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+        assertEq(res3, adapter.EXECUTE_SUCCESS());
+
+        // Delivery from old peer now fails
+        _fund(DELIVERY);
+        vm.expectRevert(UnexpectedRailContract.selector);
+        its.deliver(
+            address(adapter),
+            keccak256("cmd4"),
+            AXELAR_STELLAR,
+            peerAddress,
+            _outboundNote(recipient, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+    }
+
+    function test_remove_peer_clears_mappings_and_rejects_deliveries() public {
+        vm.prank(admin);
+        adapter.removePeer(STELLAR);
+
+        assertFalse(adapter.supportsChain(STELLAR));
+        assertEq(bytes(adapter.chainForAxelarName(AXELAR_STELLAR)).length, 0);
+
+        _fund(DELIVERY);
+        vm.expectRevert(RailNotConfigured.selector);
+        its.deliver(
+            address(adapter),
+            keccak256("cmd5"),
+            AXELAR_STELLAR,
+            peerAddress,
+            _outboundNote(recipient, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
     }
 
     function test_a_chain_nobody_configured_translates_to_nothing() public view {

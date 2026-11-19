@@ -2,7 +2,7 @@
 
 use hyperion_core::{HyperionError, RouteKind};
 use soroban_sdk::{
-    testutils::{MockAuth, MockAuthInvoke},
+    testutils::{Ledger, MockAuth, MockAuthInvoke},
     Address, BytesN, IntoVal, String,
 };
 
@@ -422,4 +422,185 @@ fn the_admin_is_not_special_on_the_permissionless_calls() {
     let keeper: Address = w.relayer.clone();
     w.adapter().keep_alive(&w.ethereum());
     assert_eq!(w.adapter().sweep(&keeper, &w.token_id), HUNDRED);
+}
+
+// ------------------------------------------------------------------------------------------
+// Trusted-chain rotation and emergency disable
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn proposing_a_peer_rotation_enforces_minimum_delay() {
+    let w = World::new();
+    let new_peer: BytesN<20> = BytesN::from_array(&w.env, &[0x99u8; 20]);
+
+    // Less than 3600 seconds delay is rejected
+    assert_eq!(
+        w.adapter().try_propose_peer_rotation(
+            &w.ethereum(),
+            &new_peer,
+            &(hyperion_core::MIN_PEER_ROTATION_DELAY - 1)
+        ),
+        Err(Ok(HyperionError::TimelockDelayOutOfRange))
+    );
+
+    // Non-existent chain is rejected
+    assert_eq!(
+        w.adapter().try_propose_peer_rotation(
+            &String::from_str(&w.env, "unknown"),
+            &new_peer,
+            &hyperion_core::MIN_PEER_ROTATION_DELAY
+        ),
+        Err(Ok(HyperionError::UnknownChain))
+    );
+
+    // Same peer is rejected as AlreadyConfigured
+    assert_eq!(
+        w.adapter().try_propose_peer_rotation(
+            &w.ethereum(),
+            &w.peer(),
+            &hyperion_core::MIN_PEER_ROTATION_DELAY
+        ),
+        Err(Ok(HyperionError::AlreadyConfigured))
+    );
+
+    // Zero address peer on GMP is rejected
+    assert_eq!(
+        w.adapter().try_propose_peer_rotation(
+            &w.ethereum(),
+            &BytesN::from_array(&w.env, &[0u8; 20]),
+            &hyperion_core::MIN_PEER_ROTATION_DELAY
+        ),
+        Err(Ok(HyperionError::ZeroAddressKey))
+    );
+
+    // Exact minimum delay is accepted
+    let now = w.env.ledger().timestamp();
+    assert_eq!(
+        w.adapter().try_propose_peer_rotation(
+            &w.ethereum(),
+            &new_peer,
+            &hyperion_core::MIN_PEER_ROTATION_DELAY
+        ),
+        Ok(Ok(()))
+    );
+
+    let pending = w.adapter().get_pending_rotation(&w.ethereum()).unwrap();
+    assert_eq!(pending.new_peer, new_peer);
+    assert_eq!(
+        pending.eta,
+        now + hyperion_core::MIN_PEER_ROTATION_DELAY
+    );
+    assert_eq!(pending.queued_at, now);
+}
+
+#[test]
+fn peer_rotation_cannot_be_applied_before_delay() {
+    let w = World::new();
+    let new_peer: BytesN<20> = BytesN::from_array(&w.env, &[0x99u8; 20]);
+
+    // Applying when none queued fails
+    assert_eq!(
+        w.adapter().try_apply_peer_rotation(&w.ethereum()),
+        Err(Ok(HyperionError::TimelockNotQueued))
+    );
+
+    w.adapter()
+        .propose_peer_rotation(&w.ethereum(), &new_peer, &3_600);
+
+    // Try applying immediately -> TimelockNotReady
+    assert_eq!(
+        w.adapter().try_apply_peer_rotation(&w.ethereum()),
+        Err(Ok(HyperionError::TimelockNotReady))
+    );
+
+    // Advance 3599 seconds -> still TimelockNotReady
+    w.env.ledger().with_mut(|li| {
+        li.timestamp += 3_599;
+    });
+    assert_eq!(
+        w.adapter().try_apply_peer_rotation(&w.ethereum()),
+        Err(Ok(HyperionError::TimelockNotReady))
+    );
+
+    // Advance 1 more second (timestamp >= eta) -> success
+    w.env.ledger().with_mut(|li| {
+        li.timestamp += 1;
+    });
+    assert_eq!(
+        w.adapter().try_apply_peer_rotation(&w.ethereum()),
+        Ok(Ok(()))
+    );
+
+    // Peer is updated
+    assert_eq!(w.adapter().get_link(&w.ethereum()).peer, new_peer);
+    // Pending rotation is cleared
+    assert_eq!(w.adapter().get_pending_rotation(&w.ethereum()), None);
+}
+
+#[test]
+fn peer_rotation_can_be_cancelled() {
+    let w = World::new();
+    let new_peer: BytesN<20> = BytesN::from_array(&w.env, &[0x99u8; 20]);
+
+    w.adapter()
+        .propose_peer_rotation(&w.ethereum(), &new_peer, &3_600);
+    assert!(w.adapter().get_pending_rotation(&w.ethereum()).is_some());
+
+    w.adapter().cancel_peer_rotation(&w.ethereum());
+    assert_eq!(w.adapter().get_pending_rotation(&w.ethereum()), None);
+
+    // Cannot apply after cancellation
+    assert_eq!(
+        w.adapter().try_apply_peer_rotation(&w.ethereum()),
+        Err(Ok(HyperionError::TimelockNotQueued))
+    );
+}
+
+#[test]
+fn emergency_disable_and_enable_toggles_chain_status() {
+    let w = World::new();
+
+    assert!(w.adapter().is_chain_enabled(&w.ethereum()));
+
+    // Disable
+    w.adapter().set_chain_enabled(&w.ethereum(), &false);
+    assert!(!w.adapter().is_chain_enabled(&w.ethereum()));
+
+    // Outbound dispatch through router fails with RouteDisabled
+    let request = w.request(HUNDRED);
+    assert_eq!(
+        w.router().try_bridge_out(&w.user, &request),
+        Err(Ok(HyperionError::RouteDisabled))
+    );
+
+    // Re-enable
+    w.adapter().set_chain_enabled(&w.ethereum(), &true);
+    assert!(w.adapter().is_chain_enabled(&w.ethereum()));
+
+    // Dispatch should now work
+    w.router().bridge_out(&w.user, &request);
+}
+
+#[test]
+fn unlinking_chain_removes_it_completely() {
+    let w = World::new();
+    let new_peer: BytesN<20> = BytesN::from_array(&w.env, &[0x99u8; 20]);
+
+    w.adapter()
+        .propose_peer_rotation(&w.ethereum(), &new_peer, &3_600);
+
+    w.adapter().unlink_chain(&w.ethereum());
+
+    assert_eq!(
+        w.adapter().try_get_link(&w.ethereum()),
+        Err(Ok(HyperionError::UnknownChain))
+    );
+    assert_eq!(
+        w.adapter().try_chain_for(&w.axelar_ethereum()),
+        Err(Ok(HyperionError::UnknownChain))
+    );
+    assert_eq!(
+        w.adapter().try_get_pending_rotation(&w.ethereum()),
+        Err(Ok(HyperionError::UnknownChain))
+    );
 }

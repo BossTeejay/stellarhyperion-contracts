@@ -7,11 +7,46 @@
 //! so a transcription that has drifted fails immediately and loudly on the first call rather than
 //! quietly doing the wrong thing.
 //!
+//! # Message and Trust Surfaces: GMP vs ITS Token-Manager Transitions
+//!
+//! Axelar routes encompass two trust and message boundaries:
+//! 1. **ITS Token-Manager transitions**: Native interchain token transfers, mint/burn, and lock/unlock
+//!    managers authenticate token operations and gas relaying. Token mappings are verified against ITS
+//!    at registration (`map_token`), ensuring asset alignment.
+//! 2. **GMP message transitions**: Payloads attached to transfers specify the far-side recipient and
+//!    origin router metadata. Inbound execution (`execute_with_interchain_token`) strictly enforces
+//!    that the source caller matches ITS and the originating payload sender matches the trusted `peer`
+//!    configured for the source chain.
+//!
+//! # In-Flight Message Transition and Delayed Rotation
+//!
+//! When updating trusted peers on a connected chain:
+//! - **Delay enforcement**: A proposed peer rotation requires a minimum delay of
+//!   [`MIN_PEER_ROTATION_DELAY`] (1 hour) before it can be applied. The new peer cannot deliver any
+//!   messages during this timelock window.
+//! - **In-flight deliveries**: Dispatches initiated from the currently trusted peer continue to be
+//!   accepted during the delay period.
+//! - **Cutover**: Once `apply_peer_rotation` is invoked after the delay, the active peer is updated.
+//!   The former peer is immediately invalidated; subsequent deliveries claiming the old peer fail
+//!   closed with `UnexpectedRailContract`.
+//! - **Emergency disable**: `set_chain_enabled(chain, false)` immediately halts all outbound dispatches
+//!   and inbound payload deliveries (`RouteDisabled`), preventing unauthorized message processing.
+//! - **Unlink**: `unlink_chain(chain)` removes the chain mapping entirely, halting inbound deliveries
+//!   with `UnknownChain`.
+//!
+//! # Deployment Gating
+//!
+//! The active deployment is Stellar Testnet outbound ITS/CCTP. EVM contracts, GMP inbound execution,
+//! and subsequent peer migrations remain strictly development paths and must be explicitly gated
+//! until independently validated.
+//!
 //! Transcribed from `axelarnetwork/axelar-amplifier-stellar` on branch `main`:
 //!
 //! - `contracts/stellar-interchain-token-service/src/interface.rs`
 //! - `contracts/stellar-interchain-token-service/src/types.rs`
 //! - `packages/stellar-axelar-std/src/types.rs`
+
+pub use hyperion_core::MIN_PEER_ROTATION_DELAY;
 
 use soroban_sdk::{contractclient, contracttype, Address, Bytes, BytesN, Env, String};
 

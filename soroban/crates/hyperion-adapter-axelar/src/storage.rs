@@ -1,7 +1,7 @@
 use hyperion_core::HyperionError;
 use soroban_sdk::{contracttype, Address, BytesN, Env, String};
 
-use crate::types::{ChainLink, Config};
+use crate::types::{ChainLink, Config, PendingRotation};
 
 pub const BUMP_THRESHOLD: u32 = 17_280;
 pub const BUMP_TO: u32 = 518_400;
@@ -23,6 +23,10 @@ pub enum DataKey {
     /// about; an unmapped one is refused here, which is the correct behaviour on the day Axelar
     /// registers a token nobody on this side has looked at yet.
     Token(BytesN<32>),
+    /// Pending peer rotation for a chain.
+    PendingRotation(String),
+    /// Emergency disable flag for a chain.
+    Disabled(String),
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -122,4 +126,74 @@ pub fn touch_link(env: &Env, chain: &String) {
             .persistent()
             .extend_ttl(&source, BUMP_THRESHOLD, BUMP_TO);
     }
+    let rot = DataKey::PendingRotation(chain.clone());
+    if env.storage().persistent().has(&rot) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&rot, BUMP_THRESHOLD, BUMP_TO);
+    }
+    let dis = DataKey::Disabled(chain.clone());
+    if env.storage().persistent().has(&dis) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&dis, BUMP_THRESHOLD, BUMP_TO);
+    }
+}
+
+pub fn pending_rotation(env: &Env, chain: &String) -> Option<PendingRotation> {
+    let key = DataKey::PendingRotation(chain.clone());
+    let found: Option<PendingRotation> = env.storage().persistent().get(&key);
+    if found.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    }
+    found
+}
+
+pub fn set_pending_rotation(env: &Env, chain: &String, rotation: &PendingRotation) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::PendingRotation(chain.clone()), rotation);
+}
+
+pub fn clear_pending_rotation(env: &Env, chain: &String) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingRotation(chain.clone()));
+}
+
+pub fn is_chain_disabled(env: &Env, chain: &String) -> bool {
+    let key = DataKey::Disabled(chain.clone());
+    let disabled: bool = env.storage().persistent().get(&key).unwrap_or(false);
+    if disabled {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    }
+    disabled
+}
+
+pub fn set_chain_disabled(env: &Env, chain: &String, disabled: bool) {
+    if disabled {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Disabled(chain.clone()), &true);
+    } else {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Disabled(chain.clone()));
+    }
+}
+
+pub fn remove_link(env: &Env, chain: &String) {
+    if let Some(link) = link(env, chain) {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Source(link.axelar_chain));
+    }
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Link(chain.clone()));
+    clear_pending_rotation(env, chain);
 }
