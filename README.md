@@ -33,6 +33,25 @@ The legacy `bridge_out` and `dispatch` interfaces remain compatible and do not a
 The current wallet-owned router and adapter expose the paid entry point. Their activation and actual source/destination transactions are recorded in `deployments/evidence/2026-10-28-paid-its.json`. Future router upgrades use the existing timelock; adapter upgrades require its admin.
 See [the exact activation runbook](docs/TESTNET_ACTIVATION.md) for reviewed artifacts, admin commands and the live acceptance test.
 
+## Claim operations and API compatibility
+
+The EVM `settleClaims` and Soroban `settle_claims` calls process at most 50 claim IDs and return
+one status per input in the same order. Each attempt uses only the amount and recipient recorded
+in the claim. A recipient refusal leaves that claim funded and unsettled while later claims can
+still complete. Status codes are stable: 0 settled, 1 not found, 2 already settled, 3 recipient
+or token refused, and 4 router balance is short. Soroban emits `claim_failure_v1`; EVM emits
+`ClaimPayoutFailureV1` and exposes the latest reason through `claimFailureReason`. Reason codes
+are versioned: 1 recipient/token refusal, 2 router balance short. Successful settlement clears
+the stored diagnostic. Existing single-claim entry points and claim records remain compatible.
+
+The paid Stellar entry point's `gas_amount` is the request-side provider budget. For ITS it is
+denominated in XLM; for CCTP it is denominated in USDC and deducted before checking the receive
+minimum. These amounts are never added together or interpreted across rails. The read-only
+`quote_routes` / `quote` interfaces explain the route, token, amount and flow blockers before
+dispatch; adapter and destination-specific checks still run at dispatch. These APIs do not
+activate additional deployments: EVM and non-active rails remain development surfaces pending
+independent validation.
+
 ## Organization overview
 
 The StellarHyperion organization divides cross-chain routing across three dedicated repositories:

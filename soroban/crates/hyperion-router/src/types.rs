@@ -91,6 +91,15 @@ pub struct PendingClaim {
     pub settled: bool,
 }
 
+/// Versioned outcome for one claim requested by `settle_claims`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimSettlementResult {
+    pub id: u64,
+    /// 0 settled, 1 missing, 2 already settled, 3 recipient refused, 4 router balance short.
+    pub status: u32,
+}
+
 /// A completed inbound delivery.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

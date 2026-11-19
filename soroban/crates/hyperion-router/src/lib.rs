@@ -25,8 +25,9 @@ pub use adapter::{PaidRailAdapter, PaidRailAdapterClient, RailAdapter, RailAdapt
 pub use storage::DataKey;
 pub use timelock::{GRACE_PERIOD, MAX_TIMELOCK_DELAY, MIN_TIMELOCK_DELAY};
 pub use types::{
-    AdminAction, Config, Destination, InboundRecord, Origin, OutboundRequest, PendingClaim,
-    QueuedAction, Recipient, RouteConfig, RouteQuote, TokenConfig, TransferRecord,
+    AdminAction, ClaimSettlementResult, Config, Destination, InboundRecord, Origin,
+    OutboundRequest, PendingClaim, QueuedAction, Recipient, RouteConfig, RouteQuote, TokenConfig,
+    TransferRecord,
 };
 
 use hyperion_core::{
@@ -43,6 +44,7 @@ const ALL_ROUTES: [RouteKind; 4] = [
     RouteKind::AxelarGmp,
     RouteKind::Allbridge,
 ];
+const MAX_CLAIMS_PER_BATCH: u32 = 50;
 
 #[contract]
 pub struct HyperionRouter;
@@ -176,7 +178,10 @@ impl HyperionRouter {
                 settled: false,
             };
             storage::set_claim(&env, &claim);
+            let reason = payout_failure_reason(&client, &this, amount);
+            storage::set_claim_failure(&env, id, reason);
             events::claim_parked(&env, &claim);
+            events::claim_payout_failure_v1(&env, &claim, reason);
             id
         };
 
@@ -213,8 +218,58 @@ impl HyperionRouter {
         }
         claim.settled = true;
         storage::set_claim(&env, &claim);
+        storage::set_claim_failure(&env, id, 0);
         events::claim_settled(&env, &claim, &settler);
         Ok(())
+    }
+
+    /// Attempt a bounded list independently. A refused payout leaves its full claim intact and
+    /// is returned as a result; successful earlier payouts are not rolled back by later refusals.
+    pub fn settle_claims(
+        env: Env,
+        settler: Address,
+        ids: Vec<u64>,
+    ) -> Result<Vec<ClaimSettlementResult>, HyperionError> {
+        settler.require_auth();
+        if ids.is_empty() || ids.len() > MAX_CLAIMS_PER_BATCH {
+            return Err(HyperionError::InvalidAmount);
+        }
+        let this = env.current_contract_address();
+        let mut results = vec![&env];
+        for id in ids.iter() {
+            let Some(mut claim) = storage::claim(&env, id) else {
+                results.push_back(ClaimSettlementResult { id, status: 1 });
+                continue;
+            };
+            if claim.settled {
+                results.push_back(ClaimSettlementResult { id, status: 2 });
+                continue;
+            }
+            let client = token::Client::new(&env, &claim.token);
+            if transfer_exact(&client, &this, &claim.recipient, claim.amount, true)? {
+                claim.settled = true;
+                storage::set_claim(&env, &claim);
+                storage::set_claim_failure(&env, id, 0);
+                events::claim_settled(&env, &claim, &settler);
+                results.push_back(ClaimSettlementResult { id, status: 0 });
+            } else {
+                let reason = payout_failure_reason(&client, &this, claim.amount);
+                storage::set_claim_failure(&env, id, reason);
+                events::claim_payout_failure_v1(&env, &claim, reason);
+                results.push_back(ClaimSettlementResult {
+                    id,
+                    status: if reason == 2 { 4 } else { 3 },
+                });
+            }
+        }
+        Ok(results)
+    }
+
+    pub fn claim_failure_reason(env: Env, id: u64) -> Result<u32, HyperionError> {
+        if storage::claim(&env, id).is_none() {
+            return Err(HyperionError::ClaimNotFound);
+        }
+        Ok(storage::claim_failure(&env, id))
     }
 
     // ---------------------------------------------------------------------------------------
@@ -793,6 +848,15 @@ fn transfer_exact(
         return Err(HyperionError::InvalidAmount);
     }
     Ok(delivered)
+}
+
+/// V1 codes: 1 recipient/token refused an exact payout; 2 router balance is short.
+fn payout_failure_reason(client: &token::Client, router: &Address, amount: i128) -> u32 {
+    if client.balance(router) < amount {
+        2
+    } else {
+        1
+    }
 }
 
 /// A built-in SAC reports contract error 13 for an absent account trustline.

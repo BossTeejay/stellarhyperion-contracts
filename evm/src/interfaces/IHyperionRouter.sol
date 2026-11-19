@@ -11,6 +11,7 @@ import {
     QueuedAction,
     RouteKind,
     RouteQuote,
+    ClaimSettlementResult,
     TokenConfig
 } from "../HyperionTypes.sol";
 
@@ -103,6 +104,11 @@ interface IHyperionRouter {
     event ClaimSettled(
         uint64 indexed id, address indexed recipient, address token, uint256 amount, address settledBy
     );
+
+    /// @notice Version 1 diagnostic for a claim payout that remains outstanding.
+    /// @dev The claim amount and fixed recipient remain in `pendingClaim`; this event adds only
+    /// the bounded reason so existing claim/indexing records remain valid.
+    event ClaimPayoutFailureV1(uint64 indexed id, uint8 reason, uint256 outstandingAmount, address recipient);
 
     /// @notice A privileged change was proposed, and the clock started.
     /// @param id The action's id.
@@ -209,6 +215,9 @@ interface IHyperionRouter {
     /// @dev Permissionless. The funds go to the claim's recipient no matter who calls.
     /// @param claimId The claim to clear.
     function settleClaim(uint64 claimId) external;
+
+    /// @notice Attempt a bounded set of claims independently, returning one outcome per input.
+    function settleClaims(uint64[] calldata claimIds) external returns (ClaimSettlementResult[] memory results);
 
     /// @notice What a transfer would cost and whether it would go through, without sending it.
     /// @dev Never reverts for a blocked route. It returns a reason instead, because the app has

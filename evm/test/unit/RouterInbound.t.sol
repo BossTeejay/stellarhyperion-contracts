@@ -11,7 +11,7 @@ import {
     ReplayedMessage,
     ZeroAddress
 } from "../../src/HyperionErrors.sol";
-import {Origin, PendingClaim, RouteKind} from "../../src/HyperionTypes.sol";
+import {ClaimSettlementResult, ClaimSettlementStatus, Origin, PendingClaim, RouteKind} from "../../src/HyperionTypes.sol";
 import {IHyperionRouter} from "../../src/interfaces/IHyperionRouter.sol";
 import {Fixture} from "../Fixture.sol";
 import {FeeOnTransferToken} from "../mocks/HostileCallers.sol";
@@ -356,6 +356,36 @@ contract RouterInboundTest is Fixture {
         // being burned by one early attempt.
         assertFalse(router.pendingClaim(claimId).settled);
         assertEq(usdc.balanceOf(address(router)), DELIVERY);
+    }
+
+    function test_batch_settlement_keeps_claims_independent_and_reports_each_outcome() public {
+        usdc.setBlocked(bob, true);
+        usdc.setBlocked(alice, true);
+        vm.startPrank(railReceiver);
+        uint64 first = router.bridgeIn(RouteKind.Cctp, address(usdc), DELIVERY, bob, _origin(MESSAGE_ID));
+        uint64 second = router.bridgeIn(
+            RouteKind.Cctp, address(usdc), DELIVERY, alice, _origin(keccak256("batch second"))
+        );
+        vm.stopPrank();
+        usdc.setBlocked(alice, false);
+
+        uint64[] memory ids = new uint64[](4);
+        ids[0] = first;
+        ids[1] = second;
+        ids[2] = 99;
+        ids[3] = second;
+        ClaimSettlementResult[] memory results = router.settleClaims(ids);
+
+        assertEq(uint8(results[0].status), uint8(ClaimSettlementStatus.RecipientRestricted));
+        assertEq(uint8(results[1].status), uint8(ClaimSettlementStatus.Settled));
+        assertEq(uint8(results[2].status), uint8(ClaimSettlementStatus.NotFound));
+        assertEq(uint8(results[3].status), uint8(ClaimSettlementStatus.AlreadySettled));
+        assertFalse(router.pendingClaim(first).settled);
+        assertTrue(router.pendingClaim(second).settled);
+        assertEq(router.claimFailureReason(first), 1);
+        assertEq(router.claimFailureReason(second), 0);
+        assertEq(usdc.balanceOf(address(router)), DELIVERY);
+        assertEq(usdc.balanceOf(alice), DELIVERY);
     }
 
     function test_claims_are_numbered_in_order() public {

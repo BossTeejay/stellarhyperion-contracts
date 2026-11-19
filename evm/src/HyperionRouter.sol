@@ -42,6 +42,8 @@ import {
     ActionKind,
     AddressKind,
     AdminAction,
+    ClaimSettlementResult,
+    ClaimSettlementStatus,
     Destination,
     Origin,
     OutboundRequest,
@@ -78,6 +80,7 @@ import {StellarAddress} from "./libraries/StellarAddress.sol";
 /// bridge do less: pausing departures, and lowering a flow limit. Nobody should have to file a
 /// change request to slow an exploit down.
 contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyGuard {
+    uint256 public constant MAX_CLAIMS_PER_BATCH = 50;
     using SafeERC20 for IERC20;
     using FlowGuard for FlowWindow;
 
@@ -154,6 +157,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     }
 
     mapping(uint64 claimId => PendingClaim claim) private _claims;
+    mapping(uint64 claimId => uint8 reason) public claimFailureReason;
     mapping(uint64 actionId => QueuedAction queued) private _actions;
 
     /// @param admin Holds every privileged power, all of them behind the timelock.
@@ -378,7 +382,10 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             createdAt: uint64(block.timestamp),
             settled: false
         });
+        uint8 reason = _payoutFailureReason(token, amount);
+        claimFailureReason[claimId] = reason;
         emit ClaimParked(claimId, recipient, token, amount, route, origin.chain, origin.nonce);
+        emit ClaimPayoutFailureV1(claimId, reason, amount, recipient);
         emit BridgeIn(route, recipient, token, amount, origin.chain, origin.nonce, origin.messageId);
     }
 
@@ -390,7 +397,52 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
 
         claim.settled = true;
         if (!_tryPay(claim.token, claim.recipient, claim.amount)) revert RecipientNotReady();
+        delete claimFailureReason[claimId];
         emit ClaimSettled(claimId, claim.recipient, claim.token, claim.amount, msg.sender);
+    }
+
+    /// @inheritdoc IHyperionRouter
+    /// @dev A failed transfer is recorded and does not revert earlier successful payouts in
+    /// this call. The recipient and amount always come from the stored claim.
+    function settleClaims(uint64[] calldata claimIds)
+        external
+        override
+        nonReentrant
+        returns (ClaimSettlementResult[] memory results)
+    {
+        uint256 count = claimIds.length;
+        if (count == 0 || count > MAX_CLAIMS_PER_BATCH) revert InvalidAmount();
+        results = new ClaimSettlementResult[](count);
+        for (uint256 i; i < count; ++i) {
+            uint64 id = claimIds[i];
+            PendingClaim storage claim = _claims[id];
+            if (claim.id == 0) {
+                results[i] = ClaimSettlementResult(id, ClaimSettlementStatus.NotFound);
+            } else if (claim.settled) {
+                results[i] = ClaimSettlementResult(id, ClaimSettlementStatus.AlreadySettled);
+            } else if (_tryPay(claim.token, claim.recipient, claim.amount)) {
+                claim.settled = true;
+                delete claimFailureReason[id];
+                emit ClaimSettled(id, claim.recipient, claim.token, claim.amount, msg.sender);
+                results[i] = ClaimSettlementResult(id, ClaimSettlementStatus.Settled);
+            } else {
+                uint8 reason = _payoutFailureReason(claim.token, claim.amount);
+                claimFailureReason[id] = reason;
+                emit ClaimPayoutFailureV1(id, reason, claim.amount, claim.recipient);
+                results[i] = ClaimSettlementResult(
+                    id,
+                    reason == 2
+                        ? ClaimSettlementStatus.InsufficientRouterBalance
+                        : ClaimSettlementStatus.RecipientRestricted
+                );
+            }
+        }
+    }
+
+    /// @dev V1 codes: 1 recipient/token refused an exact payout; 2 router balance is short.
+    function _payoutFailureReason(address token, uint256 amount) private view returns (uint8) {
+        if (IERC20(token).balanceOf(address(this)) < amount) return 2;
+        return 1;
     }
 
     // -------------------------------------------------------------------------------------

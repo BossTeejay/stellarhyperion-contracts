@@ -335,6 +335,45 @@ fn settling_a_claim_that_does_not_exist_says_so() {
 }
 
 #[test]
+fn bounded_batch_settlement_reports_each_result_and_keeps_restricted_claims_funded() {
+    let w = World::new();
+    let token = w.with_failable_token();
+    w.failable(&token).mint(&w.rail_id, &(HUNDRED * 2));
+    let other = Address::generate(&w.env);
+    w.failable(&token).set_blocked(&w.recipient, &true);
+    w.failable(&token).set_blocked(&other, &true);
+    for (nonce, recipient) in [(201, w.recipient.clone()), (202, other.clone())] {
+        assert_eq!(
+            w.rail().deliver(&Delivery {
+                route: RouteKind::Cctp,
+                token: token.clone(),
+                amount: HUNDRED,
+                recipient,
+                recipient_kind: AddressKind::Account,
+                source_chain: w.ethereum(),
+                source_nonce: nonce,
+            }),
+            if nonce == 201 { 1 } else { 2 }
+        );
+    }
+    w.failable(&token).set_blocked(&other, &false);
+    let outcomes = w
+        .router()
+        .settle_claims(&w.user, &soroban_sdk::vec![&w.env, 1, 2, 404, 2]);
+    assert_eq!(outcomes.len(), 4);
+    assert_eq!(outcomes.get(0).unwrap().status, 3);
+    assert_eq!(outcomes.get(1).unwrap().status, 0);
+    assert_eq!(outcomes.get(2).unwrap().status, 1);
+    assert_eq!(outcomes.get(3).unwrap().status, 2);
+    assert!(!w.router().get_claim(&1).settled);
+    assert!(w.router().get_claim(&2).settled);
+    assert_eq!(w.failable(&token).balance(&w.router_id), HUNDRED);
+    assert_eq!(w.failable(&token).balance(&other), HUNDRED);
+    assert_eq!(w.router().claim_failure_reason(&1), 1);
+    assert_eq!(w.router().claim_failure_reason(&2), 0);
+}
+
+#[test]
 fn claims_are_numbered_and_countable() {
     let w = World::new();
     let token = w.with_failable_token();

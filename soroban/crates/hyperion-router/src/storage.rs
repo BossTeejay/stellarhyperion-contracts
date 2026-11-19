@@ -38,6 +38,7 @@ pub enum DataKey {
     /// funds have already been burned on the far side, which is its own kind of loss.
     Processed(RouteKind, BytesN<32>),
     Claim(u64),
+    ClaimFailure(u64),
     ClaimSeq,
     Queued(u64),
     QueueSeq,
@@ -282,6 +283,12 @@ pub fn claim(env: &Env, id: u64) -> Option<PendingClaim> {
         env.storage()
             .persistent()
             .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        let failure_key = DataKey::ClaimFailure(id);
+        if env.storage().persistent().has(&failure_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&failure_key, BUMP_THRESHOLD, BUMP_TO);
+        }
     }
     record
 }
@@ -289,6 +296,21 @@ pub fn claim(env: &Env, id: u64) -> Option<PendingClaim> {
 pub fn set_claim(env: &Env, record: &PendingClaim) {
     let key = DataKey::Claim(record.id);
     env.storage().persistent().set(&key, record);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn claim_failure(env: &Env, id: u64) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ClaimFailure(id))
+        .unwrap_or(0)
+}
+
+pub fn set_claim_failure(env: &Env, id: u64, reason: u32) {
+    let key = DataKey::ClaimFailure(id);
+    env.storage().persistent().set(&key, &reason);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);

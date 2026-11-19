@@ -55,6 +55,17 @@ pub struct ClaimSettled {
     pub settled_by: Address,
 }
 
+/// Version 1 payout failure diagnostic. `reason`: 1 recipient/token refusal, 2 router balance short.
+#[contractevent(topics = ["hyperion", "claim_failure_v1"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimPayoutFailureV1 {
+    #[topic]
+    pub claim_id: u64,
+    pub reason: u32,
+    pub outstanding_amount: i128,
+    pub recipient: Address,
+}
+
 #[contractevent(topics = ["hyperion", "pause"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PauseSet {
@@ -156,6 +167,16 @@ pub fn claim_settled(env: &Env, claim: &PendingClaim, settled_by: &Address) {
         claim_id: claim.id,
         amount: claim.amount,
         settled_by: settled_by.clone(),
+    }
+    .publish(env);
+}
+
+pub fn claim_payout_failure_v1(env: &Env, claim: &PendingClaim, reason: u32) {
+    ClaimPayoutFailureV1 {
+        claim_id: claim.id,
+        reason,
+        outstanding_amount: claim.amount,
+        recipient: claim.recipient.clone(),
     }
     .publish(env);
 }
