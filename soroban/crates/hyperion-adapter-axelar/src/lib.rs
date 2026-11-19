@@ -57,7 +57,7 @@ mod test;
 
 use hyperion_core::{
     address::{assert_route_supports, bytes32_to_evm, evm_to_bytes32},
-    axelar::{InboundNote, OutboundNote},
+    axelar::{DestinationCapability, DestinationCapabilityRecord, InboundNote, OutboundNote},
     inbound::{Origin, Recipient, RouterClient},
     AdapterKeyCoverage, HyperionError, MaintenanceSummary, RouteKind, MAX_MAINTENANCE_BATCH,
 };
@@ -137,6 +137,7 @@ impl AxelarAdapter {
         }
         let link = storage::link(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
         let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
+        let manager_type = require_destination_capability(&env, &cfg, &link, &token_id)?;
         let recipient = bytes32_to_evm(&env, &destination)?;
 
         let this = env.current_contract_address();
@@ -146,7 +147,6 @@ impl AxelarAdapter {
         // Three of the four manager types burn straight out of this balance and only
         // `LockUnlock` moves them somewhere, so one read here buys an authorisation that names
         // exactly one call instead of a pair covering both.
-        let manager_type = its.token_manager_type(&token_id);
         let context = if manager_type.takes_by_burning() {
             ContractContext {
                 contract: token.clone(),
@@ -176,7 +176,6 @@ impl AxelarAdapter {
 
         let asset = token::Client::new(&env, &token);
         let sender_before = asset.balance(&this);
-        let manager_type = its.token_manager_type(&token_id);
         let manager = if manager_type.takes_by_burning() {
             this.clone()
         } else {
@@ -269,12 +268,12 @@ impl AxelarAdapter {
         }
         let link = storage::link(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
         let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
+        let manager_type = require_destination_capability(&env, &cfg, &link, &token_id)?;
         let recipient = bytes32_to_evm(&env, &destination)?;
         let its = InterchainTokenServiceClient::new(&env, &cfg.its);
         let destination_address = Bytes::from_array(&env, &recipient.to_array());
         let asset = token::Client::new(&env, &token);
         let sender_before = asset.balance(&sender);
-        let manager_type = its.token_manager_type(&token_id);
         let manager = if manager_type.takes_by_burning() {
             sender.clone()
         } else {
@@ -323,7 +322,7 @@ impl AxelarAdapter {
             token_id: token_id.clone(),
             axelar_chain: link.axelar_chain,
             destination_address,
-            token_manager_type: its.token_manager_type(&token_id),
+            token_manager_type: manager_type,
             note: None,
             router_nonce: nonce,
         }
@@ -391,9 +390,12 @@ impl AxelarAdapter {
         // Two names for one asset, and they have to agree. The mapping is also the allowlist,
         // so a token id nobody registered here stops at this line.
         let mapped = storage::token_of(&env, &token_id).ok_or(HyperionError::TokenNotMapped)?;
-        if mapped != token_address {
+        if mapped != token_address
+            || storage::token_id(&env, &token_address).as_ref() != Some(&token_id)
+        {
             return Err(HyperionError::TokenNotMapped);
         }
+        require_destination_capability(&env, &cfg, &link, &token_id)?;
 
         let note = InboundNote::decode(&env, &payload)?;
         assert_route_supports(cfg.route, note.destination.kind)?;
@@ -629,6 +631,51 @@ impl AxelarAdapter {
         Ok(())
     }
 
+    /// Admit the exact chain/token pair and ITS manager type reviewed for this adapter's route.
+    ///
+    /// Admission re-reads both ITS registrations. The record is bound to the current Axelar
+    /// chain name and peer, so relinking a chain requires a fresh admission instead of inheriting
+    /// trust from the previous destination.
+    pub fn set_destination_capability(
+        env: Env,
+        chain: String,
+        token: Address,
+        capability: DestinationCapability,
+    ) -> Result<(), HyperionError> {
+        let cfg = require_admin(&env)?;
+        if expected_capability(cfg.route)? != capability {
+            return Err(HyperionError::UnsupportedRoute);
+        }
+        let link = storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
+        let its = InterchainTokenServiceClient::new(&env, &cfg.its);
+        let registered = its
+            .try_registered_token_address(&token_id)
+            .map_err(|_| HyperionError::TokenNotMapped)?
+            .map_err(|_| HyperionError::TokenNotMapped)?;
+        if registered != token {
+            return Err(HyperionError::TokenNotMapped);
+        }
+        let token_manager_type = its.token_manager_type(&token_id);
+        let record = DestinationCapabilityRecord::new(
+            link.chain.clone(),
+            link.axelar_chain,
+            link.peer,
+            token_id.clone(),
+            token_manager_type,
+            capability,
+        );
+        storage::set_destination_capability(&env, &record);
+        events::DestinationCapabilitySet {
+            chain,
+            token_id,
+            token_manager_type,
+            capability,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     /// Hand the admin role to somebody else.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), HyperionError> {
         let mut cfg = require_admin(&env)?;
@@ -681,6 +728,16 @@ impl AxelarAdapter {
         storage::token_of(&env, &token_id).ok_or(HyperionError::TokenNotMapped)
     }
 
+    pub fn get_destination_capability(
+        env: Env,
+        chain: String,
+        token: Address,
+    ) -> Result<DestinationCapabilityRecord, HyperionError> {
+        let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
+        storage::destination_capability(&env, &chain, &token_id)
+            .ok_or(HyperionError::UnsupportedRoute)
+    }
+
     /// How ITS will take the funds for this asset, which is the one call this adapter
     /// authorises on the way out.
     pub fn manager_type_for(env: Env, token: Address) -> Result<TokenManagerType, HyperionError> {
@@ -706,6 +763,36 @@ fn require_admin(env: &Env) -> Result<Config, HyperionError> {
     let cfg = storage::config(env)?;
     cfg.admin.require_auth();
     Ok(cfg)
+}
+
+fn expected_capability(route: RouteKind) -> Result<DestinationCapability, HyperionError> {
+    match route {
+        RouteKind::AxelarIts => Ok(DestinationCapability::DirectItsTransfer),
+        RouteKind::AxelarGmp => Ok(DestinationCapability::GmpPayload),
+        _ => Err(HyperionError::UnsupportedRoute),
+    }
+}
+
+fn require_destination_capability(
+    env: &Env,
+    cfg: &Config,
+    link: &ChainLink,
+    token_id: &BytesN<32>,
+) -> Result<TokenManagerType, HyperionError> {
+    let record = storage::destination_capability(env, &link.chain, token_id)
+        .ok_or(HyperionError::UnsupportedRoute)?;
+    let manager_type =
+        InterchainTokenServiceClient::new(env, &cfg.its).token_manager_type(token_id);
+    if record.chain != link.chain
+        || record.axelar_chain != link.axelar_chain
+        || record.peer != link.peer
+        || record.token_id != token_id.clone()
+        || record.token_manager_type != manager_type
+        || record.capability != expected_capability(cfg.route)?
+    {
+        return Err(HyperionError::UnsupportedRoute);
+    }
+    Ok(manager_type)
 }
 
 /// The key the router keys replay protection on.

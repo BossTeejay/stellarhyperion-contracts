@@ -46,6 +46,20 @@ import {StellarAddress} from "../libraries/StellarAddress.sol";
 contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2Step {
     using SafeERC20 for IERC20;
 
+    /// @notice The delivery surface admitted for a chain/token-manager pair.
+    enum DestinationCapability {
+        Unsupported,
+        DirectItsTransfer,
+        GmpPayload
+    }
+
+    struct CapabilityRecord {
+        uint8 tokenManagerType;
+        DestinationCapability capability;
+        bytes32 peerHash;
+        bool configured;
+    }
+
     /// @notice The value ITS requires a receiving contract to return from `executeWithInterchainToken`.
     /// @dev What ITS insists a receiving contract hands back. Not reverting is not enough: Axelar
     /// wants proof the contract meant to accept this, rather than having a fallback that swallowed
@@ -85,6 +99,11 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     /// linked. An unlinked token is a token this adapter will refuse to send.
     mapping(address token => bytes32 tokenId) public tokenIdOf;
 
+    /// @dev The EVM adapter remains closed until operators independently validate this rail.
+    bool public developmentGateOpen;
+    bytes32 public developmentValidationEvidence;
+    mapping(bytes32 key => CapabilityRecord record) private _capabilities;
+
     /// @notice A chain became reachable.
     event PeerConfigured(string chain, string axelarChain, bytes peer);
 
@@ -93,6 +112,12 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
 
     /// @notice A token became routable over ITS.
     event TokenLinked(address indexed token, bytes32 tokenId);
+    /// @notice A chain/token-manager pair was admitted for the GMP payload surface.
+    event DestinationCapabilitySet(
+        string chain, bytes32 indexed tokenId, uint8 tokenManagerType, DestinationCapability capability
+    );
+    /// @notice EVM development use was enabled or disabled with a validation evidence hash.
+    event DevelopmentGateSet(bool enabled, bytes32 validationEvidence);
 
     /// @notice A transfer was handed to ITS.
     event TransferSubmitted(
@@ -136,7 +161,7 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     /// @inheritdoc IRailAdapter
     function supportsChain(string calldata chain) external view override returns (bool) {
         Peer storage peer = _peers[chain];
-        return peer.configured && peer.enabled;
+        return developmentGateOpen && peer.configured && peer.enabled;
     }
 
     /// @inheritdoc IRailAdapter
@@ -156,6 +181,7 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         returns (bytes32)
     {
         if (msg.sender != ROUTER) revert Unauthorized();
+        if (!developmentGateOpen) revert RailNotConfigured();
         if (amount == 0) revert InvalidAmount();
 
         bytes32 tokenId = tokenIdOf[token];
@@ -164,6 +190,7 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         Peer memory peer = _peers[destination.chain];
         if (!peer.configured) revert UnknownChain();
         if (!peer.enabled) revert RailNotConfigured();
+        _requireCapability(destination.chain, tokenId, peer);
 
         (AddressKind kind,,) = StellarAddress.parse(destination.strkey);
         bytes memory note = HyperionNotes.encodeInboundNote(kind, destination.strkey, nonce);
@@ -204,6 +231,7 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         uint256 amount
     ) external override returns (bytes32) {
         if (msg.sender != address(ITS)) revert Unauthorized();
+        if (!developmentGateOpen) revert RailNotConfigured();
         if (amount == 0) revert InvalidAmount();
         if (tokenIdOf[token] != tokenId) revert TokenNotMapped();
 
@@ -214,6 +242,7 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         // any connected chain can call ITS with a payload, so this is the check that turns "a
         // transfer arrived" into "Hyperion sent this".
         if (keccak256(sourceAddress) != keccak256(peer.peer)) revert UnexpectedRailContract();
+        _requireCapability(chain, tokenId, peer);
 
         (address recipient, uint64 sourceNonce) = HyperionNotes.decodeOutboundNote(data);
 
@@ -284,6 +313,45 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         emit PeerEnabled(chain, enabled);
     }
 
+    /// @notice Open or close EVM development use after independent validation.
+    /// @dev The active deployment is Stellar Testnet outbound ITS/CCTP. This evidence hash is an
+    /// operator-supplied reference, not an on-chain proof; do not open the gate before separate
+    /// EVM and destination validation has been completed.
+    function setDevelopmentGate(bool enabled, bytes32 validationEvidence) external onlyOwner {
+        if (enabled && validationEvidence == bytes32(0)) revert RailNotConfigured();
+        developmentGateOpen = enabled;
+        developmentValidationEvidence = enabled ? validationEvidence : bytes32(0);
+        emit DevelopmentGateSet(enabled, developmentValidationEvidence);
+    }
+
+    /// @notice Admit a GMP payload for one linked chain/token-manager pair.
+    /// @dev The on-chain checks bind the admission to the configured peer and registered local
+    /// token. The owner supplies the manager type only after independently validating that pair.
+    function setDestinationCapability(
+        string calldata chain,
+        address token,
+        uint8 tokenManagerType,
+        DestinationCapability capability
+    ) external onlyOwner {
+        if (capability != DestinationCapability.GmpPayload) revert RailNotConfigured();
+        if (tokenManagerType > 4 || tokenManagerType == 3) revert RailNotConfigured();
+        Peer storage peer = _peers[chain];
+        if (!peer.configured) revert RailNotConfigured();
+        bytes32 tokenId = tokenIdOf[token];
+        if (tokenId == bytes32(0) || ITS.registeredTokenAddress(tokenId) != token) {
+            revert TokenNotMapped();
+        }
+
+        bytes32 key = _capabilityKey(chain, tokenId);
+        _capabilities[key] = CapabilityRecord({
+            tokenManagerType: tokenManagerType,
+            capability: capability,
+            peerHash: keccak256(peer.peer),
+            configured: true
+        });
+        emit DestinationCapabilitySet(chain, tokenId, tokenManagerType, capability);
+    }
+
     /// @notice Point a local token at its ITS token id.
     /// @dev Once only. An id is the same value on every chain ITS connects, so getting it right
     /// once is the whole job, and being able to change it later is only useful to somebody who
@@ -304,6 +372,15 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         return _peers[chain];
     }
 
+    /// @notice Read the admitted capability for a chain/token pair.
+    function capabilityOf(string calldata chain, bytes32 tokenId)
+        external
+        view
+        returns (CapabilityRecord memory)
+    {
+        return _capabilities[_capabilityKey(chain, tokenId)];
+    }
+
     /// @notice Hyperion's own name for whatever Axelar calls a chain.
     function chainForAxelarName(string calldata axelarChain) external view returns (string memory) {
         return _byAxelarName[axelarChain];
@@ -314,5 +391,17 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         if (balance == 0) return;
         (bool sent,) = payable(ROUTER).call{value: balance}("");
         if (!sent) revert RefundFailed();
+    }
+
+    function _requireCapability(string memory chain, bytes32 tokenId, Peer memory peer) private view {
+        CapabilityRecord storage record = _capabilities[_capabilityKey(chain, tokenId)];
+        if (
+            !record.configured || record.capability != DestinationCapability.GmpPayload
+                || record.peerHash != keccak256(peer.peer)
+        ) revert RailNotConfigured();
+    }
+
+    function _capabilityKey(string memory chain, bytes32 tokenId) private pure returns (bytes32) {
+        return keccak256(abi.encode(chain, tokenId));
     }
 }

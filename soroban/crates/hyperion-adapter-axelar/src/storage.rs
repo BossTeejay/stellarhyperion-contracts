@@ -1,4 +1,4 @@
-use hyperion_core::HyperionError;
+use hyperion_core::{axelar::DestinationCapabilityRecord, HyperionError};
 use soroban_sdk::{contracttype, Address, BytesN, Env, String};
 
 use crate::types::{ChainLink, Config};
@@ -23,6 +23,8 @@ pub enum DataKey {
     /// about; an unmapped one is refused here, which is the correct behaviour on the day Axelar
     /// registers a token nobody on this side has looked at yet.
     Token(BytesN<32>),
+    /// An admitted chain/token pair, bound to its reviewed peer and manager type.
+    DestinationCapability(String, BytesN<32>),
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -109,6 +111,29 @@ pub fn set_token(env: &Env, token: &Address, token_id: &BytesN<32>) {
     env.storage()
         .persistent()
         .extend_ttl(&tok_key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn destination_capability(
+    env: &Env,
+    chain: &String,
+    token_id: &BytesN<32>,
+) -> Option<DestinationCapabilityRecord> {
+    let key = DataKey::DestinationCapability(chain.clone(), token_id.clone());
+    let found: Option<DestinationCapabilityRecord> = env.storage().persistent().get(&key);
+    if found.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    }
+    found
+}
+
+pub fn set_destination_capability(env: &Env, record: &DestinationCapabilityRecord) {
+    let key = DataKey::DestinationCapability(record.chain.clone(), record.token_id.clone());
+    env.storage().persistent().set(&key, record);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
 }
 
 /// Top a lane's lifetime back up without changing it.

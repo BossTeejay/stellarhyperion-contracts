@@ -97,6 +97,10 @@ contract AxelarItsAdapterTest is Fixture {
         vm.startPrank(admin);
         adapter.setPeer(STELLAR, AXELAR_STELLAR, peerAddress);
         adapter.linkToken(address(usdc), TOKEN_ID);
+        adapter.setDestinationCapability(
+            STELLAR, address(usdc), 4, AxelarItsAdapter.DestinationCapability.GmpPayload
+        );
+        adapter.setDevelopmentGate(true, keccak256("independently validated test fixture"));
         vm.stopPrank();
 
         // The router only takes an arrival from the contract it was told speaks for this rail.
@@ -134,6 +138,12 @@ contract AxelarItsAdapterTest is Fixture {
         new AxelarItsAdapter(address(router), address(its), address(0), admin);
     }
 
+    function test_evm_development_gate_starts_closed() public {
+        AxelarItsAdapter unvalidated =
+            new AxelarItsAdapter(address(router), address(its), address(gasService), admin);
+        assertFalse(unvalidated.developmentGateOpen());
+    }
+
     function test_route_is_axelar_its() public view {
         assertEq(uint256(adapter.route()), uint256(RouteKind.AxelarIts));
     }
@@ -163,6 +173,23 @@ contract AxelarItsAdapterTest is Fixture {
         assertTrue(peer.enabled);
         assertTrue(adapter.supportsChain(STELLAR));
         assertEq(adapter.chainForAxelarName(AXELAR_STELLAR), STELLAR);
+    }
+
+    function test_dispatch_refuses_a_pair_without_an_admitted_capability() public {
+        AxelarItsAdapter unadmitted =
+            new AxelarItsAdapter(address(router), address(its), address(gasService), admin);
+        vm.startPrank(admin);
+        unadmitted.setPeer(STELLAR, AXELAR_STELLAR, peerAddress);
+        unadmitted.linkToken(address(usdc), TOKEN_ID);
+        unadmitted.setDevelopmentGate(true, keccak256("independently validated test fixture"));
+        vm.stopPrank();
+
+        usdc.mint(address(unadmitted), AMOUNT);
+        vm.prank(address(router));
+        vm.expectRevert(RailNotConfigured.selector);
+        unadmitted.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
+        assertEq(usdc.balanceOf(address(unadmitted)), AMOUNT);
+        assertEq(its.sentCount(), 0);
     }
 
     /// @dev Axelar calls BNB Chain "binance". Hyperion's names are its own, and the whole reason
@@ -486,6 +513,10 @@ contract AxelarItsAdapterTest is Fixture {
         vm.startPrank(admin);
         orphan.setPeer(STELLAR, AXELAR_STELLAR, peerAddress);
         orphan.linkToken(address(usdc), TOKEN_ID);
+        orphan.setDestinationCapability(
+            STELLAR, address(usdc), 4, AxelarItsAdapter.DestinationCapability.GmpPayload
+        );
+        orphan.setDevelopmentGate(true, keccak256("independently validated test fixture"));
         vm.stopPrank();
 
         usdc.mint(address(orphan), AMOUNT);

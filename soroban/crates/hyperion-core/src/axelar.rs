@@ -17,7 +17,7 @@
 //! and it lets an indexer say *this delivery is that transfer* rather than guessing from amounts
 //! and timestamps.
 
-use soroban_sdk::{Bytes, BytesN, Env};
+use soroban_sdk::{contracttype, Bytes, BytesN, Env, String};
 
 use crate::error::HyperionError;
 use crate::strkey::StrkeyDestination;
@@ -27,6 +27,72 @@ use crate::strkey::StrkeyDestination;
 /// Shared with [`crate::cctp::HOOK_VERSION`] on purpose. Two rails, one envelope version, so a
 /// reader never has to remember which rail numbers its payloads differently from the other.
 pub const NOTE_VERSION: u8 = 1;
+
+/// The two materially different ways ITS can deliver a token to a destination.
+///
+/// A bare ITS transfer names the recipient directly and carries no callback payload. GMP
+/// delivery names a contract and carries a Hyperion note that contract must authenticate and
+/// interpret. They are never interchangeable.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum DestinationCapability {
+    DirectItsTransfer = 0,
+    GmpPayload = 1,
+}
+
+/// Axelar's token-manager discriminator.
+///
+/// The unit-only `#[repr(u32)]` values match ITS's wire representation. Three is intentionally
+/// unused: `LockUnlockFee` is commented out in the Stellar ITS interface.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum TokenManagerType {
+    NativeInterchainToken = 0,
+    MintBurnFrom = 1,
+    LockUnlock = 2,
+    MintBurn = 4,
+}
+
+impl TokenManagerType {
+    /// Whether ITS takes funds by burning them out of the sender's balance.
+    pub fn takes_by_burning(&self) -> bool {
+        !matches!(self, TokenManagerType::LockUnlock)
+    }
+}
+
+/// An admin-admitted chain/token pair, bound to the exact peer and manager type reviewed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DestinationCapabilityRecord {
+    pub chain: String,
+    pub axelar_chain: String,
+    pub peer: BytesN<20>,
+    pub token_id: BytesN<32>,
+    pub token_manager_type: TokenManagerType,
+    pub capability: DestinationCapability,
+}
+
+impl DestinationCapabilityRecord {
+    pub fn new(
+        chain: String,
+        axelar_chain: String,
+        peer: BytesN<20>,
+        token_id: BytesN<32>,
+        token_manager_type: TokenManagerType,
+        capability: DestinationCapability,
+    ) -> Self {
+        Self {
+            chain,
+            axelar_chain,
+            peer,
+            token_id,
+            token_manager_type,
+            capability,
+        }
+    }
+}
 
 /// Version, twenty byte address, eight byte nonce.
 pub const OUTBOUND_NOTE_LEN: u32 = 29;

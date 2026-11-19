@@ -15,6 +15,8 @@
 
 use soroban_sdk::{contractclient, contracttype, Address, Bytes, BytesN, Env, String};
 
+pub use hyperion_core::axelar::TokenManagerType;
+
 /// What Axelar charges gas in, and how much of it.
 ///
 /// Paid transfers attach this exact amount through ITS; the source account authorizes it.
@@ -23,33 +25,6 @@ use soroban_sdk::{contractclient, contracttype, Address, Bytes, BytesN, Env, Str
 pub struct Token {
     pub address: Address,
     pub amount: i128,
-}
-
-/// How a token id is backed on this chain, which decides how ITS takes funds from a sender.
-///
-/// A unit only enum carrying `#[repr(u32)]` under `#[contracttype]` encodes as a plain `u32`, so
-/// matching Axelar's discriminants here is enough for wire compatibility without linking their
-/// crate. The gap at three is real: Axelar has `LockUnlockFee = 3` commented out because Stellar
-/// ITS does not support it, and leaving the hole makes that visible rather than renumbering
-/// around it.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum TokenManagerType {
-    NativeInterchainToken = 0,
-    MintBurnFrom = 1,
-    LockUnlock = 2,
-    MintBurn = 4,
-}
-
-impl TokenManagerType {
-    /// Whether ITS takes funds by burning them out of the sender's balance.
-    ///
-    /// Three of the four do. Only `LockUnlock` moves the funds somewhere, which is the one case
-    /// where the authorisation this adapter grants has to name a third party.
-    pub fn takes_by_burning(&self) -> bool {
-        !matches!(self, TokenManagerType::LockUnlock)
-    }
 }
 
 #[contractclient(name = "InterchainTokenServiceClient")]
