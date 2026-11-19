@@ -4,7 +4,7 @@ use hyperion_core::{AddressKind, HyperionError, RouteKind};
 use soroban_sdk::{testutils::Address as _, Address, String};
 
 use super::doubles::{message_id, Delivery};
-use super::setup::{World, HUNDRED};
+use super::setup::{World, FLOW_LIMIT, HUNDRED};
 
 #[test]
 fn an_attested_delivery_reaches_the_recipient() {
@@ -444,4 +444,90 @@ fn the_source_chain_name_is_kept_on_the_claim_for_the_indexer() {
     let claim = w.router().get_claim(&1);
     assert_eq!(claim.source_chain, chain);
     assert_eq!(claim.route, RouteKind::Allbridge);
+}
+
+#[test]
+fn a_fee_on_transfer_token_is_refused_on_inbound_and_creates_no_false_claims() {
+    let w = World::new();
+    let fot_id = w.env.register(super::doubles::FeeOnTransferToken, ());
+    let fot = super::doubles::FeeOnTransferTokenClient::new(&w.env, &fot_id);
+    fot.init(&7, &500);
+    w.register_token(fot_id.clone(), 7, FLOW_LIMIT);
+    fot.mint(&w.rail_id, &HUNDRED);
+
+    let res = w.rail().try_deliver(&super::doubles::Delivery {
+        route: RouteKind::Cctp,
+        token: fot_id.clone(),
+        amount: HUNDRED,
+        recipient: w.recipient.clone(),
+        recipient_kind: hyperion_core::AddressKind::Account,
+        source_chain: w.ethereum(),
+        source_nonce: 99,
+    });
+    assert_eq!(res, Err(Ok(HyperionError::InvalidAmount)));
+    assert_eq!(w.router().claim_count(), 0);
+}
+
+#[test]
+fn hostile_recipient_credit_rolls_back_delivery_replay_and_balances() {
+    let w = World::new();
+    let id = w.env.register(super::doubles::FeeOnTransferToken, ());
+    let fot = super::doubles::FeeOnTransferTokenClient::new(&w.env, &id);
+    fot.init(&7, &0);
+    fot.configure(&w.recipient, &500, &false);
+    w.register_token(id.clone(), 7, FLOW_LIMIT);
+    fot.mint(&w.rail_id, &HUNDRED);
+    let delivery = Delivery {
+        route: RouteKind::Cctp,
+        token: id.clone(),
+        amount: HUNDRED,
+        recipient: w.recipient.clone(),
+        recipient_kind: hyperion_core::AddressKind::Account,
+        source_chain: w.ethereum(),
+        source_nonce: 100,
+    };
+    assert_eq!(
+        w.rail().try_deliver(&delivery),
+        Err(Ok(HyperionError::InvalidAmount))
+    );
+    assert_eq!(fot.balance(&w.rail_id), HUNDRED);
+    assert_eq!(fot.balance(&w.router_id), 0);
+    assert_eq!(fot.balance(&w.recipient), 0);
+    assert_eq!(w.router().claim_count(), 0);
+    fot.configure(&w.recipient, &0, &false);
+    w.rail().deliver(&delivery);
+    assert_eq!(fot.balance(&w.recipient), HUNDRED);
+}
+
+#[test]
+fn hostile_claim_credit_stays_funded_and_unsettled_until_exact_delivery() {
+    let w = World::new();
+    let id = w.env.register(super::doubles::FeeOnTransferToken, ());
+    let fot = super::doubles::FeeOnTransferTokenClient::new(&w.env, &id);
+    fot.init(&7, &0);
+    fot.configure(&w.recipient, &0, &false);
+    fot.set_blocked(&w.recipient, &true);
+    w.register_token(id.clone(), 7, FLOW_LIMIT);
+    fot.mint(&w.rail_id, &HUNDRED);
+    let claim = w.rail().deliver(&Delivery {
+        route: RouteKind::Cctp,
+        token: id.clone(),
+        amount: HUNDRED,
+        recipient: w.recipient.clone(),
+        recipient_kind: hyperion_core::AddressKind::Account,
+        source_chain: w.ethereum(),
+        source_nonce: 101,
+    });
+    fot.set_blocked(&w.recipient, &false);
+    fot.configure(&w.recipient, &500, &false);
+    assert_eq!(
+        w.router().try_settle_claim(&w.user, &claim),
+        Err(Ok(HyperionError::InvalidAmount))
+    );
+    assert!(!w.router().get_claim(&claim).settled);
+    assert_eq!(fot.balance(&w.router_id), HUNDRED);
+    assert_eq!(fot.balance(&w.recipient), 0);
+    fot.configure(&w.recipient, &0, &false);
+    w.router().settle_claim(&w.user, &claim);
+    assert_eq!(fot.balance(&w.recipient), HUNDRED);
 }

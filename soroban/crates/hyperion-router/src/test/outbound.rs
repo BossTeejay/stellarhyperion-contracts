@@ -4,7 +4,7 @@ use hyperion_core::{HyperionError, RouteKind};
 use soroban_sdk::{testutils::Address as _, Address, String};
 
 use super::doubles::{evm_destination, not_an_evm_address};
-use super::setup::{World, EVM_DECIMALS, HUNDRED};
+use super::setup::{World, EVM_DECIMALS, FLOW_LIMIT, HUNDRED};
 use crate::types::{AdminAction, Destination, OutboundRequest, RouteConfig};
 
 fn dest(world: &World) -> Destination {
@@ -620,4 +620,76 @@ fn transfers_respect_route_max_single_transfer() {
         },
     );
     assert_eq!(nonce_under, 2);
+}
+
+#[test]
+fn a_fee_on_transfer_token_is_refused_on_outbound_and_leaves_no_false_accounting() {
+    let w = World::new();
+    let fot_id = w.env.register(super::doubles::FeeOnTransferToken, ());
+    let fot = super::doubles::FeeOnTransferTokenClient::new(&w.env, &fot_id);
+    fot.init(&7, &500); // 7 decimals, 5% fee on transfer
+    w.register_token(fot_id.clone(), 7, FLOW_LIMIT);
+
+    fot.mint(&w.user, &HUNDRED);
+    let user_before = fot.balance(&w.user);
+    let router_before = fot.balance(&w.router_id);
+    let rail_before = fot.balance(&w.rail_id);
+
+    // Attempting bridge_out with a fee-on-transfer token must revert with InvalidAmount
+    let res = w.router().try_bridge_out(
+        &w.user,
+        &OutboundRequest {
+            token: fot_id.clone(),
+            amount: HUNDRED,
+            route: RouteKind::Cctp,
+            destination: dest(&w),
+            destination_decimals: EVM_DECIMALS,
+            min_destination_amount: 0,
+        },
+    );
+    assert_eq!(res, Err(Ok(HyperionError::InvalidAmount)));
+
+    // Verify atomic source transaction preservation: no state or balance corruption
+    assert_eq!(fot.balance(&w.user), user_before);
+    assert_eq!(fot.balance(&w.router_id), router_before);
+    assert_eq!(fot.balance(&w.rail_id), rail_before);
+    assert_eq!(w.rail().dispatch_count(), 0);
+    assert_eq!(w.router().last_out_nonce(), 0);
+}
+
+#[test]
+fn hostile_fee_adapter_credit_and_extra_sender_debit_are_atomic_refusals() {
+    let w = World::new();
+    let id = w.env.register(super::doubles::FeeOnTransferToken, ());
+    let fot = super::doubles::FeeOnTransferTokenClient::new(&w.env, &id);
+    fot.init(&7, &0);
+    w.register_token(id.clone(), 7, FLOW_LIMIT);
+    fot.mint(&w.user, &HUNDRED);
+    let request = OutboundRequest {
+        token: id.clone(),
+        amount: HUNDRED,
+        route: RouteKind::Cctp,
+        destination: dest(&w),
+        destination_decimals: EVM_DECIMALS,
+        min_destination_amount: 0,
+    };
+    for target in [&w.treasury, &w.rail_id] {
+        fot.configure(target, &500, &false);
+        assert_eq!(
+            w.router().try_bridge_out(&w.user, &request),
+            Err(Ok(HyperionError::InvalidAmount))
+        );
+        assert_eq!(fot.balance(&w.user), HUNDRED);
+        assert_eq!(fot.balance(&w.router_id), 0);
+        assert_eq!(fot.balance(&w.rail_id), 0);
+        assert_eq!(fot.balance(&w.treasury), 0);
+        assert_eq!(w.router().last_out_nonce(), 0);
+        assert_eq!(w.rail().dispatch_count(), 0);
+    }
+    fot.configure(&w.treasury, &0, &true);
+    assert_eq!(
+        w.router().try_bridge_out(&w.user, &request),
+        Err(Ok(HyperionError::InvalidAmount))
+    );
+    assert_eq!(fot.balance(&w.user), HUNDRED);
 }

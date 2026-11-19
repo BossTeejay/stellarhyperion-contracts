@@ -78,6 +78,66 @@ contract ReenteringToken {
     }
 }
 
+/// @title A token that deducts a fee on transfer
+/// @notice Delivers less than the requested transfer amount, violating router accounting assumptions.
+contract FeeOnTransferToken {
+    string public name = "Fee On Transfer";
+    string public symbol = "FOT";
+    uint8 public decimals = 6;
+    uint256 public feeBps = 500; // 5% fee
+    address public feeTo;
+    bool public extraDebit;
+    bool public falseAfterMove;
+    mapping(address holder => bool blocked) public blocked;
+
+    function configure(address to, uint256 bps, bool extra, bool returnFalse) external {
+        feeTo = to;
+        feeBps = bps;
+        extraDebit = extra;
+        falseAfterMove = returnFalse;
+    }
+
+    function setBlocked(address to, bool on) external {
+        blocked[to] = on;
+    }
+
+    mapping(address holder => uint256 balance) public balanceOf;
+    mapping(address holder => mapping(address spender => uint256 amount)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        _move(msg.sender, to, amount);
+        return !falseAfterMove;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        if (allowance[from][msg.sender] != type(uint256).max) {
+            require(allowance[from][msg.sender] >= amount, "allowance");
+            allowance[from][msg.sender] -= amount;
+        }
+        _move(from, to, amount);
+        return true;
+    }
+
+    function _move(address from, address to, uint256 amount) private {
+        require(balanceOf[from] >= amount, "balance");
+        require(!blocked[to], "blocked");
+        uint256 fee = feeTo == address(0) || feeTo == to ? (amount * feeBps) / 10_000 : 0;
+        uint256 net = amount - fee;
+        balanceOf[from] -= amount + (extraDebit ? 1 : 0);
+        balanceOf[to] += net;
+        balanceOf[address(0xdead)] += fee;
+    }
+}
+
 /// @title A router wired to something that cannot take its change back
 /// @notice No receive, no fallback, so anything an adapter tries to hand back bounces.
 /// @dev The real router has a `receive`, which makes this a stand in for a deployment pointed at

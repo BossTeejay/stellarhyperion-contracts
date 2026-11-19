@@ -411,6 +411,16 @@ contract RouterAdminTest is Fixture {
         router.queueAction(action);
     }
 
+    function test_a_token_cannot_be_registered_with_mismatched_decimals() public {
+        AdminAction memory action = _empty(ActionKind.RegisterToken);
+        action.subject = address(usdc);
+        action.amount = FLOW_LIMIT;
+        action.decimals = 7;
+        vm.prank(admin);
+        vm.expectRevert(InvalidDecimals.selector);
+        router.queueAction(action);
+    }
+
     function test_a_flow_limit_raise_has_to_actually_raise_it() public {
         AdminAction memory action = _empty(ActionKind.RaiseTokenFlowLimit);
         action.subject = address(usdc);

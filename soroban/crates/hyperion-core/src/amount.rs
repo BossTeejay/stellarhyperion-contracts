@@ -143,6 +143,26 @@ pub fn apply_fee(amount: i128, fee_bps: u32) -> Result<FeeSplit, HyperionError> 
     Ok(FeeSplit { net, fee })
 }
 
+/// Check that an actual transferred amount matches the expected exact amount,
+/// refusing fee-on-transfer, deflationary, or hostile balance mutations that
+/// violate router accounting assumptions.
+pub fn assert_exact_transfer(
+    balance_before: i128,
+    balance_after: i128,
+    expected_amount: i128,
+) -> Result<(), HyperionError> {
+    if expected_amount < 0 || balance_before < 0 || balance_after < 0 {
+        return Err(HyperionError::InvalidAmount);
+    }
+    let diff = balance_after
+        .checked_sub(balance_before)
+        .ok_or(HyperionError::DecimalOverflow)?;
+    if diff != expected_amount {
+        return Err(HyperionError::InvalidAmount);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +315,21 @@ mod tests {
         assert_eq!(apply_fee(-5, 10), Err(HyperionError::InvalidAmount));
     }
 
+    #[test]
+    fn exact_transfer_rejects_negative_balances_and_amounts() {
+        for (before, after, amount) in [(-1, 0, 1), (0, -1, 1), (0, 0, -1)] {
+            assert_eq!(
+                assert_exact_transfer(before, after, amount),
+                Err(HyperionError::InvalidAmount)
+            );
+        }
+        assert_eq!(assert_exact_transfer(i128::MAX - 1, i128::MAX, 1), Ok(()));
+        assert_eq!(
+            assert_exact_transfer(i128::MAX, 0, 1),
+            Err(HyperionError::InvalidAmount)
+        );
+    }
+
     proptest! {
         /// Scaling up then back down is lossless, always.
         #[test]
@@ -336,6 +371,28 @@ mod tests {
             prop_assert!(fee >= 0);
             prop_assert!(net > 0);
             prop_assert!(fee <= amount / 100);
+        }
+
+        #[test]
+        fn exact_transfer_assertions(
+            before in 0i128..1_000_000_000i128,
+            transfer in 0i128..1_000_000_000i128,
+            fee in 1i128..10_000i128,
+        ) {
+            // Exact transfer succeeds
+            prop_assert!(assert_exact_transfer(before, before + transfer, transfer).is_ok());
+            // Fee on transfer (receiving less) fails
+            if transfer > fee {
+                prop_assert_eq!(
+                    assert_exact_transfer(before, before + transfer - fee, transfer),
+                    Err(HyperionError::InvalidAmount)
+                );
+            }
+            // Hostile balance inflation (receiving more) fails
+            prop_assert_eq!(
+                assert_exact_transfer(before, before + transfer + fee, transfer),
+                Err(HyperionError::InvalidAmount)
+            );
         }
     }
 }

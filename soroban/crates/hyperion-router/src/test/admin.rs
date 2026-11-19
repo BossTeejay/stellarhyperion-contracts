@@ -454,6 +454,44 @@ fn registering_a_token_turns_it_on_with_the_limit_it_was_given() {
 }
 
 #[test]
+fn registering_a_token_with_decimals_mismatch_is_refused_and_does_not_activate() {
+    let w = World::bare();
+    // Real SAC has 7 decimals. Registering with 6 must fail validation before activation.
+    assert_eq!(
+        w.router().try_queue_action(
+            &w.admin,
+            &AdminAction::RegisterToken(w.token_id.clone(), 6, 12_345),
+        ),
+        Err(Ok(HyperionError::InvalidDecimals))
+    );
+    assert_eq!(
+        w.router().try_get_token(&w.token_id),
+        Err(Ok(HyperionError::TokenNotRegistered))
+    );
+}
+
+#[test]
+fn check_token_behavior_diagnostic_surface_validates_admission() {
+    let w = World::bare();
+    // Matching decimals and valid token contract succeeds
+    assert_eq!(
+        w.router().try_check_token_behavior(&w.token_id, &7),
+        Ok(Ok(()))
+    );
+    // Mismatched decimals fails
+    assert_eq!(
+        w.router().try_check_token_behavior(&w.token_id, &6),
+        Err(Ok(HyperionError::InvalidDecimals))
+    );
+    // Non-token address fails
+    let random_addr = Address::generate(&w.env);
+    assert_eq!(
+        w.router().try_check_token_behavior(&random_addr, &7),
+        Err(Ok(HyperionError::InvalidDecimals))
+    );
+}
+
+#[test]
 fn the_flow_window_length_can_be_changed_and_the_counters_follow_it() {
     let w = World::new();
     w.run_action(AdminAction::SetFlowWindow(60));
@@ -591,5 +629,45 @@ fn negative_route_limit_is_refused_at_queue_time() {
             ),
         ),
         Err(Ok(HyperionError::InvalidLimit))
+    );
+}
+
+#[test]
+fn an_error_valued_balance_is_rejected_before_registration() {
+    let w = World::bare();
+    let id = w.env.register(super::doubles::UnreadableBalanceToken, ());
+    assert_eq!(
+        w.router().try_check_token_behavior(&id, &7),
+        Err(Ok(HyperionError::InvalidAmount))
+    );
+    assert_eq!(
+        w.router()
+            .try_queue_action(&w.admin, &AdminAction::RegisterToken(id.clone(), 7, 100)),
+        Err(Ok(HyperionError::InvalidAmount))
+    );
+    assert_eq!(
+        w.router().try_get_token(&id),
+        Err(Ok(HyperionError::TokenNotRegistered))
+    );
+}
+
+#[test]
+fn metadata_is_rechecked_after_the_registration_timelock() {
+    let w = World::bare();
+    let id = w.env.register(super::doubles::FailableToken, ());
+    let token = super::doubles::FailableTokenClient::new(&w.env, &id);
+    token.init(&7);
+    let action = w
+        .router()
+        .queue_action(&w.admin, &AdminAction::RegisterToken(id.clone(), 7, 100));
+    token.init(&6);
+    w.advance_time(MIN_TIMELOCK_DELAY + 1);
+    assert_eq!(
+        w.router().try_execute_action(&w.admin, &action),
+        Err(Ok(HyperionError::InvalidDecimals))
+    );
+    assert_eq!(
+        w.router().try_get_token(&id),
+        Err(Ok(HyperionError::TokenNotRegistered))
     );
 }
