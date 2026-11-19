@@ -25,16 +25,19 @@ pub use adapter::{PaidRailAdapter, PaidRailAdapterClient, RailAdapter, RailAdapt
 pub use storage::DataKey;
 pub use timelock::{GRACE_PERIOD, MAX_TIMELOCK_DELAY, MIN_TIMELOCK_DELAY};
 pub use types::{
-    AdminAction, Config, Destination, InboundRecord, Origin, OutboundRequest, PendingClaim,
-    QueuedAction, Recipient, RouteConfig, RouteQuote, TokenConfig, TransferRecord,
+    ActionAudit, ActionAuditStatus, AdapterKeyCoverage, AdapterUpkeepRequest, AdminAction,
+    CancelReason, Config, Destination, InboundRecord, MaintenanceSummary, MigrationStatus,
+    Origin, OutboundRequest, PendingClaim, ProcessedKey, QueuedAction, Recipient, RestorePlan,
+    RestorePlanRequest, RouteConfig, RouteQuote, RouterUpkeepRequest, TokenConfig, TransferRecord,
+    CURRENT_SCHEMA_VERSION, LEGACY_SCHEMA_VERSION, MAX_MAINTENANCE_BATCH, MAX_REASON_LEN,
 };
 
 use hyperion_core::{
     address::{assert_route_supports, bytes32_to_evm},
     amount::{apply_fee, assert_exact_transfer, convert_decimals_exact, floor_to_representable},
-    flow, HyperionError, RouteKind, MAX_FEE_BPS,
+    flow, AdapterMaintenanceClient, HyperionError, RouteKind, MAX_FEE_BPS,
 };
-use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, Vec};
+use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, String, Vec};
 
 /// Every rail Hyperion knows how to speak, in the order the app shows them.
 const ALL_ROUTES: [RouteKind; 4] = [
@@ -82,6 +85,7 @@ impl HyperionRouter {
             paused: false,
         };
         storage::set_config(&env, &cfg);
+        storage::set_schema_version(&env, CURRENT_SCHEMA_VERSION);
         events::config_changed(&env, &cfg);
         Ok(())
     }
@@ -362,7 +366,7 @@ impl HyperionRouter {
         if caller != cfg.admin {
             return Err(HyperionError::Unauthorized);
         }
-        let queued = timelock::queue(&env, &cfg, action)?;
+        let queued = timelock::queue(&env, &cfg, &caller, action)?;
         events::action_queued(&env, &queued);
         Ok(queued.id)
     }
@@ -373,7 +377,7 @@ impl HyperionRouter {
         if caller != cfg.admin {
             return Err(HyperionError::Unauthorized);
         }
-        let queued = timelock::take_matured(&env, id)?;
+        let queued = timelock::take_matured(&env, &caller, id)?;
         timelock::apply(&env, &queued.action)?;
         events::action_executed(&env, &queued);
         Ok(())
@@ -382,21 +386,34 @@ impl HyperionRouter {
     /// Throw away a queued change. The guardian can do this too, which is the point: noticing
     /// something wrong in the queue should not require the key that put it there.
     pub fn cancel_action(env: Env, caller: Address, id: u64) -> Result<(), HyperionError> {
+        Self::cancel_action_with_reason(
+            env.clone(),
+            caller,
+            id,
+            CancelReason::Unspecified,
+            String::from_str(&env, ""),
+        )
+    }
+
+    /// Cancel a queued change with a structured reason code and bounded audit note (#44).
+    pub fn cancel_action_with_reason(
+        env: Env,
+        caller: Address,
+        id: u64,
+        reason: CancelReason,
+        note: String,
+    ) -> Result<(), HyperionError> {
         caller.require_auth();
         let cfg = storage::config(&env)?;
         if caller != cfg.admin && caller != cfg.guardian {
             return Err(HyperionError::Unauthorized);
         }
-        if storage::queued(&env, id).is_none() {
-            return Err(HyperionError::TimelockNotQueued);
-        }
-        storage::clear_queued(&env, id);
-        events::action_cancelled(&env, id, &caller);
+        let _ = timelock::cancel(&env, &caller, id, reason, note)?;
         Ok(())
     }
 
     // ---------------------------------------------------------------------------------------
-    // Keeper
+    // Keeper, restoration planner, and schema migration
     // ---------------------------------------------------------------------------------------
 
     /// Push archival dates back on entries nobody has touched lately.
@@ -415,10 +432,13 @@ impl HyperionRouter {
         env.storage()
             .instance()
             .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
+        for route in routes.iter() {
+            let _ = storage::route_config(&env, route);
+        }
         for token in tokens.iter() {
             let _ = storage::token_config(&env, &token);
             for route in routes.iter() {
-                let _ = storage::route_config(&env, route);
+                let _ = storage::route_flow_limit(&env, &token, route);
                 storage::touch_flow(&env, &token, route);
             }
         }
@@ -428,6 +448,304 @@ impl HyperionRouter {
         for nonce in transfers.iter() {
             let _ = storage::transfer(&env, nonce);
         }
+    }
+
+    /// Bounded router storage maintenance across token configs, route configs, flow limits/windows,
+    /// claims, transfers, queued actions, and inbound replay guards (#49).
+    pub fn maintain_router_storage(
+        env: Env,
+        request: RouterUpkeepRequest,
+    ) -> Result<MaintenanceSummary, HyperionError> {
+        let _ = storage::config(&env)?;
+        if request.tokens.len() > MAX_MAINTENANCE_BATCH
+            || request.routes.len() > MAX_MAINTENANCE_BATCH
+            || request.claims.len() > MAX_MAINTENANCE_BATCH
+            || request.transfers.len() > MAX_MAINTENANCE_BATCH
+            || request.queued_actions.len() > MAX_MAINTENANCE_BATCH
+            || request.processed_messages.len() > MAX_MAINTENANCE_BATCH
+            || request
+                .tokens
+                .len()
+                .saturating_mul(request.routes.len())
+                > MAX_MAINTENANCE_BATCH
+        {
+            return Err(HyperionError::InvalidLimit);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
+
+        let mut token_mappings_touched = 0u32;
+        let mut peer_trust_touched = 0u32;
+        let mut inbound_records_touched = 0u32;
+
+        for route in request.routes.iter() {
+            if storage::touch_persistent_key(&env, &DataKey::RouteConfig(route)) {
+                peer_trust_touched += 1;
+            }
+        }
+        for token in request.tokens.iter() {
+            if storage::touch_persistent_key(&env, &DataKey::Token(token.clone())) {
+                token_mappings_touched += 1;
+            }
+            for route in request.routes.iter() {
+                if storage::touch_persistent_key(
+                    &env,
+                    &DataKey::RouteFlowLimit(token.clone(), route),
+                ) {
+                    token_mappings_touched += 1;
+                }
+                if storage::touch_persistent_key(&env, &DataKey::Flow(token.clone(), route)) {
+                    token_mappings_touched += 1;
+                }
+            }
+        }
+        for id in request.claims.iter() {
+            if storage::touch_persistent_key(&env, &DataKey::Claim(id)) {
+                inbound_records_touched += 1;
+            }
+        }
+        for msg in request.processed_messages.iter() {
+            if storage::touch_persistent_key(
+                &env,
+                &DataKey::Processed(msg.route, msg.message_id.clone()),
+            ) {
+                inbound_records_touched += 1;
+            }
+        }
+        for nonce in request.transfers.iter() {
+            if storage::touch_persistent_key(&env, &DataKey::Transfer(nonce)) {
+                peer_trust_touched += 1;
+            }
+        }
+        for id in request.queued_actions.iter() {
+            if storage::touch_persistent_key(&env, &DataKey::Queued(id)) {
+                peer_trust_touched += 1;
+            }
+            if storage::touch_persistent_key(&env, &DataKey::ActionAudit(id)) {
+                peer_trust_touched += 1;
+            }
+        }
+
+        Ok(MaintenanceSummary {
+            instance_extended: true,
+            token_mappings_touched,
+            peer_trust_touched,
+            inbound_records_touched,
+            total_keys_touched: token_mappings_touched
+                + peer_trust_touched
+                + inbound_records_touched,
+        })
+    }
+
+    /// Bounded adapter storage maintenance forwarded to the registered rail adapter (#49).
+    pub fn maintain_adapter_storage(
+        env: Env,
+        request: AdapterUpkeepRequest,
+    ) -> Result<MaintenanceSummary, HyperionError> {
+        if request.tokens.len() > MAX_MAINTENANCE_BATCH
+            || request.peer_chains.len() > MAX_MAINTENANCE_BATCH
+            || request.peer_domains.len() > MAX_MAINTENANCE_BATCH
+            || request.remote_tokens.len() > MAX_MAINTENANCE_BATCH
+            || request.inbound_messages.len() > MAX_MAINTENANCE_BATCH
+        {
+            return Err(HyperionError::InvalidLimit);
+        }
+        let adapter_addr = storage::adapter(&env, request.route)?;
+        let client = AdapterMaintenanceClient::new(&env, &adapter_addr);
+        client.maintain_storage(
+            &request.tokens,
+            &request.peer_chains,
+            &request.peer_domains,
+            &request.remote_tokens,
+            &request.inbound_messages,
+        )
+    }
+
+    /// Explicit key coverage for each rail adapter's storage maintenance interface (#49).
+    pub fn adapter_key_coverage(_env: Env, route: RouteKind) -> AdapterKeyCoverage {
+        match route {
+            RouteKind::Cctp => AdapterKeyCoverage {
+                route,
+                has_token_mappings: true,
+                has_peer_trust: true,
+                has_inbound_records: false,
+                token_mapping_keys: 1,
+                peer_trust_keys: 3,
+                inbound_record_keys: 0,
+            },
+            RouteKind::AxelarIts | RouteKind::AxelarGmp => AdapterKeyCoverage {
+                route,
+                has_token_mappings: true,
+                has_peer_trust: true,
+                has_inbound_records: false,
+                token_mapping_keys: 2,
+                peer_trust_keys: 2,
+                inbound_record_keys: 0,
+            },
+            RouteKind::Allbridge => AdapterKeyCoverage {
+                route,
+                has_token_mappings: true,
+                has_peer_trust: true,
+                has_inbound_records: true,
+                token_mapping_keys: 1,
+                peer_trust_keys: 2,
+                inbound_record_keys: 1,
+            },
+        }
+    }
+
+    /// Read-only planner for expired/archived router keys that emits restore footprints before
+    /// maintenance or claim settlement (#47). Does not mutate storage or extend TTLs.
+    pub fn plan_restore(
+        env: Env,
+        request: RestorePlanRequest,
+    ) -> Result<RestorePlan, HyperionError> {
+        if request.tokens.len() > MAX_MAINTENANCE_BATCH
+            || request.routes.len() > MAX_MAINTENANCE_BATCH
+            || request.claims.len() > MAX_MAINTENANCE_BATCH
+            || request.transfers.len() > MAX_MAINTENANCE_BATCH
+            || request.queued_actions.len() > MAX_MAINTENANCE_BATCH
+            || request.processed_messages.len() > MAX_MAINTENANCE_BATCH
+            || request
+                .tokens
+                .len()
+                .saturating_mul(request.routes.len())
+                > MAX_MAINTENANCE_BATCH
+        {
+            return Err(HyperionError::InvalidLimit);
+        }
+
+        let requires_instance_restore = !storage::is_initialized(&env);
+        let claim_seq = storage::claim_count(&env);
+        let out_seq = storage::out_nonce(&env);
+
+        let mut restore_keys = vec![&env];
+        let mut missing_or_archived_count = 0u32;
+        let mut definitely_archived_count = 0u32;
+        let mut active_count = 0u32;
+
+        let mut check_key = |key: DataKey, is_definitely_allocated: bool| {
+            if storage::has_persistent_key(&env, &key) {
+                active_count += 1;
+            } else {
+                restore_keys.push_back(key);
+                missing_or_archived_count += 1;
+                if is_definitely_allocated {
+                    definitely_archived_count += 1;
+                }
+            }
+        };
+
+        for route in request.routes.iter() {
+            check_key(DataKey::RouteConfig(route), false);
+        }
+        for token in request.tokens.iter() {
+            check_key(DataKey::Token(token.clone()), false);
+            for route in request.routes.iter() {
+                check_key(DataKey::RouteFlowLimit(token.clone(), route), false);
+                check_key(DataKey::Flow(token.clone(), route), false);
+            }
+        }
+        for id in request.claims.iter() {
+            let allocated = id >= 1 && id <= claim_seq;
+            check_key(DataKey::Claim(id), allocated);
+        }
+        for nonce in request.transfers.iter() {
+            let allocated = nonce >= 1 && nonce <= out_seq;
+            check_key(DataKey::Transfer(nonce), allocated);
+        }
+        for id in request.queued_actions.iter() {
+            check_key(DataKey::Queued(id), false);
+        }
+        for msg in request.processed_messages.iter() {
+            check_key(DataKey::Processed(msg.route, msg.message_id.clone()), false);
+        }
+
+        Ok(RestorePlan {
+            current_ledger: env.ledger().sequence(),
+            requires_instance_restore,
+            restore_keys,
+            missing_or_archived_count,
+            definitely_archived_count,
+            active_count,
+        })
+    }
+
+    /// Read-only restoration planner for a single pending claim prior to `settle_claim` (#47).
+    pub fn plan_claim_restore(env: Env, claim_id: u64) -> Result<RestorePlan, HyperionError> {
+        let mut claims = vec![&env];
+        claims.push_back(claim_id);
+        Self::plan_restore(
+            env.clone(),
+            RestorePlanRequest {
+                tokens: vec![&env],
+                routes: vec![&env],
+                claims,
+                transfers: vec![&env],
+                queued_actions: vec![&env],
+                processed_messages: vec![&env],
+            },
+        )
+    }
+
+    /// Bounded storage schema migration entrypoint, callable only by the reviewed upgrade
+    /// authority (`cfg.admin`) (#46).
+    pub fn migrate_storage(
+        env: Env,
+        caller: Address,
+        target_version: u32,
+        max_steps: u32,
+    ) -> Result<MigrationStatus, HyperionError> {
+        caller.require_auth();
+        let cfg = storage::config(&env)?;
+        if caller != cfg.admin {
+            return Err(HyperionError::Unauthorized);
+        }
+        if max_steps == 0 || max_steps > MAX_MAINTENANCE_BATCH {
+            return Err(HyperionError::InvalidLimit);
+        }
+        if target_version != CURRENT_SCHEMA_VERSION {
+            return Err(HyperionError::InvalidLimit);
+        }
+        let current = storage::schema_version(&env);
+        if current >= target_version {
+            return Err(HyperionError::AlreadyConfigured);
+        }
+
+        let total_transfers = storage::out_nonce(&env);
+        let total_claims = storage::claim_count(&env);
+        let (mut migrated_transfers, mut migrated_claims) = storage::migration_cursor(&env);
+        let mut remaining = max_steps;
+
+        while remaining > 0 && migrated_transfers < total_transfers {
+            migrated_transfers += 1;
+            let _ = storage::touch_persistent_key(&env, &DataKey::Transfer(migrated_transfers));
+            remaining -= 1;
+        }
+        while remaining > 0 && migrated_claims < total_claims {
+            migrated_claims += 1;
+            let _ = storage::touch_persistent_key(&env, &DataKey::Claim(migrated_claims));
+            remaining -= 1;
+        }
+
+        storage::set_migration_cursor(&env, migrated_transfers, migrated_claims);
+        let completed = migrated_transfers >= total_transfers && migrated_claims >= total_claims;
+        if completed {
+            storage::set_schema_version(&env, target_version);
+        }
+
+        let status = MigrationStatus {
+            current_version: if completed { target_version } else { current },
+            target_version,
+            migration_pending: !completed,
+            migrated_transfers,
+            migrated_claims,
+            total_transfers,
+            total_claims,
+        };
+        events::storage_migrated(&env, &caller, &status);
+        Ok(status)
     }
 
     // ---------------------------------------------------------------------------------------
@@ -457,6 +775,28 @@ impl HyperionRouter {
 
     pub fn get_queued(env: Env, id: u64) -> Result<QueuedAction, HyperionError> {
         storage::queued(&env, id).ok_or(HyperionError::TimelockNotQueued)
+    }
+
+    pub fn get_action_audit(env: Env, id: u64) -> Result<ActionAudit, HyperionError> {
+        storage::action_audit(&env, id).ok_or(HyperionError::TimelockNotQueued)
+    }
+
+    pub fn get_schema_version(env: Env) -> u32 {
+        storage::schema_version(&env)
+    }
+
+    pub fn get_migration_status(env: Env) -> MigrationStatus {
+        let current_version = storage::schema_version(&env);
+        let (migrated_transfers, migrated_claims) = storage::migration_cursor(&env);
+        MigrationStatus {
+            current_version,
+            target_version: CURRENT_SCHEMA_VERSION,
+            migration_pending: current_version < CURRENT_SCHEMA_VERSION,
+            migrated_transfers,
+            migrated_claims,
+            total_transfers: storage::out_nonce(&env),
+            total_claims: storage::claim_count(&env),
+        }
     }
 
     pub fn get_token(env: Env, token: Address) -> Result<TokenConfig, HyperionError> {

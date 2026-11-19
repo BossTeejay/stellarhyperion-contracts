@@ -1,5 +1,18 @@
 use hyperion_core::RouteKind;
-use soroban_sdk::{contracttype, Address, BytesN, String};
+use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
+
+pub use hyperion_core::{
+    AdapterKeyCoverage, MaintenanceSummary, MAX_MAINTENANCE_BATCH,
+};
+
+/// Maximum length in bytes of a timelock cancellation reason note.
+pub const MAX_REASON_LEN: u32 = 128;
+
+/// Implicit schema version for already-initialized deployments that predate `DataKey::SchemaVersion`.
+pub const LEGACY_SCHEMA_VERSION: u32 = 1;
+
+/// Current Soroban storage schema version for `HyperionRouter`.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Everything the router needs to know about itself.
 ///
@@ -206,3 +219,113 @@ pub struct Destination {
 // router's own entry points into its WASM. They are re-exported so the router's public surface
 // reads exactly as it did when they were declared in this file.
 pub use hyperion_core::inbound::{Origin, Recipient};
+
+/// Structured reason code when a queued timelock action is cancelled.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum CancelReason {
+    Unspecified = 0,
+    Superseded = 1,
+    ParametersIncorrect = 2,
+    SecurityConcern = 3,
+    Expired = 4,
+    OperatorAborted = 5,
+}
+
+/// Lifecycle state of a timelock action in its audit record.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ActionAuditStatus {
+    Queued = 0,
+    Executed = 1,
+    Cancelled = 2,
+}
+
+/// Stable action lifecycle audit record for off-chain consumers and operators.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionAudit {
+    pub id: u64,
+    pub action: AdminAction,
+    pub status: ActionAuditStatus,
+    pub queued_by: Address,
+    pub queued_at: u64,
+    pub eta: u64,
+    pub expires_at: u64,
+    pub resolved_by: Option<Address>,
+    pub resolved_at: u64,
+    pub cancel_reason: CancelReason,
+    pub reason_note: String,
+}
+
+/// Composite key for an inbound replay guard entry.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessedKey {
+    pub route: RouteKind,
+    pub message_id: BytesN<32>,
+}
+
+/// Bounded request for router persistent storage maintenance (#49).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouterUpkeepRequest {
+    pub tokens: Vec<Address>,
+    pub routes: Vec<RouteKind>,
+    pub claims: Vec<u64>,
+    pub transfers: Vec<u64>,
+    pub queued_actions: Vec<u64>,
+    pub processed_messages: Vec<ProcessedKey>,
+}
+
+/// Bounded request for adapter persistent storage maintenance (#49).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdapterUpkeepRequest {
+    pub route: RouteKind,
+    pub tokens: Vec<Address>,
+    pub peer_chains: Vec<String>,
+    pub peer_domains: Vec<u32>,
+    pub remote_tokens: Vec<BytesN<32>>,
+    pub inbound_messages: Vec<BytesN<32>>,
+}
+
+/// Read-only request for planning Soroban `RestoreFootprintOp` keys before maintenance or
+/// claim settlement (#47).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestorePlanRequest {
+    pub tokens: Vec<Address>,
+    pub routes: Vec<RouteKind>,
+    pub claims: Vec<u64>,
+    pub transfers: Vec<u64>,
+    pub queued_actions: Vec<u64>,
+    pub processed_messages: Vec<ProcessedKey>,
+}
+
+/// Read-only restoration footprint plan for expired/archived router keys (#47).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestorePlan {
+    pub current_ledger: u32,
+    pub requires_instance_restore: bool,
+    pub restore_keys: Vec<crate::storage::DataKey>,
+    pub missing_or_archived_count: u32,
+    pub definitely_archived_count: u32,
+    pub active_count: u32,
+}
+
+/// Progress and schema version status for bounded router storage migrations (#46).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationStatus {
+    pub current_version: u32,
+    pub target_version: u32,
+    pub migration_pending: bool,
+    pub migrated_transfers: u64,
+    pub migrated_claims: u64,
+    pub total_transfers: u64,
+    pub total_claims: u64,
+}

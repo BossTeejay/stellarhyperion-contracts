@@ -39,9 +39,12 @@ import {
     ZeroAddress
 } from "./HyperionErrors.sol";
 import {
+    ActionAudit,
+    ActionAuditStatus,
     ActionKind,
     AddressKind,
     AdminAction,
+    CancelReason,
     Destination,
     Origin,
     OutboundRequest,
@@ -99,6 +102,9 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @dev A change approved in March and executed in November is a change nobody reviewed.
     uint64 public constant GRACE_PERIOD = 7 days;
 
+    /// @notice Maximum length in bytes of a timelock cancellation reason note.
+    uint256 public constant MAX_REASON_LEN = 128;
+
     /// @notice The shortest flow window a limit can be measured over, in seconds.
     uint64 public constant MIN_FLOW_WINDOW = 5 minutes;
 
@@ -155,6 +161,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
 
     mapping(uint64 claimId => PendingClaim claim) private _claims;
     mapping(uint64 actionId => QueuedAction queued) private _actions;
+    mapping(uint64 actionId => ActionAudit audit) private _actionAudits;
 
     /// @param admin Holds every privileged power, all of them behind the timelock.
     /// @notice Wires up the router with its roles, its treasury, and its fee and timing limits.
@@ -601,7 +608,21 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             expiresAt: expiresAt,
             executed: false
         });
+        _actionAudits[id] = ActionAudit({
+            id: id,
+            action: action,
+            status: ActionAuditStatus.Queued,
+            queuedBy: msg.sender,
+            queuedAt: uint64(block.timestamp),
+            eta: eta,
+            expiresAt: expiresAt,
+            resolvedBy: address(0),
+            resolvedAt: 0,
+            cancelReason: CancelReason.Unspecified,
+            reasonNote: ""
+        });
         emit ActionQueued(id, action.kind, eta, expiresAt);
+        emit ActionAuditUpdated(id, ActionAuditStatus.Queued, msg.sender, CancelReason.Unspecified, "");
     }
 
     /// @inheritdoc IHyperionRouter
@@ -619,21 +640,46 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         // under another.
         _validateAction(action);
         _applyAction(action);
+        ActionAudit storage audit = _actionAudits[id];
+        audit.status = ActionAuditStatus.Executed;
+        audit.resolvedBy = msg.sender;
+        audit.resolvedAt = uint64(block.timestamp);
         emit ActionExecuted(id, action.kind);
+        emit ActionAuditUpdated(id, ActionAuditStatus.Executed, msg.sender, CancelReason.Unspecified, "");
     }
 
     /// @inheritdoc IHyperionRouter
     /// @dev Guardian can cancel as well as admin. Somebody who can only stop things should be
     /// able to stop a queued change they think is a mistake.
     function cancelAction(uint64 id) external override {
+        _cancelAction(id, CancelReason.Unspecified, "");
+    }
+
+    /// @inheritdoc IHyperionRouter
+    function cancelActionWithReason(uint64 id, CancelReason reason, string calldata note)
+        external
+        override
+    {
+        _cancelAction(id, reason, note);
+    }
+
+    function _cancelAction(uint64 id, CancelReason reason, string memory note) private {
         if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
             revert Unauthorized();
         }
+        if (bytes(note).length > MAX_REASON_LEN) revert InvalidLimit();
         QueuedAction storage queued = _actions[id];
         if (queued.id == 0) revert TimelockNotQueued();
         if (queued.executed) revert TimelockAlreadyExecuted();
+        ActionAudit storage audit = _actionAudits[id];
+        audit.status = ActionAuditStatus.Cancelled;
+        audit.resolvedBy = msg.sender;
+        audit.resolvedAt = uint64(block.timestamp);
+        audit.cancelReason = reason;
+        audit.reasonNote = note;
         delete _actions[id];
         emit ActionCancelled(id, msg.sender);
+        emit ActionAuditUpdated(id, ActionAuditStatus.Cancelled, msg.sender, reason, note);
     }
 
     /// @notice Role changes go through the timelock like everything else.
@@ -655,6 +701,11 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @inheritdoc IHyperionRouter
     function queuedAction(uint64 id) external view override returns (QueuedAction memory) {
         return _actions[id];
+    }
+
+    /// @inheritdoc IHyperionRouter
+    function actionAudit(uint64 id) external view override returns (ActionAudit memory) {
+        return _actionAudits[id];
     }
 
     /// @inheritdoc IHyperionRouter

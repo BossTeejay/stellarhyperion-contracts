@@ -100,6 +100,30 @@ else
   check "token flow limit" "$(tfield flow_limit)" "$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const t=d.networks[process.argv[2]].tokens;process.stdout.write(t[Object.keys(t)[0]].flowLimit)' "$RECORD" "$CHAIN_KEY")"
 fi
 
+note "storage schema, restoration planner & adapter coverage"
+SCHEMA_VER=$(read_only "$ROUTER" get_schema_version 2>/dev/null | tr -d '"[:space:]' || echo "")
+if [ -n "$SCHEMA_VER" ]; then
+  printf '   ok   %-24s v%s\n' "schema version" "$SCHEMA_VER"
+  MIG_STATUS=$(read_only "$ROUTER" get_migration_status 2>/dev/null || echo "")
+  if [ -n "$MIG_STATUS" ]; then
+    mig_pending=$(printf '%s' "$MIG_STATUS" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);process.stdout.write(String(o.migration_pending))})')
+    check "migration pending" "$mig_pending" "false"
+  fi
+  for slug in cctp axelar-its; do
+    route=$([ "$slug" = "cctp" ] && echo "$ROUTE_CCTP" || echo "$ROUTE_AXELAR_ITS")
+    cov=$(read_only "$ROUTER" adapter_key_coverage --route "$route" 2>/dev/null || echo "")
+    if [ -n "$cov" ]; then
+      printf '   ok   %-24s %s\n' "$slug key coverage" "explicit"
+    fi
+  done
+  claim_plan=$(read_only "$ROUTER" plan_claim_restore --claim_id 1 2>/dev/null || echo "")
+  if [ -n "$claim_plan" ]; then
+    printf '   ok   %-24s %s\n' "restore planner" "available"
+  fi
+else
+  say "router predates get_schema_version (implicit legacy v1); upgrade via timelock before migrate_storage"
+fi
+
 printf '\n'
 if [ "$problems" -eq 0 ]; then
   printf '\033[32mEverything on chain matches the record.\033[0m\n'

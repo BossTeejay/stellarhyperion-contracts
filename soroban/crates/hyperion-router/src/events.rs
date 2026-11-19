@@ -2,7 +2,8 @@ use hyperion_core::RouteKind;
 use soroban_sdk::{contractevent, Address, Env};
 
 use crate::types::{
-    AdminAction, Config, InboundRecord, PendingClaim, QueuedAction, TokenConfig, TransferRecord,
+    ActionAudit, AdminAction, Config, InboundRecord, MigrationStatus, PendingClaim, QueuedAction,
+    TokenConfig, TransferRecord,
 };
 
 /// Every state change the router makes is announced here.
@@ -86,6 +87,24 @@ pub struct ActionCancelled {
     #[topic]
     pub by: Address,
     pub id: u64,
+}
+
+/// Stable action lifecycle audit event emitted on queue, execution, and cancellation (#44).
+#[contractevent(topics = ["hyperion", "audit"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionAuditRecorded {
+    #[topic]
+    pub id: u64,
+    pub audit: ActionAudit,
+}
+
+/// Emitted when bounded storage migration advances or completes (#46).
+#[contractevent(topics = ["hyperion", "migrated"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StorageMigrated {
+    #[topic]
+    pub by: Address,
+    pub status: MigrationStatus,
 }
 
 #[contractevent(topics = ["hyperion", "config"])]
@@ -189,6 +208,22 @@ pub fn action_executed(env: &Env, action: &QueuedAction) {
 
 pub fn action_cancelled(env: &Env, id: u64, by: &Address) {
     ActionCancelled { by: by.clone(), id }.publish(env);
+}
+
+pub fn action_audit(env: &Env, audit: &ActionAudit) {
+    ActionAuditRecorded {
+        id: audit.id,
+        audit: audit.clone(),
+    }
+    .publish(env);
+}
+
+pub fn storage_migrated(env: &Env, by: &Address, status: &MigrationStatus) {
+    StorageMigrated {
+        by: by.clone(),
+        status: status.clone(),
+    }
+    .publish(env);
 }
 
 pub fn config_changed(env: &Env, cfg: &Config) {

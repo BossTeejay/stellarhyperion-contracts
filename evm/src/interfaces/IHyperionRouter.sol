@@ -2,8 +2,11 @@
 pragma solidity 0.8.28;
 
 import {
+    ActionAudit,
+    ActionAuditStatus,
     ActionKind,
     AdminAction,
+    CancelReason,
     Destination,
     Origin,
     OutboundRequest,
@@ -120,6 +123,15 @@ interface IHyperionRouter {
     /// @param id The action that was dropped.
     /// @param by Who dropped it.
     event ActionCancelled(uint64 indexed id, address indexed by);
+
+    /// @notice Emitted on queue, execute, and cancel with bounded audit metadata.
+    event ActionAuditUpdated(
+        uint64 indexed id,
+        ActionAuditStatus indexed status,
+        address indexed actor,
+        CancelReason cancelReason,
+        string reasonNote
+    );
 
     /// @notice A token's flow limit was tightened without waiting.
     /// @dev Allowed to skip the timelock precisely because it only ever narrows what the bridge
@@ -254,6 +266,12 @@ interface IHyperionRouter {
     /// @param id The action to drop.
     function cancelAction(uint64 id) external;
 
+    /// @notice Drop a proposed change with a structured reason code and bounded audit note.
+    /// @param id The action to drop.
+    /// @param reason Structured cancellation reason.
+    /// @param note Bounded human-readable audit note (max 128 bytes).
+    function cancelActionWithReason(uint64 id, CancelReason reason, string calldata note) external;
+
     /// @notice Tighten a token's flow limit immediately.
     /// @param token The token to tighten.
     /// @param limit The new ceiling, which has to be below the one in force.
@@ -271,6 +289,10 @@ interface IHyperionRouter {
     /// @param id The action to read.
     /// @return The action, its timestamps, and whether it has already been executed.
     function queuedAction(uint64 id) external view returns (QueuedAction memory);
+
+    /// @notice Read the lifecycle audit record for a timelock action.
+    /// @param id The action to read.
+    function actionAudit(uint64 id) external view returns (ActionAudit memory);
 
     /// @notice Read a parked claim.
     /// @param id The claim to read.

@@ -1,7 +1,10 @@
 use hyperion_core::{FlowWindow, HyperionError, RouteKind};
 use soroban_sdk::{contracttype, Address, BytesN, Env};
 
-use crate::types::{Config, PendingClaim, QueuedAction, RouteConfig, TokenConfig, TransferRecord};
+use crate::types::{
+    ActionAudit, Config, PendingClaim, QueuedAction, RouteConfig, TokenConfig, TransferRecord,
+    LEGACY_SCHEMA_VERSION,
+};
 
 /// Ledgers of headroom below which the router tops a key's lifetime back up.
 ///
@@ -13,7 +16,7 @@ pub const BUMP_THRESHOLD: u32 = 17_280; // about a day
 pub const BUMP_TO: u32 = 518_400; // about thirty days
 
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Config,
     OutNonce,
@@ -41,6 +44,12 @@ pub enum DataKey {
     ClaimSeq,
     Queued(u64),
     QueueSeq,
+    /// Explicit storage schema version for upgrades and migrations (#46).
+    SchemaVersion,
+    /// Bounded migration progress cursor `(migrated_transfers, migrated_claims)` (#46).
+    MigrationCursor,
+    /// Action lifecycle audit metadata (#44).
+    ActionAudit(u64),
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -340,4 +349,71 @@ pub fn touch_flow(env: &Env, token: &Address, route: RouteKind) {
             .persistent()
             .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
     }
+}
+
+/// Pure read-only check for persistent key presence (does not mutate TTL).
+pub fn has_persistent_key(env: &Env, key: &DataKey) -> bool {
+    env.storage().persistent().has(key)
+}
+
+/// Extend TTL on a persistent key if it currently exists in active storage.
+pub fn touch_persistent_key(env: &Env, key: &DataKey) -> bool {
+    if env.storage().persistent().has(key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn schema_version(env: &Env) -> u32 {
+    if let Some(v) = env.storage().instance().get(&DataKey::SchemaVersion) {
+        v
+    } else if is_initialized(env) {
+        LEGACY_SCHEMA_VERSION
+    } else {
+        0
+    }
+}
+
+pub fn set_schema_version(env: &Env, version: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::SchemaVersion, &version);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn migration_cursor(env: &Env) -> (u64, u64) {
+    env.storage()
+        .instance()
+        .get(&DataKey::MigrationCursor)
+        .unwrap_or((0u64, 0u64))
+}
+
+pub fn set_migration_cursor(env: &Env, transfers: u64, claims: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::MigrationCursor, &(transfers, claims));
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn action_audit(env: &Env, id: u64) -> Option<ActionAudit> {
+    let key = DataKey::ActionAudit(id);
+    let audit = env.storage().persistent().get(&key);
+    if audit.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    }
+    audit
+}
+
+pub fn set_action_audit(env: &Env, audit: &ActionAudit) {
+    let key = DataKey::ActionAudit(audit.id);
+    env.storage().persistent().set(&key, audit);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
 }

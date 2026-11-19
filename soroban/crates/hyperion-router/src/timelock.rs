@@ -1,9 +1,12 @@
 use hyperion_core::amount::MAX_DECIMALS;
 use hyperion_core::{HyperionError, MAX_FEE_BPS};
-use soroban_sdk::{Address, ContractExecutable, Env};
+use soroban_sdk::{Address, ContractExecutable, Env, String};
 
 use crate::storage;
-use crate::types::{AdminAction, Config, QueuedAction, RouteConfig, TokenConfig};
+use crate::types::{
+    ActionAudit, ActionAuditStatus, AdminAction, CancelReason, Config, QueuedAction, RouteConfig,
+    TokenConfig, MAX_REASON_LEN,
+};
 
 /// Shortest and longest delay the router will accept.
 ///
@@ -23,7 +26,12 @@ pub const MAX_TIMELOCK_DELAY: u64 = 2_592_000;
 /// the moment somebody calls execute, which is a nasty shape of surprise.
 pub const GRACE_PERIOD: u64 = 604_800;
 
-pub fn queue(env: &Env, cfg: &Config, action: AdminAction) -> Result<QueuedAction, HyperionError> {
+pub fn queue(
+    env: &Env,
+    cfg: &Config,
+    queued_by: &Address,
+    action: AdminAction,
+) -> Result<QueuedAction, HyperionError> {
     validate(&action)?;
     if let AdminAction::RegisterToken(token, decimals, _) = &action {
         validate_token_behavior(env, token, *decimals)?;
@@ -32,16 +40,31 @@ pub fn queue(env: &Env, cfg: &Config, action: AdminAction) -> Result<QueuedActio
     let id = storage::next_queue_id(env);
     let queued = QueuedAction {
         id,
-        action,
+        action: action.clone(),
         queued_at: now,
         eta: now + cfg.timelock_delay,
         expires_at: now + cfg.timelock_delay + GRACE_PERIOD,
     };
     storage::set_queued(env, &queued);
+    let audit = ActionAudit {
+        id,
+        action,
+        status: ActionAuditStatus::Queued,
+        queued_by: queued_by.clone(),
+        queued_at: now,
+        eta: queued.eta,
+        expires_at: queued.expires_at,
+        resolved_by: None,
+        resolved_at: 0,
+        cancel_reason: CancelReason::Unspecified,
+        reason_note: String::from_str(env, ""),
+    };
+    storage::set_action_audit(env, &audit);
+    crate::events::action_audit(env, &audit);
     Ok(queued)
 }
 
-pub fn take_matured(env: &Env, id: u64) -> Result<QueuedAction, HyperionError> {
+pub fn take_matured(env: &Env, caller: &Address, id: u64) -> Result<QueuedAction, HyperionError> {
     let queued = storage::queued(env, id).ok_or(HyperionError::TimelockNotQueued)?;
     let now = env.ledger().timestamp();
     if now < queued.eta {
@@ -51,7 +74,62 @@ pub fn take_matured(env: &Env, id: u64) -> Result<QueuedAction, HyperionError> {
         return Err(HyperionError::TimelockExpired);
     }
     storage::clear_queued(env, id);
+    let mut audit = storage::action_audit(env, id).unwrap_or(ActionAudit {
+        id,
+        action: queued.action.clone(),
+        status: ActionAuditStatus::Queued,
+        queued_by: caller.clone(),
+        queued_at: queued.queued_at,
+        eta: queued.eta,
+        expires_at: queued.expires_at,
+        resolved_by: None,
+        resolved_at: 0,
+        cancel_reason: CancelReason::Unspecified,
+        reason_note: String::from_str(env, ""),
+    });
+    audit.status = ActionAuditStatus::Executed;
+    audit.resolved_by = Some(caller.clone());
+    audit.resolved_at = now;
+    storage::set_action_audit(env, &audit);
+    crate::events::action_audit(env, &audit);
     Ok(queued)
+}
+
+pub fn cancel(
+    env: &Env,
+    caller: &Address,
+    id: u64,
+    reason: CancelReason,
+    note: String,
+) -> Result<ActionAudit, HyperionError> {
+    if note.len() > MAX_REASON_LEN {
+        return Err(HyperionError::InvalidLimit);
+    }
+    let queued = storage::queued(env, id).ok_or(HyperionError::TimelockNotQueued)?;
+    storage::clear_queued(env, id);
+    let now = env.ledger().timestamp();
+    let mut audit = storage::action_audit(env, id).unwrap_or(ActionAudit {
+        id,
+        action: queued.action,
+        status: ActionAuditStatus::Queued,
+        queued_by: caller.clone(),
+        queued_at: queued.queued_at,
+        eta: queued.eta,
+        expires_at: queued.expires_at,
+        resolved_by: None,
+        resolved_at: 0,
+        cancel_reason: CancelReason::Unspecified,
+        reason_note: String::from_str(env, ""),
+    });
+    audit.status = ActionAuditStatus::Cancelled;
+    audit.resolved_by = Some(caller.clone());
+    audit.resolved_at = now;
+    audit.cancel_reason = reason;
+    audit.reason_note = note;
+    storage::set_action_audit(env, &audit);
+    crate::events::action_cancelled(env, id, caller);
+    crate::events::action_audit(env, &audit);
+    Ok(audit)
 }
 
 /// Reject a queued action that could never be executed successfully.

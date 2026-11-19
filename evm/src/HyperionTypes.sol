@@ -173,6 +173,38 @@ struct RouteQuote {
     bool isCanonical;
 }
 
+/// @dev Structured reason code when a queued timelock action is cancelled.
+enum CancelReason {
+    Unspecified,
+    Superseded,
+    ParametersIncorrect,
+    SecurityConcern,
+    Expired,
+    OperatorAborted
+}
+
+/// @dev Lifecycle status of a timelock action in its audit record.
+enum ActionAuditStatus {
+    Queued,
+    Executed,
+    Cancelled
+}
+
+/// @dev Stable action lifecycle audit metadata for off-chain consumers and operators.
+struct ActionAudit {
+    uint64 id;
+    AdminAction action;
+    ActionAuditStatus status;
+    address queuedBy;
+    uint64 queuedAt;
+    uint64 eta;
+    uint64 expiresAt;
+    address resolvedBy;
+    uint64 resolvedAt;
+    CancelReason cancelReason;
+    string reasonNote;
+}
+
 /// @dev Why a route turned a quote down.
 enum QuoteBlocker {
     None,

@@ -103,3 +103,34 @@ again. Proposal delays report the current live timelock delay, including when pr
 change to that delay. All desired router and adapter code hashes are mandatory; the canonical
 `adapter-axelar` record supplies the `axelar-its` hash. Numerical JSON amounts above JavaScript's
 safe range must be decimal strings, and contract-width limits are checked before output.
+
+## Storage upkeep, restoration planning, schema migration, and action audit
+
+### Bounded storage maintenance and adapter key coverage (#49)
+
+- **Router**: `maintain_router_storage(request)` extends TTL on bounded batches (`MAX_MAINTENANCE_BATCH = 32` per list) of `Token`, `RouteConfig`, `RouteFlowLimit`, `Flow`, `Claim`, `Transfer`, `Queued`, `ActionAudit`, and `Processed` replay keys, in addition to instance storage. Legacy `keep_alive` remains backwards-compatible.
+- **Adapters**: `maintain_adapter_storage(request)` forwards bounded upkeep to the registered rail adapter's `maintain_storage(...)` entrypoint. Each adapter also exposes `key_coverage()`, and the router exposes `adapter_key_coverage(route)`:
+  - `Cctp`: token mappings (`Asset(domain, burn_token)` — 1 key shape), peer trust (`Domain(chain)`, `Chain(domain)`, `Caller(domain)` — 3 key shapes), inbound records (0 adapter keys; router owns `Processed`).
+  - `AxelarIts` / `AxelarGmp`: token mappings (`TokenId(token)`, `Token(token_id)` — 2 key shapes), peer trust (`Link(chain)`, `Source(axelar_chain)` — 2 key shapes), inbound records (0 adapter keys; router owns `Processed`).
+  - `Allbridge` (gated): token mappings (`Asset(token, chain_id)` — 1 key shape), peer trust (`Lane(chain)`, `Chain(chain_id)` — 2 key shapes), inbound records (`Processed(message_id)` — 1 key shape).
+
+### Archived storage restoration planner (#47)
+
+- `plan_restore(request)` and `plan_claim_restore(claim_id)` are read-only (`--is-view` safe, zero TTL mutation) and bounded by `MAX_MAINTENANCE_BATCH`.
+- They inspect persistent key presence and emit a `RestorePlan` containing `restore_keys: Vec<DataKey>`, `missing_or_archived_count`, and `definitely_archived_count` (sequential `Claim(1..=claim_count)` and `Transfer(1..=out_nonce)` entries absent from active storage) so operators can submit Soroban `RestoreFootprintOp` before `maintain_router_storage` or `settle_claim`.
+
+### Versioned storage schema migration (#46)
+
+- `get_schema_version()` returns `2` (`CURRENT_SCHEMA_VERSION`) for freshly initialized or migrated routers, `1` (`LEGACY_SCHEMA_VERSION`) for already-initialized deployments predating `DataKey::SchemaVersion`, and `0` when uninitialized.
+- `migrate_storage(caller, target_version, max_steps)` is callable **only** by `cfg.admin` (the reviewed upgrade authority) with `1 <= max_steps <= MAX_MAINTENANCE_BATCH`, advancing `Transfer` and `Claim` cursors in bounded steps without mutating amounts, recipients, or replay keys, and updating `SchemaVersion` upon completion.
+
+### Timelock cancellation reasons and action audit metadata (#44)
+
+- `cancel_action_with_reason(caller, id, reason, note)` (Soroban) and `cancelActionWithReason(id, reason, note)` (EVM, gated) record a structured `CancelReason` (`Unspecified`, `Superseded`, `ParametersIncorrect`, `SecurityConcern`, `Expired`, `OperatorAborted`) and a bounded `reason_note` (`MAX_REASON_LEN = 128` bytes) into `ActionAudit` (`get_action_audit(id)` / `actionAudit(id)`), emitting `ActionAuditRecorded` / `ActionAuditUpdated` alongside `ActionCancelled`.
+- Legacy `cancel_action(caller, id)` and `cancelAction(id)` remain backwards-compatible and default to `CancelReason::Unspecified` with an empty note.
+
+### Compatibility, migration, and rail gating
+
+- The active deployment is **Stellar Testnet outbound ITS/CCTP**. `AdminAction` variants, `HyperionError` codes, `ActionCancelled` events, and existing `keep_alive` / `cancel_action` signatures are preserved for backwards compatibility with `script/stellar/propose.sh` and `packages/protocol`.
+- Upgrading the live router or adapters requires queueing `AdminAction::Upgrade` under `cfg.admin` (or the adapter admin) and waiting out the timelock; `script/stellar/verify.sh` checks `get_schema_version`, `get_migration_status`, `adapter_key_coverage`, and `plan_claim_restore` when available while remaining compatible with legacy v1 deployments.
+- EVM (`evm/src/HyperionRouter.sol`) and non-active rails (such as Allbridge) remain **explicitly gated** and unactivated until independently validated.
