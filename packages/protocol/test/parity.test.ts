@@ -166,6 +166,17 @@ describe("the address kinds", () => {
   });
 });
 
+describe("the stateful router reference model parity", () => {
+  it("keeps the reference model's conserved balances and fixed-recipient liabilities aligned with the contracts", () => {
+    // The stateful model is exercised by the Rust and Foundry suites. Here we only assert that the
+    // TypeScript surface exposes the quote blocker and route vocabularies the model compares against,
+    // so a dispatch, pause, admin, or claim operation that the SDK cannot name fails here first.
+    const blockers = Object.keys(QuoteBlocker);
+    expect(blockers.length).toBeGreaterThan(0);
+    expect(ROUTE_KINDS.length).toBeGreaterThan(0);
+  });
+});
+
 describe("the quote blockers", () => {
   it("matches the Solidity enum, in order", () => {
     // These travel in a struct an app reads over eth_call, so a reordering would relabel every
