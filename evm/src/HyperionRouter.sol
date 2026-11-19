@@ -723,8 +723,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         IERC20 asset = IERC20(token);
         uint256 fromBefore = asset.balanceOf(address(this));
         uint256 toBefore = asset.balanceOf(to);
-        (bool ok, bytes memory ret) = token.call(abi.encodeCall(IERC20.transfer, (to, amount)));
-        bool delivered = ok && (ret.length == 0 || (ret.length >= 32 && abi.decode(ret, (bool))));
+        bool delivered = asset.trySafeTransfer(to, amount);
         uint256 fromAfter = asset.balanceOf(address(this));
         uint256 toAfter = asset.balanceOf(to);
         if (delivered) {
