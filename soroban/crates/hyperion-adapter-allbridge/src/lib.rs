@@ -14,6 +14,10 @@
 //! replay attacks, ensures the local asset mapping is valid, pre-authorises the transfer to the router,
 //! and forwards the verified delivery to `router.bridge_in`.
 //!
+//! This is a configured-validator trust model: successful verification proves that the configured
+//! Allbridge key signed the message, not that Circle or Axelar independently attested to it.
+//! Deployment readiness is assessed off-chain; this contract does not implement an activation gate.
+//!
 //! One consequence worth stating plainly: `receive_amount_min`, the slippage guard, is chosen by
 //! whoever calls `receive_tokens` on the destination chain. Outbound from Stellar that is not
 //! Hyperion, and `swap_and_bridge` has no minimum of its own, so this contract cannot promise an
