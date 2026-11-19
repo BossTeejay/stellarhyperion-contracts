@@ -176,3 +176,14 @@ fn a_direct_paid_dispatch_from_a_stranger_is_refused() {
         Err(Ok(HyperionError::Unauthorized))
     );
 }
+
+#[test]
+fn bridge_and_gas_in_the_same_token_preserve_the_exact_combined_debit() {
+    let w = World::new();
+    w.its().set_native(&w.token_id);
+    let before = w.token().balance(&w.user);
+    w.router().bridge_out_with_gas(&w.user, &request(&w), &1000);
+    assert_eq!(w.token().balance(&w.user), before - HUNDRED - 1000);
+    assert_eq!(w.token().balance(&w.its_id), 1000);
+    assert_eq!(w.token().balance(&w.treasury), HUNDRED - net_of(HUNDRED));
+}

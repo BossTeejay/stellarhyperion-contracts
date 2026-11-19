@@ -162,13 +162,6 @@ impl AxelarAdapter {
         };
         // Nothing wider than that. One contract, one function, one exact argument list, and no
         // sub-invocations underneath it.
-        env.authorize_as_current_contract(vec![
-            &env,
-            InvokerContractAuthEntry::Contract(SubContractInvocation {
-                context,
-                sub_invocations: vec![&env],
-            }),
-        ]);
 
         // On the bare shape ITS delivers to the recipient itself. On the shape that carries a
         // note it delivers to Hyperion's contract over there, and the recipient rides along in
@@ -181,6 +174,27 @@ impl AxelarAdapter {
             _ => (Bytes::from_array(&env, &recipient.to_array()), None),
         };
 
+        let asset = token::Client::new(&env, &token);
+        let sender_before = asset.balance(&this);
+        let manager_type = its.token_manager_type(&token_id);
+        let manager = if manager_type.takes_by_burning() {
+            this.clone()
+        } else {
+            its.deployed_token_manager(&token_id)
+        };
+        let manager_before = if manager_type.takes_by_burning() {
+            0
+        } else {
+            asset.balance(&manager)
+        };
+        env.authorize_as_current_contract(vec![
+            &env,
+            InvokerContractAuthEntry::Contract(SubContractInvocation {
+                context,
+                sub_invocations: vec![&env],
+            }),
+        ]);
+
         its.interchain_transfer(
             &this,
             &token_id,
@@ -192,6 +206,19 @@ impl AxelarAdapter {
             // message once the gateway has emitted it.
             &None,
         );
+        let expected_debit = amount;
+        hyperion_core::amount::assert_exact_transfer(
+            asset.balance(&this),
+            sender_before,
+            expected_debit,
+        )?;
+        if !manager_type.takes_by_burning() {
+            hyperion_core::amount::assert_exact_transfer(
+                manager_before,
+                asset.balance(&manager),
+                amount,
+            )?;
+        }
 
         events::Dispatched {
             token,
@@ -245,6 +272,19 @@ impl AxelarAdapter {
         let recipient = bytes32_to_evm(&env, &destination)?;
         let its = InterchainTokenServiceClient::new(&env, &cfg.its);
         let destination_address = Bytes::from_array(&env, &recipient.to_array());
+        let asset = token::Client::new(&env, &token);
+        let sender_before = asset.balance(&sender);
+        let manager_type = its.token_manager_type(&token_id);
+        let manager = if manager_type.takes_by_burning() {
+            sender.clone()
+        } else {
+            its.deployed_token_manager(&token_id)
+        };
+        let manager_before = if manager_type.takes_by_burning() {
+            0
+        } else {
+            asset.balance(&manager)
+        };
         its.interchain_transfer(
             &sender,
             &token_id,
@@ -257,6 +297,25 @@ impl AxelarAdapter {
                 amount: gas_amount,
             }),
         );
+        let mut expected_debit = amount;
+        if its.native_token_address() == token {
+            expected_debit = amount
+                .checked_add(gas_amount)
+                .ok_or(HyperionError::DecimalOverflow)?;
+        }
+        hyperion_core::amount::assert_exact_transfer(
+            asset.balance(&sender),
+            sender_before,
+            expected_debit,
+        )?;
+        if !manager_type.takes_by_burning() {
+            hyperion_core::amount::assert_exact_transfer(
+                manager_before,
+                asset.balance(&manager),
+                amount,
+            )?;
+        }
+
         events::Dispatched {
             token,
             destination_chain,

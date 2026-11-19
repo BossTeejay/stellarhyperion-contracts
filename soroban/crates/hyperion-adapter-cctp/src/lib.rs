@@ -222,7 +222,15 @@ impl CctpAdapter {
         }
         let this = env.current_contract_address();
         let asset = token::Client::new(&env, &token);
+        let sender_before = asset.balance(&sender);
+        let before = asset.balance(&this);
         asset.transfer(&sender, &this, &amount);
+        hyperion_core::amount::assert_exact_transfer(before, asset.balance(&this), amount)?;
+        hyperion_core::amount::assert_exact_transfer(
+            asset.balance(&sender),
+            sender_before,
+            amount,
+        )?;
         let ledger = env.ledger().sequence();
         asset.approve(&this, &cfg.token_messenger, &amount, &ledger);
         // Circle's version-zero forwarding hook: 24-byte magic, version 0, payload length 0.

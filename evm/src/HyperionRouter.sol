@@ -218,9 +218,30 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         OutboundPlan memory plan = _planOutbound(request);
 
         IERC20 token = IERC20(request.token);
+        uint256 senderBefore = token.balanceOf(msg.sender);
+        uint256 tokenBalBefore = token.balanceOf(address(this));
         token.safeTransferFrom(msg.sender, address(this), plan.gross);
-        if (plan.fee != 0) token.safeTransfer(treasury, plan.fee);
+        uint256 tokenBalAfter = token.balanceOf(address(this));
+        if (tokenBalAfter < tokenBalBefore || tokenBalAfter - tokenBalBefore != plan.gross) {
+            revert InvalidAmount();
+        }
+        uint256 senderAfter = token.balanceOf(msg.sender);
+        if (senderAfter > senderBefore || senderBefore - senderAfter != plan.gross) revert InvalidAmount();
+
+        if (plan.fee != 0) {
+            uint256 treasuryBefore = token.balanceOf(treasury);
+            token.safeTransfer(treasury, plan.fee);
+            uint256 treasuryAfter = token.balanceOf(treasury);
+            if (treasuryAfter < treasuryBefore || treasuryAfter - treasuryBefore != plan.fee) {
+                revert InvalidAmount();
+            }
+        }
+
+        uint256 adapterBefore = token.balanceOf(plan.adapterAddress);
         token.safeTransfer(plan.adapterAddress, plan.net);
+        uint256 adapterAfter = token.balanceOf(plan.adapterAddress);
+        if (adapterAfter < adapterBefore || adapterAfter - adapterBefore != plan.net) revert InvalidAmount();
+        if (token.balanceOf(address(this)) != tokenBalBefore) revert InvalidAmount();
 
         nonce = ++outboundNonce;
 
@@ -328,7 +349,17 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         // Pull rather than trust. The receiver approves this transfer before calling in, so if
         // the funds are not actually here the delivery reverts now instead of writing down a
         // claim against money nobody holds.
+        uint256 receiverBefore = IERC20(token).balanceOf(msg.sender);
+        uint256 tokenBalBefore = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 tokenBalAfter = IERC20(token).balanceOf(address(this));
+        if (tokenBalAfter < tokenBalBefore || tokenBalAfter - tokenBalBefore != amount) {
+            revert InvalidAmount();
+        }
+        uint256 receiverAfter = IERC20(token).balanceOf(msg.sender);
+        if (receiverAfter > receiverBefore || receiverBefore - receiverAfter != amount) {
+            revert InvalidAmount();
+        }
 
         if (_tryPay(token, recipient, amount)) {
             emit BridgeIn(route, recipient, token, amount, origin.chain, origin.nonce, origin.messageId);
@@ -689,15 +720,24 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// freezes accounts, and a frozen recipient must not be able to wedge a message the rail has
     /// already attested. So the result is a boolean and the caller decides what to do with it.
     ///
-    /// Tokens are registered by an admin, so a deliberately hostile one is not in the threat
-    /// model here, but a merely badly behaved one is: this tolerates the ones that return nothing
-    /// at all as well as the ones that return a bool.
+    /// A successful token call is insufficient: both balances must change by exactly the
+    /// promised amount. A refusal may park a claim only if it leaves both balances unchanged.
     function _tryPay(address token, address to, uint256 amount) private returns (bool) {
-        (bool ok, bytes memory ret) = token.call(abi.encodeCall(IERC20.transfer, (to, amount)));
-        if (!ok) return false;
-        if (ret.length == 0) return true;
-        if (ret.length < 32) return false;
-        return abi.decode(ret, (bool));
+        IERC20 asset = IERC20(token);
+        uint256 fromBefore = asset.balanceOf(address(this));
+        uint256 toBefore = asset.balanceOf(to);
+        bool delivered = asset.trySafeTransfer(to, amount);
+        uint256 fromAfter = asset.balanceOf(address(this));
+        uint256 toAfter = asset.balanceOf(to);
+        if (delivered) {
+            if (
+                fromAfter > fromBefore || fromBefore - fromAfter != amount || toAfter < toBefore
+                    || toAfter - toBefore != amount
+            ) revert InvalidAmount();
+        } else if (fromAfter != fromBefore || toAfter != toBefore) {
+            revert InvalidAmount();
+        }
+        return delivered;
     }
 
     function _blocked(RouteQuote memory q, QuoteBlocker reason) private pure returns (RouteQuote memory) {
@@ -741,8 +781,18 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             if (action.amount > 1) revert InvalidLimit();
             if (!_tokens[action.subject].registered) revert TokenNotRegistered();
         }
-        if (kind == ActionKind.RegisterToken && action.decimals > AmountMath.MAX_DECIMALS) {
-            revert InvalidDecimals();
+        if (kind == ActionKind.RegisterToken) {
+            if (action.decimals > AmountMath.MAX_DECIMALS) revert InvalidDecimals();
+            (bool okDec, bytes memory retDec) =
+                action.subject.staticcall(abi.encodeWithSignature("decimals()"));
+            if (!okDec || retDec.length != 32 || abi.decode(retDec, (uint8)) != action.decimals) {
+                revert InvalidDecimals();
+            }
+            (bool okBal, bytes memory retBal) =
+                action.subject.staticcall(abi.encodeWithSignature("balanceOf(address)", address(this)));
+            if (!okBal || retBal.length != 32) {
+                revert TokenNotRegistered();
+            }
         }
         if (kind == ActionKind.RaiseTokenFlowLimit) {
             TokenConfig memory cfg = _tokens[action.subject];

@@ -7,6 +7,10 @@ use soroban_sdk::{contractclient, Address, BytesN, Env, String};
 /// limits and bookkeeping, the adapter knows about Circle's burn call or Axelar's gateway, and
 /// neither knows about the other's problems. Retiring a rail means pointing one storage slot
 /// somewhere else.
+///
+/// Router accounting guarantees exact integer transfers: tokens admitted to the router must
+/// deliver exact amounts without fee-on-transfer deduction or balance mutation. The amount
+/// received in this adapter's balance is guaranteed to equal `amount` exactly.
 #[contractclient(name = "RailAdapterClient")]
 pub trait RailAdapter {
     /// Push `amount` of `token`, already sitting in this adapter's balance, onto the rail.
