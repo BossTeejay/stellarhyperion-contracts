@@ -2,8 +2,8 @@ use hyperion_core::{FlowWindow, HyperionError, RouteKind};
 use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 use crate::types::{
-    Config, MigrationStatus, PendingClaim, QueuedAction, RouteConfig, TokenConfig, TransferRecord,
-    LEGACY_SCHEMA_VERSION,
+    ClaimProvenance, Config, MigrationStatus, PendingClaim, QueuedAction, RouteConfig, TokenConfig,
+    TransferRecord, LEGACY_SCHEMA_VERSION,
 };
 
 /// Ledgers of headroom below which the router tops a key's lifetime back up.
@@ -19,6 +19,7 @@ pub const BUMP_TO: u32 = 518_400; // about thirty days
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Config,
+    LiabilityTracking,
     OutNonce,
     /// Contract the router hands outbound funds to for a given rail.
     Adapter(RouteKind),
@@ -41,6 +42,8 @@ pub enum DataKey {
     /// funds have already been burned on the far side, which is its own kind of loss.
     Processed(RouteKind, BytesN<32>),
     Claim(u64),
+    ClaimProvenance(u64),
+    ClaimLiability(Address),
     ClaimSeq,
     Queued(u64),
     QueueSeq,
@@ -65,6 +68,56 @@ pub fn set_config(env: &Env, cfg: &Config) {
 
 pub fn is_initialized(env: &Env) -> bool {
     env.storage().instance().has(&DataKey::Config)
+}
+
+pub fn liability_tracking(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::LiabilityTracking)
+        .unwrap_or(false)
+}
+
+pub fn set_liability_tracking(env: &Env) {
+    env.storage()
+        .instance()
+        .set(&DataKey::LiabilityTracking, &true);
+}
+
+pub fn claim_liability(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::ClaimLiability(token.clone()))
+        .unwrap_or(0)
+}
+
+pub fn increase_claim_liability(
+    env: &Env,
+    token: &Address,
+    amount: i128,
+) -> Result<(), HyperionError> {
+    let current = claim_liability(env, token);
+    let next = current
+        .checked_add(amount)
+        .ok_or(HyperionError::InvalidAmount)?;
+    env.storage()
+        .instance()
+        .set(&DataKey::ClaimLiability(token.clone()), &next);
+    Ok(())
+}
+
+pub fn decrease_claim_liability(
+    env: &Env,
+    token: &Address,
+    amount: i128,
+) -> Result<(), HyperionError> {
+    let current = claim_liability(env, token);
+    let next = current
+        .checked_sub(amount)
+        .ok_or(HyperionError::InvalidAmount)?;
+    env.storage()
+        .instance()
+        .set(&DataKey::ClaimLiability(token.clone()), &next);
+    Ok(())
 }
 
 pub fn next_out_nonce(env: &Env) -> u64 {
@@ -309,6 +362,20 @@ pub fn set_migration_state(env: &Env, status: &MigrationStatus) {
         .instance()
         .set(&DataKey::MigrationState, status);
     env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn claim_provenance(env: &Env, id: u64) -> Option<ClaimProvenance> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ClaimProvenance(id))
+}
+
+pub fn set_claim_provenance(env: &Env, id: u64, value: &ClaimProvenance) {
+    let key = DataKey::ClaimProvenance(id);
+    env.storage().persistent().set(&key, value);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn next_queue_id(env: &Env) -> u64 {
