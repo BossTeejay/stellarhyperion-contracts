@@ -15,6 +15,9 @@ use crate::types::{
 pub const BUMP_THRESHOLD: u32 = 17_280; // about a day
 pub const BUMP_TO: u32 = 518_400; // about thirty days
 
+pub const REPLAY_BUMP_THRESHOLD: u32 = 518_400;
+pub const REPLAY_BUMP_TO: u32 = 3_110_400; // about 180 days, clamped to the network maximum
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
@@ -113,6 +116,7 @@ pub fn decrease_claim_liability(
     let current = claim_liability(env, token);
     let next = current
         .checked_sub(amount)
+        .filter(|next| *next >= 0)
         .ok_or(HyperionError::InvalidAmount)?;
     env.storage()
         .instance()
@@ -305,15 +309,42 @@ pub fn set_transfer(env: &Env, record: &TransferRecord) {
 /// Persistent rather than temporary on purpose. A temporary entry that archives is a replay
 /// window, and a replay window on a bridge is a mint-twice bug.
 pub fn is_processed(env: &Env, route: RouteKind, message_id: &BytesN<32>) -> bool {
-    touch_persistent_key(env, &DataKey::Processed(route, message_id.clone()))
+    touch_replay(env, route, message_id)
 }
 
 pub fn mark_processed(env: &Env, route: RouteKind, message_id: &BytesN<32>) {
     let key = DataKey::Processed(route, message_id.clone());
     env.storage().persistent().set(&key, &true);
+    extend_replay_ttl(env, &key);
+    crate::events::replay_recorded(env, route, message_id);
+}
+
+fn extend_replay_ttl(env: &Env, key: &DataKey) {
+    let target = REPLAY_BUMP_TO.min(env.storage().max_ttl());
     env.storage()
         .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        .extend_ttl(key, REPLAY_BUMP_THRESHOLD.min(target), target);
+}
+
+pub fn touch_replay(env: &Env, route: RouteKind, message_id: &BytesN<32>) -> bool {
+    let key = DataKey::Processed(route, message_id.clone());
+    if env.storage().persistent().has(&key) {
+        extend_replay_ttl(env, &key);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn assert_liability_migration_not_running(env: &Env) -> Result<(), HyperionError> {
+    if !liability_tracking(env)
+        && migration_state(env)
+            .map(|s| s.migration_pending)
+            .unwrap_or(false)
+    {
+        return Err(HyperionError::TimelockNotReady);
+    }
+    Ok(())
 }
 
 pub fn next_claim_id(env: &Env) -> u64 {

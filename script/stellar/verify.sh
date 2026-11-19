@@ -100,34 +100,30 @@ else
   check "token flow limit" "$(tfield flow_limit)" "$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const t=d.networks[process.argv[2]].tokens;process.stdout.write(t[Object.keys(t)[0]].flowLimit)' "$RECORD" "$CHAIN_KEY")"
 
   note "maintenance and reconciliation"
-  RECON=$(read_only "$ROUTER" reconcile_claim_liability --token "$SAC" 2>/dev/null || echo "")
+  RECON=$(read_only "$ROUTER" claim_liability --token "$SAC" 2>/dev/null || echo "")
   if [ -z "$RECON" ]; then
-    printf '   \033[31mBAD  reconcile_claim_liability failed for %s\033[0m\n' "$SAC"
+    printf '   \033[31mBAD  claim_liability failed for %s\033[0m\n' "$SAC"
     problems=$((problems + 1))
   else
     rfield() { printf '%s' "$RECON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);process.stdout.write(String(o[process.argv[1]]))})' "$1"; }
-    check "claim liability bal" "$(rfield balanced)" "true"
-    say "tracked_liability=$(rfield tracked_liability) contract_balance=$(rfield contract_balance)"
+    check "claim liability known" "$(rfield known)" "true"
+    check "claim custody solvent" "$(rfield solvent)" "true"
+    say "outstanding=$(rfield outstanding) custody=$(rfield custody)"
   fi
 
-  OPEN_CLAIMS=$(read_only "$ROUTER" discover_keys --open_claims true --cursor 0 --limit 10 2>/dev/null || echo "")
-  TRANSFERS=$(read_only "$ROUTER" discover_keys --open_claims false --cursor 1 --limit 10 2>/dev/null || echo "")
-  REPLAYS=$(read_only "$ROUTER" discover_replays --cursor 0 --limit 10 2>/dev/null || echo "")
-  TTL_REPORT=$(read_only "$ROUTER" inspect_ttls \
-    --keys "[{\"Token\":\"$SAC\"},{\"ClaimLiability\":\"$SAC\"},{\"Flow\":[\"$SAC\",\"$ROUTE_CCTP\"]}]" \
-    2>/dev/null || echo "")
-  if [ -n "$OPEN_CLAIMS" ] && [ -n "$TRANSFERS" ] && [ -n "$REPLAYS" ] && [ -n "$TTL_REPORT" ]; then
-    printf '   ok   %-24s %s\n' "maintenance views" "discovery, replay index, and TTL report responded"
+  if node "$CONTRACTS_ROOT/script/stellar/discover-keys.mjs" "$ROUTER" claim 0 10 "$NETWORK" \
+    && node "$CONTRACTS_ROOT/script/stellar/discover-keys.mjs" "$ROUTER" transfer 0 10 "$NETWORK"; then
+    printf '   ok   %-24s %s\n' "bounded key discovery" "read-only monotonic pages returned; retain unavailable IDs for RPC inspection"
   else
-    printf '   \033[31mBAD  one or more maintenance views failed\033[0m\n'
+    printf '   \033[31mBAD  bounded host key discovery failed\033[0m\n'
     problems=$((problems + 1))
   fi
 fi
 
 note "storage schema and registered adapter coverage"
 if MIG_STATUS=$(read_only "$ROUTER" get_migration_status); then
-  SCHEMA_VER=$(printf '%s' "$MIG_STATUS" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const n=JSON.parse(s).current_version;if(!Number.isInteger(n)||n<0||n>2)process.exit(1);process.stdout.write(String(n))})')
-  check "schema version" "$SCHEMA_VER" "2"
+  SCHEMA_VER=$(printf '%s' "$MIG_STATUS" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const n=JSON.parse(s).current_version;if(!Number.isInteger(n)||n<0||n>3)process.exit(1);process.stdout.write(String(n))})')
+  check "schema version" "$SCHEMA_VER" "3"
   mig_pending=$(printf '%s' "$MIG_STATUS" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);if(typeof o.migration_pending!=="boolean")process.exit(1);process.stdout.write(String(o.migration_pending))})')
   check "migration pending" "$mig_pending" "false"
   for slug in cctp axelar-its; do
@@ -153,6 +149,8 @@ else
   problems=$((problems + 1))
 fi
 say "Archived footprint planning: node script/stellar/restore-plan.mjs RPC_URL recorded-request.json"
+say "TTL evidence is host RPC live/archived/unavailable, never a fabricated guest TTL."
+say "Replay journal export: node script/stellar/replay-journal.mjs RPC_URL ROUTER ledger:START or cursor:SAVED"
 
 printf '\n'
 if [ "$problems" -eq 0 ]; then

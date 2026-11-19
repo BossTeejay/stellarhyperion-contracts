@@ -270,7 +270,11 @@ pub fn apply(env: &Env, action: &AdminAction) -> Result<(), HyperionError> {
         AdminAction::BeginStorageMigration(version) => {
             // The fixed high-water marks keep concurrent new deliveries from moving the goal.
             // Repeating a reviewed authorization never resets an interrupted migration.
-            if storage::schema_version(env) < *version && storage::migration_state(env).is_none() {
+            if storage::schema_version(env) < *version
+                && storage::migration_state(env)
+                    .map(|state| !state.migration_pending && state.target_version < *version)
+                    .unwrap_or(true)
+            {
                 storage::set_migration_state(
                     env,
                     &MigrationStatus {

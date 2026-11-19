@@ -1,5 +1,5 @@
 use hyperion_core::RouteKind;
-use soroban_sdk::{contractevent, Address, Env};
+use soroban_sdk::{contractevent, Address, BytesN, Env};
 
 use crate::types::{
     ActionAuditStatus, AdminAction, CancelReason, Config, InboundRecord, MigrationStatus,
@@ -270,6 +270,30 @@ pub fn flow_limit_lowered(env: &Env, token: &Address, limit: i128, by: &Address)
         token: token.clone(),
         by: by.clone(),
         limit,
+    }
+    .publish(env);
+}
+
+/// Durable journal identity for each successfully processed message; consumers archive all bytes.
+#[contractevent(topics = ["hyperion", "replay"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayRecorded {
+    #[topic]
+    pub route: RouteKind,
+    #[topic]
+    pub message_id: BytesN<32>,
+    pub version: u32,
+    pub ledger: u32,
+    pub timestamp: u64,
+}
+
+pub fn replay_recorded(env: &Env, route: RouteKind, message_id: &BytesN<32>) {
+    ReplayRecorded {
+        route,
+        message_id: message_id.clone(),
+        version: 1,
+        ledger: env.ledger().sequence(),
+        timestamp: env.ledger().timestamp(),
     }
     .publish(env);
 }

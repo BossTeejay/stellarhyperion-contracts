@@ -1,327 +1,375 @@
-//! Maintenance, liability reconciliation, key discovery, replay retention, and TTL inspection.
-
-use hyperion_core::{AddressKind, HyperionError, RouteKind};
-use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
-    vec, Address, BytesN, Vec,
+//! Observable liability conservation, bounded migration, and replay retention regressions.
+extern crate std;
+use super::{
+    doubles::{message_id, Delivery},
+    setup::{World, HUNDRED},
 };
-
-use super::doubles::{evm_destination, message_id, Delivery};
-use super::setup::{World, EVM_DECIMALS, HUNDRED};
-use crate::storage::{self, MAX_DISCOVERY_LIMIT, MAX_TTL_INSPECT_KEYS, REPLAY_BUMP_TO};
-use crate::types::{Destination, InspectKey, OutboundRequest};
-
-fn outbound_req(w: &World, route: RouteKind, amount: i128) -> OutboundRequest {
-    OutboundRequest {
-        token: w.token_id.clone(),
+use crate::{storage, AdminAction, DataKey, CURRENT_SCHEMA_VERSION, MIN_TIMELOCK_DELAY};
+use hyperion_core::{AddressKind, HyperionError, RouteKind};
+use soroban_sdk::{testutils::storage::Persistent as _, testutils::Ledger as _, vec, Address};
+fn park(w: &World, token: &Address, amount: i128, nonce: u64) -> u64 {
+    w.rail().deliver(&Delivery {
+        route: RouteKind::Cctp,
+        token: token.clone(),
         amount,
-        route,
-        destination: Destination {
-            chain: w.ethereum(),
-            address: evm_destination(&w.env, 0x11),
-        },
-        destination_decimals: EVM_DECIMALS,
-        min_destination_amount: 0,
-    }
+        recipient: w.recipient.clone(),
+        recipient_kind: AddressKind::Account,
+        source_chain: w.ethereum(),
+        source_nonce: nonce,
+    })
 }
-
 #[test]
-fn claim_liabilities_track_parked_and_settled_claims_independently_of_balance() {
+fn reconciliation_and_failed_settlement_preserve_exact_liability_independently_of_surplus() {
     let w = World::new();
     let token = w.with_failable_token();
-    let stranger = Address::generate(&w.env);
+    w.failable(&token).set_blocked(&w.recipient, &true);
     w.failable(&token).mint(&w.rail_id, &(HUNDRED * 3));
-    w.failable(&token).set_blocked(&stranger, &true);
-
-    // Park two claims for recipients without trustlines.
-    let c1 = w.rail().deliver(&Delivery {
-        route: RouteKind::Cctp,
-        token: token.clone(),
-        amount: HUNDRED,
-        recipient: stranger.clone(),
-        recipient_kind: AddressKind::Account,
-        source_chain: w.ethereum(),
-        source_nonce: 1,
-    });
-    let c2 = w.rail().deliver(&Delivery {
-        route: RouteKind::AxelarIts,
-        token: token.clone(),
-        amount: HUNDRED * 2,
-        recipient: stranger.clone(),
-        recipient_kind: AddressKind::Account,
-        source_chain: w.ethereum(),
-        source_nonce: 2,
-    });
-
-    assert_eq!(w.router().reconcile_claim_liability(&token).tracked_liability, HUNDRED * 3);
-    let report = w.router().reconcile_claim_liability(&token);
-    assert_eq!(report.tracked_liability, HUNDRED * 3);
-    assert_eq!(report.contract_balance, HUNDRED * 3);
-    assert!(report.balanced);
-
-    // Unrelated direct transfer to the router creates surplus without altering liability.
-    w.failable(&token).mint(&w.router_id, &50);
-    let report = w.router().reconcile_claim_liability(&token);
-    assert_eq!(report.tracked_liability, HUNDRED * 3);
-    assert_eq!(report.contract_balance, HUNDRED * 3 + 50);
-    assert!(report.balanced);
-
-    // Open trustline and settle both claims.
-    w.failable(&token).set_blocked(&stranger, &false);
-    w.router().settle_claim(&w.user, &c1);
-    assert_eq!(w.router().reconcile_claim_liability(&token).tracked_liability, HUNDRED * 2);
-
-    w.router().settle_claim(&w.user, &c2);
-    assert_eq!(w.router().reconcile_claim_liability(&token).tracked_liability, 0);
-
-    let report = w.router().reconcile_claim_liability(&token);
-    assert_eq!(report.tracked_liability, 0);
-    assert_eq!(report.contract_balance, 50);
-    assert!(report.balanced);
+    let a = park(&w, &token, HUNDRED, 901);
+    let b = park(&w, &token, HUNDRED * 2, 902);
+    w.failable(&token).mint(&w.router_id, &17);
+    let before = w.router().claim_liability(&token);
+    assert!(before.known);
+    assert!(before.solvent);
+    assert_eq!(before.outstanding, HUNDRED * 3);
+    assert_eq!(before.custody, HUNDRED * 3 + 17);
+    assert_eq!(
+        w.router().try_settle_claim(&w.user, &a),
+        Err(Ok(HyperionError::RecipientNotReady))
+    );
+    assert_eq!(w.router().claim_liability(&token), before);
+    w.failable(&token).set_blocked(&w.recipient, &false);
+    w.router().settle_claim(&w.user, &a);
+    w.router().settle_claim(&w.user, &b);
+    let done = w.router().claim_liability(&token);
+    assert_eq!(done.outstanding, 0);
+    assert_eq!(done.custody, 17);
+    assert!(done.solvent);
 }
-
 #[test]
-fn legacy_pre_upgrade_claim_settles_even_if_liability_counter_is_zero() {
+fn a_corrupt_counter_cannot_go_negative_or_publish_a_payment() {
     let w = World::new();
     let token = w.with_failable_token();
-    let stranger = Address::generate(&w.env);
+    w.failable(&token).set_blocked(&w.recipient, &true);
     w.failable(&token).mint(&w.rail_id, &HUNDRED);
-    w.failable(&token).set_blocked(&stranger, &true);
-
-    let c1 = w.rail().deliver(&Delivery {
-        route: RouteKind::Cctp,
-        token: token.clone(),
-        amount: HUNDRED,
-        recipient: stranger.clone(),
-        recipient_kind: AddressKind::Account,
-        source_chain: w.ethereum(),
-        source_nonce: 11,
-    });
-
-    // Simulate pre-upgrade state where ClaimLiability(token) was not yet tracked.
+    let id = park(&w, &token, HUNDRED, 903);
     w.env.as_contract(&w.router_id, || {
         w.env
             .storage()
-            .persistent()
-            .remove(&storage::DataKey::ClaimLiability(token.clone()));
+            .instance()
+            .set(&DataKey::ClaimLiability(token.clone()), &0i128)
     });
-    assert_eq!(w.router().reconcile_claim_liability(&token).tracked_liability, 0);
-
-    w.failable(&token).set_blocked(&stranger, &false);
-    w.router().settle_claim(&w.user, &c1);
-    assert_eq!(w.failable(&token).balance(&stranger), HUNDRED);
-    assert_eq!(w.router().reconcile_claim_liability(&token).tracked_liability, 0);
+    w.failable(&token).set_blocked(&w.recipient, &false);
+    assert_eq!(
+        w.router().try_settle_claim(&w.user, &id),
+        Err(Ok(HyperionError::InvalidAmount))
+    );
+    assert_eq!(w.failable(&token).balance(&w.recipient), 0);
+    assert_eq!(w.failable(&token).balance(&w.router_id), HUNDRED);
+    assert!(!w.router().get_claim(&id).settled);
 }
-
 #[test]
-fn paginated_discovery_indexes_open_claims_and_transfers_without_full_scans() {
+fn reviewed_legacy_backfill_is_bounded_counts_only_open_claims_and_freezes_unsafe_mutation() {
     let w = World::new();
     let token = w.with_failable_token();
-    let stranger = Address::generate(&w.env);
-    w.failable(&token).mint(&w.rail_id, &(HUNDRED * 4));
-    w.failable(&token).set_blocked(&stranger, &true);
-
-    // Create 4 parked claims.
-    let c1 = w.rail().deliver(&Delivery {
-        route: RouteKind::Cctp,
-        token: token.clone(),
-        amount: HUNDRED,
-        recipient: stranger.clone(),
-        recipient_kind: AddressKind::Account,
-        source_chain: w.ethereum(),
-        source_nonce: 1,
+    w.failable(&token).set_blocked(&w.recipient, &true);
+    w.failable(&token).mint(&w.rail_id, &(HUNDRED * 3));
+    let a = park(&w, &token, HUNDRED, 904);
+    let b = park(&w, &token, HUNDRED * 2, 905);
+    w.failable(&token).set_blocked(&w.recipient, &false);
+    w.router().settle_claim(&w.user, &a);
+    w.failable(&token).mint(&w.router_id, &23);
+    w.env.as_contract(&w.router_id, || {
+        w.env
+            .storage()
+            .instance()
+            .remove(&DataKey::LiabilityTracking);
+        w.env
+            .storage()
+            .instance()
+            .remove(&DataKey::ClaimLiability(token.clone()));
+        w.env
+            .storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &2u32);
     });
-    let c2 = w.rail().deliver(&Delivery {
-        route: RouteKind::Cctp,
-        token: token.clone(),
-        amount: HUNDRED,
-        recipient: stranger.clone(),
-        recipient_kind: AddressKind::Account,
-        source_chain: w.ethereum(),
-        source_nonce: 2,
-    });
-    let c3 = w.rail().deliver(&Delivery {
-        route: RouteKind::Cctp,
-        token: token.clone(),
-        amount: HUNDRED,
-        recipient: stranger.clone(),
-        recipient_kind: AddressKind::Account,
-        source_chain: w.ethereum(),
-        source_nonce: 3,
-    });
-    let c4 = w.rail().deliver(&Delivery {
-        route: RouteKind::Cctp,
-        token: token.clone(),
-        amount: HUNDRED,
-        recipient: stranger.clone(),
-        recipient_kind: AddressKind::Account,
-        source_chain: w.ethereum(),
-        source_nonce: 4,
-    });
-
-    assert_eq!(w.router().discover_keys(&true, &0, &0).total, 4);
-    let page1 = w.router().discover_keys(&true, &0, &2);
-    assert_eq!(page1.ids, vec![&w.env, c1, c2]);
-    assert_eq!(page1.next_cursor, 2);
-    assert_eq!(page1.total, 4);
-
-    let page2 = w.router().discover_keys(&true, &page1.next_cursor, &2);
-    assert_eq!(page2.ids, vec![&w.env, c3, c4]);
-    assert_eq!(page2.next_cursor, 4);
-
-    // Settle c2 (middle element) -> swap-remove keeps index dense with 3 open claims.
-    w.failable(&token).set_blocked(&stranger, &false);
-    w.router().settle_claim(&w.user, &c2);
-    assert_eq!(w.router().discover_keys(&true, &0, &0).total, 3);
-    let remaining = w.router().discover_keys(&true, &0, &10);
-    assert_eq!(remaining.ids.len(), 3);
-    assert!(!remaining.ids.contains(c2));
-
-    // Create 3 outbound transfers and paginate from cursor 2.
-    let req = outbound_req(&w, RouteKind::Cctp, HUNDRED);
-    let n1 = w.router().bridge_out(&w.user, &req);
-    let n2 = w.router().bridge_out(&w.user, &req);
-    let n3 = w.router().bridge_out(&w.user, &req);
-    assert_eq!((n1, n2, n3), (1, 2, 3));
-
-    let tx_page = w.router().discover_keys(&false, &2, &2);
-    assert_eq!(tx_page.ids, vec![&w.env, 2, 3]);
-    assert_eq!(tx_page.next_cursor, 4);
-    assert_eq!(tx_page.total, 3);
-
-    // Oversized limit is safely clamped.
-    let clamped = w
+    assert!(!w.router().claim_liability(&token).known);
+    let queued = w.router().queue_action(
+        &w.admin,
+        &AdminAction::BeginStorageMigration(CURRENT_SCHEMA_VERSION),
+    );
+    w.advance_time(MIN_TIMELOCK_DELAY + 1);
+    w.router().execute_action(&w.admin, &queued);
+    assert_eq!(
+        w.router().try_settle_claim(&w.user, &b),
+        Err(Ok(HyperionError::TimelockNotReady))
+    );
+    let first = w
         .router()
-        .discover_keys(&false, &1, &(MAX_DISCOVERY_LIMIT + 500));
-    assert_eq!(clamped.ids.len(), 3);
+        .migrate_storage(&w.admin, &CURRENT_SCHEMA_VERSION, &1);
+    assert!(first.migration_pending);
+    assert_eq!(first.migrated_claims, 1);
+    assert!(!w.router().claim_liability(&token).known);
+    let done = w
+        .router()
+        .migrate_storage(&w.admin, &CURRENT_SCHEMA_VERSION, &1);
+    assert!(!done.migration_pending);
+    let report = w.router().claim_liability(&token);
+    assert!(report.known);
+    assert_eq!(report.outstanding, HUNDRED * 2);
+    assert_eq!(report.custody, HUNDRED * 2 + 23);
+    assert_eq!(
+        w.router()
+            .migrate_storage(&w.admin, &CURRENT_SCHEMA_VERSION, &1),
+        done
+    );
+    assert_eq!(w.router().claim_liability(&token).outstanding, HUNDRED * 2);
+    w.router().settle_claim(&w.user, &b);
+    assert_eq!(w.router().claim_liability(&token).outstanding, 0);
 }
-
 #[test]
-fn replay_retention_policy_preserves_identity_and_supports_bounded_upkeep() {
+fn missing_legacy_claim_rolls_back_partial_totals_and_progress_before_retry() {
     let w = World::new();
-    w.fund_rail(HUNDRED * 2);
-
-    w.rail().deliver(&Delivery {
-        route: RouteKind::Cctp,
-        token: w.token_id.clone(),
-        amount: HUNDRED,
-        recipient: w.recipient.clone(),
-        recipient_kind: AddressKind::Account,
-        source_chain: w.ethereum(),
-        source_nonce: 77,
+    let token = w.with_failable_token();
+    w.failable(&token).set_blocked(&w.recipient, &true);
+    w.failable(&token).mint(&w.rail_id, &(HUNDRED * 2));
+    let a = park(&w, &token, HUNDRED, 906);
+    let b = park(&w, &token, HUNDRED, 907);
+    let record = w.router().get_claim(&b);
+    w.env.as_contract(&w.router_id, || {
+        w.env
+            .storage()
+            .instance()
+            .remove(&DataKey::LiabilityTracking);
+        w.env
+            .storage()
+            .instance()
+            .remove(&DataKey::ClaimLiability(token.clone()));
+        w.env
+            .storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &2u32);
     });
-    w.rail().deliver(&Delivery {
-        route: RouteKind::AxelarIts,
-        token: w.token_id.clone(),
-        amount: HUNDRED,
-        recipient: w.recipient.clone(),
-        recipient_kind: AddressKind::Account,
-        source_chain: w.ethereum(),
-        source_nonce: 78,
+    let q = w.router().queue_action(
+        &w.admin,
+        &AdminAction::BeginStorageMigration(CURRENT_SCHEMA_VERSION),
+    );
+    w.advance_time(MIN_TIMELOCK_DELAY + 1);
+    w.router().execute_action(&w.admin, &q);
+    w.env.as_contract(&w.router_id, || {
+        w.env.storage().persistent().remove(&DataKey::Claim(b))
     });
-
-    let records = w.router().discover_replays(&0, &1);
-    assert_eq!(records.len(), 1);
-    let rec = records.get(0).unwrap();
-    assert_eq!(rec.route, RouteKind::Cctp);
-    assert_eq!(rec.message_id, message_id(&w.env, 77));
-    assert_eq!(rec.processed_ledger, 100_000);
-
-    // Advance ledger and verify keep_alive_replays refreshes TTL back to REPLAY_BUMP_TO.
-    w.env.ledger().with_mut(|li| {
-        li.sequence_number += 2_600_000;
-    });
+    assert_eq!(
+        w.router()
+            .try_migrate_storage(&w.admin, &CURRENT_SCHEMA_VERSION, &2),
+        Err(Ok(HyperionError::ClaimNotFound))
+    );
+    assert_eq!(w.router().get_migration_status().migrated_claims, 0);
+    assert_eq!(w.router().claim_liability(&token).outstanding, 0);
+    assert!(!w.router().get_claim(&a).settled);
+    w.env
+        .as_contract(&w.router_id, || storage::set_claim(&w.env, &record));
     w.router()
-        .keep_alive_replays(&vec![&w.env, (rec.route, rec.message_id.clone())]);
-
-    let entries = w.router().inspect_ttls(&vec![
-        &w.env,
-        InspectKey::Replay(rec.route, rec.message_id),
-    ]);
-    let entry = entries.get(0).unwrap();
-    assert_eq!(entry.kind, 3);
-    assert!(entry.present);
-    assert!(entry.remaining_ttl >= REPLAY_BUMP_TO - 10);
+        .migrate_storage(&w.admin, &CURRENT_SCHEMA_VERSION, &2);
+    assert_eq!(w.router().claim_liability(&token).outstanding, HUNDRED * 2);
 }
 
 #[test]
-fn legacy_processed_tombstone_without_metadata_still_blocks_replay() {
+fn interrupted_preupgrade_v2_snapshot_finishes_before_fresh_v3_liability_backfill() {
+    let w = World::new();
+    let token = w.with_failable_token();
+    w.failable(&token).set_blocked(&w.recipient, &true);
+    w.failable(&token).mint(&w.rail_id, &(HUNDRED * 2));
+    park(&w, &token, HUNDRED, 910);
+    park(&w, &token, HUNDRED, 911);
+    w.env.as_contract(&w.router_id, || {
+        w.env
+            .storage()
+            .instance()
+            .remove(&DataKey::LiabilityTracking);
+        w.env
+            .storage()
+            .instance()
+            .remove(&DataKey::ClaimLiability(token.clone()));
+        w.env
+            .storage()
+            .instance()
+            .set(&DataKey::SchemaVersion, &1u32);
+        storage::set_migration_state(
+            &w.env,
+            &crate::MigrationStatus {
+                current_version: 1,
+                target_version: 2,
+                migration_pending: true,
+                migrated_claims: 1,
+                total_claims: 2,
+                migrated_transfers: 0,
+                total_transfers: 0,
+            },
+        );
+    });
+    assert!(w.router().try_migrate_storage(&w.admin, &3, &1).is_err());
+    let v2 = w.router().migrate_storage(&w.admin, &2, &1);
+    assert_eq!(v2.current_version, 2);
+    assert!(!w.router().claim_liability(&token).known);
+    assert_eq!(w.router().claim_liability(&token).outstanding, 0);
+    let queued = w
+        .router()
+        .queue_action(&w.admin, &AdminAction::BeginStorageMigration(3));
+    w.advance_time(MIN_TIMELOCK_DELAY + 1);
+    w.router().execute_action(&w.admin, &queued);
+    w.router().migrate_storage(&w.admin, &3, &2);
+    assert!(w.router().claim_liability(&token).known);
+    assert_eq!(w.router().claim_liability(&token).outstanding, HUNDRED * 2);
+}
+#[test]
+fn replay_policy_uses_long_network_clamped_retention_and_bounded_route_scoped_upkeep() {
     let w = World::new();
     w.fund_rail(HUNDRED);
-    let mid = message_id(&w.env, 555);
-
-    w.env.as_contract(&w.router_id, || {
+    let msg = message_id(&w.env, 908);
+    w.rail().deliver(&Delivery {
+        route: RouteKind::Cctp,
+        token: w.token_id.clone(),
+        amount: HUNDRED,
+        recipient: w.recipient.clone(),
+        recipient_kind: AddressKind::Account,
+        source_chain: w.ethereum(),
+        source_nonce: 908,
+    });
+    let ttl = w.env.as_contract(&w.router_id, || {
         w.env
             .storage()
             .persistent()
-            .set(&storage::DataKey::Processed(RouteKind::Cctp, mid.clone()), &true);
+            .get_ttl(&DataKey::Processed(RouteKind::Cctp, msg.clone()))
     });
-
-    assert!(w.router().was_processed(&RouteKind::Cctp, &mid));
-    assert_eq!(
-        w.rail().try_deliver(&Delivery {
-            route: RouteKind::Cctp,
-            token: w.token_id.clone(),
-            amount: HUNDRED,
-            recipient: w.recipient.clone(),
-            recipient_kind: AddressKind::Account,
-            source_chain: w.ethereum(),
-            source_nonce: 555,
-        }),
-        Err(Ok(HyperionError::ReplayedMessage))
-    );
+    assert_eq!(ttl, storage::REPLAY_BUMP_TO);
+    assert!(w.router().was_processed(&RouteKind::Cctp, &msg));
+    assert!(!w.router().was_processed(&RouteKind::AxelarIts, &msg));
+    let mut replays = vec![&w.env];
+    for _ in 0..33 {
+        replays.push_back((RouteKind::Cctp, msg.clone()));
+    }
+    assert!(w.router().try_keep_alive_replays(&replays).is_err());
+    w.env.ledger().with_mut(|li| li.max_entry_ttl = 100_000);
+    w.router()
+        .keep_alive_replays(&vec![&w.env, (RouteKind::Cctp, msg)]);
 }
 
 #[test]
-fn inspect_ttls_reports_present_and_missing_keys_and_enforces_bound() {
+fn expired_replay_snapshot_never_reports_fresh_and_restoration_preserves_every_id_byte() {
+    use crate::{HyperionRouter, HyperionRouterClient};
+    use soroban_sdk::{
+        xdr::{LedgerKey, ScVal},
+        BytesN, Env, IntoVal, String, Val,
+    };
     let w = World::new();
-    let failable_token = w.with_failable_token();
-    let stranger = Address::generate(&w.env);
-    w.failable(&failable_token).mint(&w.rail_id, &HUNDRED);
-    w.failable(&failable_token).set_blocked(&stranger, &true);
-
-    let req = outbound_req(&w, RouteKind::Cctp, HUNDRED);
-    let nonce = w.router().bridge_out(&w.user, &req);
-    let claim_id = w.rail().deliver(&Delivery {
-        route: RouteKind::Cctp,
-        token: failable_token.clone(),
-        amount: HUNDRED,
-        recipient: stranger,
-        recipient_kind: AddressKind::Account,
-        source_chain: w.ethereum(),
-        source_nonce: 90,
+    let msg = BytesN::from_array(&w.env, &[0xa5; 32]);
+    w.env.as_contract(&w.router_id, || {
+        storage::mark_processed(&w.env, RouteKind::Cctp, &msg)
     });
-
-    let entries = w.router().inspect_ttls(&vec![
-        &w.env,
-        InspectKey::Token(failable_token.clone()),
-        InspectKey::ClaimLiability(failable_token.clone()),
-        InspectKey::Flow(failable_token, RouteKind::Cctp),
-        InspectKey::Transfer(nonce),
-        InspectKey::Transfer(999),
-        InspectKey::Replay(RouteKind::Cctp, message_id(&w.env, 90)),
-        InspectKey::Claim(claim_id),
-    ]);
-
-    // Token + ClaimLiability + Flow(missing for failable_token) + 2 transfers + 1 replay + 1 claim = 7 entries
-    assert_eq!(entries.len(), 7);
-    assert!(entries.get(0).unwrap().present); // Token
-    assert!(entries.get(1).unwrap().present); // ClaimLiability
-    assert!(!entries.get(2).unwrap().present); // Flow (failable_token has no outbound flow yet)
-    assert!(entries.get(3).unwrap().present); // Transfer(1)
-    assert!(!entries.get(4).unwrap().present); // Transfer(999)
-    assert_eq!(entries.get(4).unwrap().remaining_ttl, 0);
-    assert!(entries.get(5).unwrap().present); // Replay
-    assert!(entries.get(6).unwrap().present); // Claim(1)
-
-    // Exceeding MAX_TTL_INSPECT_KEYS is rejected.
-    let mut too_many: Vec<InspectKey> = vec![&w.env];
-    for i in 0..=MAX_TTL_INSPECT_KEYS {
-        too_many.push_back(InspectKey::Transfer(i as u64));
+    let key: ScVal = w.env.as_contract(&w.router_id, || {
+        let val: Val = DataKey::Processed(RouteKind::Cctp, msg.clone()).into_val(&w.env);
+        val.into_val(&w.env)
+    });
+    let mut archived = w.env.to_snapshot();
+    let seq = archived.ledger.sequence_number;
+    let entry = archived
+        .ledger
+        .ledger_entries
+        .iter_mut()
+        .find(|(k, _)| matches!(k.as_ref(),LedgerKey::ContractData(data) if data.key==key))
+        .unwrap();
+    entry.1 .1 = Some(seq - 1);
+    fn rebound(env: &Env, address: &Address) -> Address {
+        let mut raw = [0u8; 56];
+        address.to_string().copy_into_slice(&mut raw);
+        Address::from_string(&String::from_str(env, core::str::from_utf8(&raw).unwrap()))
     }
-    assert_eq!(
-        w.router().try_inspect_ttls(&too_many),
-        Err(Ok(HyperionError::InvalidLimit))
+    let expired = Env::from_snapshot(archived.clone());
+    let id = rebound(&expired, &w.router_id);
+    expired.register_at(&id, HyperionRouter, ());
+    let client = HyperionRouterClient::new(&expired, &id);
+    let rebound_msg = BytesN::from_array(&expired, &[0xa5; 32]);
+    assert_ne!(
+        client.try_was_processed(&RouteKind::Cctp, &rebound_msg),
+        Ok(Ok(false))
     );
-    let _ = BytesN::from_array(&w.env, &[0u8; 32]);
+    let entry = archived
+        .ledger
+        .ledger_entries
+        .iter_mut()
+        .find(|(k, _)| matches!(k.as_ref(),LedgerKey::ContractData(data) if data.key==key))
+        .unwrap();
+    entry.1 .1 = Some(seq + storage::REPLAY_BUMP_TO);
+    let restored = Env::from_snapshot(archived);
+    let id = rebound(&restored, &w.router_id);
+    restored.register_at(&id, HyperionRouter, ());
+    let client = HyperionRouterClient::new(&restored, &id);
+    let msg = BytesN::from_array(&restored, &[0xa5; 32]);
+    assert!(client.was_processed(&RouteKind::Cctp, &msg));
+    assert!(!client.was_processed(&RouteKind::AxelarIts, &msg));
+}
+
+#[test]
+fn measure_bounded_replay_upkeep_resources_and_exact_ttl() {
+    use soroban_sdk::{xdr::WriteXdr, BytesN};
+    for count in [1u32, 32] {
+        let w = World::new();
+        let wasm = std::env::var("HYPERION_MEASURE_ROUTER_WASM").ok();
+        if let Some(path) = &wasm {
+            let bytes = std::fs::read(path).expect("measurement WASM must exist");
+            w.env.register_at(&w.router_id, bytes.as_slice(), ());
+        }
+        let mut keys = vec![&w.env];
+        for i in 0..count {
+            let mut bytes = [0xa5u8; 32];
+            bytes[0] = i as u8;
+            let message = BytesN::from_array(&w.env, &bytes);
+            w.env.as_contract(&w.router_id, || {
+                w.env
+                    .storage()
+                    .persistent()
+                    .set(&DataKey::Processed(RouteKind::Cctp, message.clone()), &true);
+            });
+            keys.push_back((RouteKind::Cctp, message));
+        }
+        w.router().keep_alive_replays(&keys);
+        let cpu = w.env.cost_estimate().budget().cpu_instruction_cost();
+        let memory = w.env.cost_estimate().budget().memory_bytes_cost();
+        let resources = w.env.cost_estimate().resources();
+        std::println!(
+            "REPLAY_COST mode={} count={} cpu={} memory={} resources={:?}",
+            if wasm.is_some() { "wasm" } else { "native" },
+            count,
+            cpu,
+            memory,
+            resources
+        );
+        for (route, message) in keys.iter() {
+            assert_eq!(
+                w.env.as_contract(&w.router_id, || w
+                    .env
+                    .storage()
+                    .persistent()
+                    .get_ttl(&DataKey::Processed(route, message))),
+                storage::REPLAY_BUMP_TO
+            );
+        }
+        let snapshot = w.env.to_snapshot();
+        let key_sizes: std::vec::Vec<usize> = snapshot
+            .ledger
+            .ledger_entries
+            .iter()
+            .filter_map(|(_, (entry, _))| match &entry.data {
+                soroban_sdk::xdr::LedgerEntryData::ContractData(data)
+                    if matches!(&data.key, soroban_sdk::xdr::ScVal::Vec(Some(v)) if matches!(v.first(),Some(soroban_sdk::xdr::ScVal::Symbol(s)) if s.as_slice()==b"Processed")) =>
+                {
+                    Some(entry.to_xdr(soroban_sdk::xdr::Limits::none()).unwrap().len())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(key_sizes.len(), count as usize);
+        std::println!("REPLAY_ENTRY_XDR_BYTES {:?}", key_sizes);
+        assert!(cpu > 0 && memory > 0);
+    }
 }

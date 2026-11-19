@@ -138,7 +138,7 @@ not claim to submit a live network restore transaction.
 
 ### Versioned storage schema migration (#46)
 
-`get_migration_status.current_version` reports 2 for new/migrated routers, implicit 1 for initialized legacy
+`get_migration_status.current_version` reports 3 for new/migrated routers, explicit 2 for the previous migration, implicit 1 for initialized legacy
 storage, and 0 for an uninitialized router. Financial record layouts and all amount/recipient
 fields are unchanged. Version 2 adds a fixed migration state. Record version is determined from
 its family cursor and captured high-water mark: migrated IDs and new IDs above the captured
@@ -146,15 +146,16 @@ mark use the target version; remaining legacy IDs use the current version. These
 are metadata, not proof that a missing record exists. This avoids an independently expiring
 schema sidecar and an unbounded map in instance storage.
 
-After the ordinary reviewed WASM upgrade, queue and execute `BeginStorageMigration(2)` through
+After the ordinary reviewed WASM upgrade, queue and execute `BeginStorageMigration(3)` through
 the existing admin timelock. This captures fixed transfer/claim high-water marks and authorizes
-bounded work. `migrate_storage(admin, 2, max_steps)` accepts 1–32 steps only after that delayed
+bounded work. `migrate_storage(admin, 3, max_steps)` accepts 1–32 steps only after that delayed
 authorization. It decodes and rewrites each old typed record exactly and commits its version cursor atomically. Missing or archived records must be restored first: they never
-advance the cursor. Readers support old and new records while interrupted, new deliveries do
-not change captured totals, repeated authorization never resets progress, and calls after
+advance the cursor. Readers support old and new records while interrupted. When legacy liability totals are unknown, inbound delivery and settlement reject during the backfill, preserving its claim snapshot; outbound records above the fixed transfer mark remain compatible. Repeated authorization never resets progress, and calls after
 completion return the same completed status. This migration never guesses a balance or changes
 a payout, fee, flow window, recipient, or replay identifier. Future layout changes need a new
-reviewed version and conversion, rather than treating this v2 conversion as a generic migration.
+reviewed version and conversion, rather than treating this conversion as a generic migration.
+
+Version 3 recomputes per-token outstanding liabilities from only unsettled claims. Fee balances, outbound balances and custody surplus never enter those totals. `claim_liability(token)` reports `known=false` until the bounded backfill completes; custody remains an independent actual balance and solvency means custody covers outstanding liabilities. Parking and settlement update claim state and exact liabilities in the same transaction, and negative/corrupt subtraction rejects and rolls the payout back. Claim upkeep now refreshes its provenance too, counting two physical keys per supplied claim ID. An authorized but unfinished v2 migration remains resumable with its saved target/cursors; finish it first, then separately queue v3, which scans every claim anew rather than reusing a v2 cursor that never counted liabilities.
 
 ### Timelock cancellation reasons and action audit metadata (#44)
 
@@ -212,9 +213,42 @@ The active deployment remains **Stellar Testnet outbound ITS/CCTP**. All previou
 variants, error numbers, rail/message formats, `ActionCancelled` events, `keep_alive` and legacy
 cancellation signatures remain. `BeginStorageMigration` is an appended Soroban-only variant.
 The read-only proposal tool does not generate upgrades or migrations automatically. Verification
-requires readable v2 schema/migration/actual-adapter views; unavailable RPC views never silently
+requires readable v3 schema/migration/actual-adapter views; unavailable RPC views never silently
 prove legacy v1 or completed migration. ABI artifacts
 for the additive EVM audit API are regenerated from Forge output. No deployment record changes
 and no live activation occur here. EVM, mainnet and non-active rails remain gated pending their
 independent acceptance validation. Adapter upgrade authority remains its existing admin; the
 router's reviewed timelock does not silently grant control over external adapter admins.
+
+### Host TTL inspection and monotonic discovery (#48, #51)
+
+`restore-plan.mjs` reports `ttlState=live` and exact remaining ledger TTL from RPC `liveUntilLedgerSeq`; proven archived entries carry `ttlState=archived` and null remaining TTL. Missing or unknown evidence carries `ttlState=unavailable` and null, never a fabricated zero or a test-only guest value. Supply persistent token/flow/transfer/replay/claim `LedgerKey` XDR and a matching invocation. All request and simulation footprints are limited to 32 entries. No guest per-key TTL API is shipped because Soroban does not expose that information.
+
+```sh
+node script/stellar/discover-keys.mjs ROUTER claim 0 32 testnet
+node script/stellar/discover-keys.mjs ROUTER transfer 0 32 testnet
+```
+
+Discovery uses the existing rollback-safe monotonic `claim_count` and `last_out_nonce` indexes, so no dense swap-remove list can skip keys after earlier settlements. One high-water-mark read and at most 32 record views form a page. Cursor IDs are exact decimal strings through the entire u64 range. Atomically persist each page (including unavailable record IDs) before its `nextCursor`, resume there as new records arrive, and use RPC footprint inspection/restoration for each unavailable ID. A failed view alone proves neither archival nor deletion. Existing deployments already have these indexes; bounded scanning of the same IDs provides discovery/backfill without creating another expiring guest index. `--is-view` signs and submits nothing.
+
+### Durable replay retention and journal (#50)
+
+Processed tombstones retain their original `Processed(route, message_id) -> bool` storage format and target 3,110,400ledgers (about 180 days at 5 seconds/ledger), clamped to the network maximum; upkeep threshold 518,400ledgers. `keep_alive_replays` accepts at most 32 exact route/32-byte identities and extends only their existing tombstones. Persistent archival makes the original invocation require restoration or reject; it never turns a processed message into a fresh payment. The expired-entry fixture proves reads do not report fresh and TTL-only restoration preserves all 32 bytes and route scoping.
+
+Each successful processing publishes a version 1 `ReplayRecorded` journal event containing the full 32-byte identity, numeric route, processing ledger and exact timestamp. Transaction failure rolls back both tombstone and event.
+
+```sh
+node script/stellar/replay-journal.mjs RPC_URL ROUTER ledger:START > replay-page.json
+node script/stellar/replay-journal.mjs RPC_URL ROUTER cursor:SAVED > replay-page-next.json
+```
+
+The tool exports at most 32 successful events per request, validates contract/route/version/identity, retains raw event XDR and emits each exact persistent `LedgerKey` for restoration planning. Persist the complete page and its cursor atomically in durable operator storage before advancing. Run continuously before the RPC event-retention window expires; if RPC rejects an old cursor/start ledger, recover the gap from trusted archival event history rather than jumping forward. The script prints a page and never marks it durably saved or writes on chain. An event is an identity index, not permission to recreate a tombstone: restore its original ledger entry, then re-simulate. Pre-upgrade tombstones remain protective but lack the new event; retain existing trusted event/footprint history for those identities.
+
+The actual deployable router WASM was loaded into Soroban host29.0.1 and measured with 1 and 32 cold supplied tombstones (4,096 ledger initial TTL). Both batches reached exactly 3,110,400remaining ledgers, and each stored tombstone occupied 144 serialized LedgerEntry bytes. The unchanged ledger size gate also checks all artifacts. Detailed metered resources and native/full-byte archive regressions are in `test/discovery.rs`; fee/rent figures depend on network settings and the observed starting TTL, so re-simulate against the target RPC before signing upkeep.
+
+| Supplied replay keys | Metered WASM instructions | Metered memory bytes | Memory read entries | Persistent rent ledger-bytes | TTL bump entries |
+| -------------------- | ------------------------: | -------------------: | ------------------: | ---------------------------: | ---------------: |
+| 1                    |                   679,364 |            1,298,757 |                   3 |              639,231,515,761 |                3 |
+| 32                   |                 3,640,481 |            1,574,254 |                  34 |              653,098,061,281 |               34 |
+
+These host measurements include the router's newly loaded code and instance TTL rent as well as the supplied tombstones; they are not a quoted network fee. The final artifact is 65,297 bytes. Reproduce with `HYPERION_MEASURE_ROUTER_WASM=$PWD/target/wasm32v1-none/release/hyperion_router.wasm cargo test -p hyperion-router discovery::measure_bounded_replay_upkeep_resources_and_exact_ttl -- --nocapture` from `soroban` after the strict repository build. CI runs this actual-WASM fixture and all 50 read-only host/CLI regressions, in addition to the complete unchanged application/security gates.
