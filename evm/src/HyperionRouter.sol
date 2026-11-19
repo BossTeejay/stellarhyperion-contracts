@@ -149,6 +149,12 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// sharing a replay key, and the cheaper of those two deliveries is the one an attacker picks.
     mapping(bytes32 railAndMessage => bool seen) public processed;
 
+    /// @notice The pending adapter owner for a rail, awaiting acceptance.
+    /// @dev Two-step handover: `_adapters` remains the active authority until the pending owner
+    /// accepts. A pending owner can never configure adapters, because configuration reads
+    /// `_adapters` only.
+    mapping(RouteKind route => address pending) private _pendingAdapters;
+
     /// @dev What `bridgeOut` worked out before it moved anything, carried between the three
     /// halves of it in memory rather than on the stack.
     struct OutboundPlan {
@@ -701,6 +707,26 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         return _adapters[route];
     }
 
+    /// @notice The address that may accept ownership of a rail's adapter, if any.
+    /// @dev Reports the pending owner independently of the active one so a rehearsal can prove
+    /// each contract's actual current and pending owner are preserved.
+    function pendingAdapter(RouteKind route) external view returns (address) {
+        return _pendingAdapters[route];
+    }
+
+    /// @notice Accept a pending adapter ownership handover for a rail.
+    /// @dev Only the pending owner may accept, and only once. Acceptance moves the pending
+    /// address into the active slot and clears the pending slot, so a repeated call reverts
+    /// rather than transferring authority again.
+    function acceptAdapterOwnership(RouteKind route) external override {
+        address pending = _pendingAdapters[route];
+        if (pending == address(0)) revert AdapterNotSet();
+        if (msg.sender != pending) revert Unauthorized();
+        _pendingAdapters[route] = address(0);
+        _adapters[route] = pending;
+        emit AdapterSet(route, pending);
+    }
+
     /// @notice The contract allowed to call `bridgeIn` for a rail.
     function railReceiver(RouteKind route) external view returns (address) {
         return _railReceivers[route];
@@ -850,7 +876,10 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         } else if (kind == ActionKind.SetGuardian) {
             _grantRole(GUARDIAN_ROLE, action.subject);
         } else if (kind == ActionKind.SetAdapter) {
-            _adapters[action.route] = action.subject;
+            // Two-step handover: the queued action only nominates a pending owner. The active
+            // adapter keeps its authority until the pending owner accepts, so a pending owner
+            // cannot configure adapters before acceptance.
+            _pendingAdapters[action.route] = action.subject;
             emit AdapterSet(action.route, action.subject);
         } else if (kind == ActionKind.SetRailReceiver) {
             _railReceivers[action.route] = action.subject;

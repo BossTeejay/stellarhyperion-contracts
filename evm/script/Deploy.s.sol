@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {console} from "forge-std/console.sol";
 
 import {HyperionRouter} from "../src/HyperionRouter.sol";
@@ -30,6 +31,13 @@ import {DeployConfig} from "./DeployConfig.sol";
 /// because an adapter with no lanes cannot do anything at all. Their lane and peer setters are
 /// once only, so this is the only chance to get them right.
 ///
+/// Adapter ownership is handed over in two steps and rehearsed here rather than assumed. Each
+/// adapter starts owned by the deployer, is configured, and then `transferOwnership` is called to
+/// the router. The router only becomes owner once the adapter's `acceptOwnership` is called from
+/// the router's own context, which this script cannot do directly. Instead the handover is queued
+/// as a router admin action and executed in phase two, so a pending owner can never configure the
+/// adapter and repeated execution cannot move authority twice.
+///
 /// Usage:
 ///   forge script script/Deploy.s.sol --rpc-url $RPC --broadcast --verify
 contract Deploy is DeployConfig {
@@ -43,6 +51,10 @@ contract Deploy is DeployConfig {
     CctpAdapter internal cctp;
     AxelarItsAdapter internal axelar;
 
+    /// @dev Recorded so phase two and reviewers can check each contract's actual owner and pending
+    /// owner, rather than trusting the deployment record's intent.
+    address internal routerOwner;
+    address internal routerPendingOwner;
     Queued[] internal queued;
 
     function run() external {
@@ -80,6 +92,12 @@ contract Deploy is DeployConfig {
         cctp = new CctpAdapter(address(router), rails.cctpTokenMessenger, token.token, deployer);
         console.log("cctp adapter        ", address(cctp));
 
+        // Two-step handover, step one: the adapter names the router as pending owner. The router
+        // is not the owner yet, so it cannot configure the adapter, and the deployer still can
+        // until it accepts. Acceptance is queued below and runs in phase two.
+        cctp.transferOwnership(address(router));
+        console.log("cctp pending owner  ", address(router));
+
         // Once only, and the one that matters most. The mint recipient is who Circle credits on
         // the far side, so a wrong value here is a burn on this chain against a mint nobody owns.
         cctp.setLane(stellarChain(), STELLAR_CCTP_DOMAIN, stellarRailRecipient());
@@ -88,6 +106,10 @@ contract Deploy is DeployConfig {
         if (axelarToo) {
             axelar = new AxelarItsAdapter(address(router), rails.axelarIts, rails.axelarGasService, deployer);
             console.log("axelar adapter      ", address(axelar));
+
+            // Same two-step handover as CCTP. Pending owner is the router, acceptance is queued.
+            axelar.transferOwnership(address(router));
+            console.log("axelar pending owner", address(router));
 
             // The peer check on inbound deliveries compares against this exact byte string.
             // Arriving through ITS proves a message was delivered, not who sent it.
@@ -101,6 +123,11 @@ contract Deploy is DeployConfig {
 
         vm.stopBroadcast();
 
+        // Snapshot the router's real ownership state. On a local chain the deployer is admin, so
+        // the router owner is the deployer and there is no pending owner. On a real network the
+        // handover is queued and the pending owner is the real admin.
+        routerOwner = Ownable(address(router)).owner();
+        routerPendingOwner = _pendingOwner(address(router));
         _writeRecord(params, rails, token, axelarToo, deployer);
         _report(params);
     }
@@ -111,6 +138,21 @@ contract Deploy is DeployConfig {
     function _queueRouterSetup(TokenParams memory token, bool axelarToo, address admin, address deployer)
         private
     {
+        // Adapter acceptance comes first. Until the router accepts ownership it is only the
+        // pending owner, and a pending owner cannot configure the adapter. Queueing acceptance
+        // ahead of the adapter configuration actions keeps the ordering honest: the router owns
+        // the adapter before it is asked to route through it.
+        _queue(
+            _routeAction(ActionKind.AcceptAdapterOwnership, RouteKind.Cctp, address(cctp), 0),
+            "accept cctp adapter ownership"
+        );
+        if (axelarToo) {
+            _queue(
+                _routeAction(ActionKind.AcceptAdapterOwnership, RouteKind.AxelarIts, address(axelar), 0),
+                "accept axelar adapter ownership"
+            );
+        }
+
         _queue(
             AdminAction({
                 kind: ActionKind.RegisterToken,
@@ -155,6 +197,16 @@ contract Deploy is DeployConfig {
         }
     }
 
+    /// @dev Reads the pending owner off an `Ownable2Step` contract without importing the concrete
+    /// type, so this works for both adapters and for the router if it ever adopts two-step
+    /// ownership. Returns the zero address when the contract has no pending owner.
+    function _pendingOwner(address account) private view returns (address pending) {
+        (bool ok, bytes memory data) = account.staticcall(abi.encodeWithSignature("pendingOwner()"));
+        if (ok && data.length == 32) {
+            pending = abi.decode(data, (address));
+        }
+    }
+
     /// @dev `RouteKind.Cctp` is zero, so it doubles as the empty value for the kinds that have
     /// nothing to do with a rail. The router validates every unused field is empty, which is why
     /// this helper exists rather than four struct literals per call site.
@@ -190,6 +242,12 @@ contract Deploy is DeployConfig {
         vm.serializeAddress(key, "deployer", deployer);
         vm.serializeAddress(key, "admin", params.admin);
         vm.serializeAddress(key, "guardian", params.guardian);
+        // Actual current and pending owners, not intent. A reviewer compares these against the
+        // on-chain `owner()` and `pendingOwner()` of each contract before executing phase two.
+        vm.serializeAddress(key, "routerOwner", routerOwner);
+        vm.serializeAddress(key, "routerPendingOwner", routerPendingOwner);
+        vm.serializeAddress(key, "cctpAdapterOwner", Ownable(address(cctp)).owner());
+        vm.serializeAddress(key, "cctpAdapterPendingOwner", _pendingOwner(address(cctp)));
         vm.serializeAddress(key, "treasury", params.treasury);
         vm.serializeUint(key, "feeBps", params.feeBps);
         vm.serializeUint(key, "timelockDelay", params.timelockDelay);
@@ -208,6 +266,8 @@ contract Deploy is DeployConfig {
             vm.serializeAddress(key, "axelarIts", rails.axelarIts);
             vm.serializeAddress(key, "axelarGasService", rails.axelarGasService);
             vm.serializeString(key, "axelarStellarChain", axelarStellarChain());
+            vm.serializeAddress(key, "axelarAdapterOwner", Ownable(address(axelar)).owner());
+            vm.serializeAddress(key, "axelarAdapterPendingOwner", _pendingOwner(address(axelar)));
             vm.serializeBytes32(key, "axelarTokenId", axelarTokenId());
         }
 
@@ -241,6 +301,9 @@ contract Deploy is DeployConfig {
         console.log("");
         console.log("Read the queued actions off the chain before you execute them:");
         console.log("  cast call <router> 'queuedAction(uint64)' <id>");
+        console.log("");
+        console.log("Adapter ownership is two-step: the router is pending owner until phase two accepts.");
+        console.log("A pending owner cannot configure an adapter, and acceptance runs once.");
         console.log("");
         console.log("Then run phase two:");
         console.log("  forge script script/Execute.s.sol --rpc-url $RPC --broadcast");

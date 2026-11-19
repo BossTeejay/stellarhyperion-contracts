@@ -100,6 +100,12 @@ contract Fixture is Test {
         usdc.approve(address(router), type(uint256).max);
     }
 
+    /// @dev A router with nothing wired to it. For tests about a half finished deployment,
+    /// which the fixture's own `setUp` has already moved past.
+    function _freshRouter() internal returns (HyperionRouter) {
+        return new HyperionRouter(admin, guardian, treasury, FEE_BPS, TIMELOCK, FLOW_WINDOW);
+    }
+
     // -------------------------------------------------------------------------------------
     // Timelock shorthand
     // -------------------------------------------------------------------------------------
@@ -198,12 +204,6 @@ contract Fixture is Test {
             destinationDecimals: STELLAR_DECIMALS,
             minDestinationAmount: 0
         });
-    }
-
-    /// @dev A router with nothing wired to it. For tests about a half finished deployment,
-    /// which the fixture's own `setUp` has already moved past.
-    function _freshRouter() internal returns (HyperionRouter) {
-        return new HyperionRouter(admin, guardian, treasury, FEE_BPS, TIMELOCK, FLOW_WINDOW);
     }
 
     /// @dev Some other asset, over CCTP, to a classic account. For the decimal pairs USDC does

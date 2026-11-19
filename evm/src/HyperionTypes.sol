@@ -16,7 +16,7 @@ enum RouteKind {
 /// @dev What kind of Stellar address a 32 byte key describes.
 ///
 /// Stellar has three, and a cross-chain message carries a bare key with nothing to say which.
-/// `G` is a classic ed25519 account, `C` a Soroban contract, `M` a SEP-23 muxed account that
+/// `G` is a classic ed25519 account, `C a Soroban contract, `M` a SEP-23 muxed account that
 /// shares one underlying `G` with thousands of others. Paying the wrong kind is not a reverted
 /// transaction, it is money delivered somewhere nobody holds a key for, so the kind travels
 /// alongside the key everywhere in this codebase.
