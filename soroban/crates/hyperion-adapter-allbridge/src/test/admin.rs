@@ -78,6 +78,45 @@ fn the_wiring_is_only_ever_set_once() {
 }
 
 #[test]
+#[should_panic(expected = "Unauthorized")]
+fn an_uninitialized_adapter_rejects_configuration_without_the_admin_signature() {
+    let w = World::new();
+    let id = w.env.register(AllbridgeAdapter, ());
+    let adapter = AllbridgeAdapterClient::new(&w.env, &id);
+    w.env.set_auths(&[]);
+
+    adapter.initialize(&w.relayer, &w.router_id, &w.bridge_id, &w.native_id);
+}
+
+#[test]
+fn the_configured_admin_can_authorize_the_initialization_rehearsal() {
+    let w = World::new();
+    let id = w.env.register(AllbridgeAdapter, ());
+    let adapter = AllbridgeAdapterClient::new(&w.env, &id);
+    w.env.mock_auths(&[MockAuth {
+        address: &w.admin,
+        invoke: &MockAuthInvoke {
+            contract: &id,
+            fn_name: "initialize",
+            args: (
+                w.admin.clone(),
+                w.router_id.clone(),
+                w.bridge_id.clone(),
+                w.native_id.clone(),
+            )
+                .into_val(&w.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    adapter.initialize(&w.admin, &w.router_id, &w.bridge_id, &w.native_id);
+
+    let cfg = adapter.get_config();
+    assert_eq!(cfg.admin, w.admin);
+    assert_eq!(cfg.router, w.router_id);
+}
+
+#[test]
 fn the_only_route_this_shape_ever_answers_to_is_the_pooled_one() {
     let w = World::new();
     // One WASM, one rail. Allbridge has no inbound leg here, so there is nothing to select
