@@ -25,9 +25,10 @@ pub use adapter::{PaidRailAdapter, PaidRailAdapterClient, RailAdapter, RailAdapt
 pub use storage::DataKey;
 pub use timelock::{GRACE_PERIOD, MAX_TIMELOCK_DELAY, MIN_TIMELOCK_DELAY};
 pub use types::{
-    AdminAction, ClaimLiabilityReport, Config, Destination, InboundRecord, InspectKey,
-    KeyDiscoveryPage, KeyTtlStatus, Origin, OutboundRequest, PendingClaim, QueuedAction, Recipient,
-    ReplayRecord, RouteConfig, RouteQuote, TokenConfig, TransferRecord,
+    ActionAuditStatus, AdminAction, CancelReason, Config, Destination, InboundRecord,
+    MigrationStatus, Origin, OutboundRequest, PendingClaim, QueuedAction, Recipient, RouteConfig,
+    RouteQuote, TokenConfig, TransferRecord, CURRENT_SCHEMA_VERSION, LEGACY_SCHEMA_VERSION,
+    MAX_MAINTENANCE_BATCH, MAX_REASON_LEN,
 };
 
 use hyperion_core::{
@@ -35,7 +36,7 @@ use hyperion_core::{
     amount::{apply_fee, assert_exact_transfer, convert_decimals_exact, floor_to_representable},
     flow, HyperionError, RouteKind, MAX_FEE_BPS,
 };
-use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, Vec};
+use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, String, Vec};
 
 /// Every rail Hyperion knows how to speak, in the order the app shows them.
 const ALL_ROUTES: [RouteKind; 4] = [
@@ -83,6 +84,7 @@ impl HyperionRouter {
             paused: false,
         };
         storage::set_config(&env, &cfg);
+        storage::set_schema_version(&env, CURRENT_SCHEMA_VERSION);
         events::config_changed(&env, &cfg);
         Ok(())
     }
@@ -177,8 +179,6 @@ impl HyperionRouter {
                 settled: false,
             };
             storage::set_claim(&env, &claim);
-            storage::add_claim_liability(&env, &token, amount)?;
-            storage::index_open_claim(&env, id);
             events::claim_parked(&env, &claim);
             id
         };
@@ -216,8 +216,6 @@ impl HyperionRouter {
         }
         claim.settled = true;
         storage::set_claim(&env, &claim);
-        storage::sub_claim_liability(&env, &claim.token, claim.amount);
-        storage::remove_open_claim(&env, id);
         events::claim_settled(&env, &claim, &settler);
         Ok(())
     }
@@ -367,7 +365,7 @@ impl HyperionRouter {
         if caller != cfg.admin {
             return Err(HyperionError::Unauthorized);
         }
-        let queued = timelock::queue(&env, &cfg, action)?;
+        let queued = timelock::queue(&env, &cfg, &caller, action)?;
         events::action_queued(&env, &queued);
         Ok(queued.id)
     }
@@ -378,7 +376,7 @@ impl HyperionRouter {
         if caller != cfg.admin {
             return Err(HyperionError::Unauthorized);
         }
-        let queued = timelock::take_matured(&env, id)?;
+        let queued = timelock::take_matured(&env, &caller, id)?;
         timelock::apply(&env, &queued.action)?;
         events::action_executed(&env, &queued);
         Ok(())
@@ -387,21 +385,34 @@ impl HyperionRouter {
     /// Throw away a queued change. The guardian can do this too, which is the point: noticing
     /// something wrong in the queue should not require the key that put it there.
     pub fn cancel_action(env: Env, caller: Address, id: u64) -> Result<(), HyperionError> {
+        Self::cancel_action_with_reason(
+            env.clone(),
+            caller,
+            id,
+            CancelReason::Unspecified,
+            String::from_str(&env, ""),
+        )
+    }
+
+    /// Cancel a queued change with a structured reason code and bounded audit note (#44).
+    pub fn cancel_action_with_reason(
+        env: Env,
+        caller: Address,
+        id: u64,
+        reason: CancelReason,
+        note: String,
+    ) -> Result<(), HyperionError> {
         caller.require_auth();
         let cfg = storage::config(&env)?;
         if caller != cfg.admin && caller != cfg.guardian {
             return Err(HyperionError::Unauthorized);
         }
-        if storage::queued(&env, id).is_none() {
-            return Err(HyperionError::TimelockNotQueued);
-        }
-        storage::clear_queued(&env, id);
-        events::action_cancelled(&env, id, &caller);
+        timelock::cancel(&env, &caller, id, reason, note)?;
         Ok(())
     }
 
     // ---------------------------------------------------------------------------------------
-    // Keeper
+    // Keeper, restoration planner, and schema migration
     // ---------------------------------------------------------------------------------------
 
     /// Push archival dates back on entries nobody has touched lately.
@@ -417,14 +428,26 @@ impl HyperionRouter {
         claims: Vec<u64>,
         transfers: Vec<u64>,
     ) {
+        if tokens
+            .len()
+            .saturating_add(routes.len())
+            .saturating_add(tokens.len().saturating_mul(routes.len()).saturating_mul(2))
+            .saturating_add(claims.len())
+            .saturating_add(transfers.len())
+            > MAX_MAINTENANCE_BATCH
+        {
+            soroban_sdk::panic_with_error!(&env, HyperionError::InvalidLimit);
+        }
         env.storage()
             .instance()
             .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
+        for route in routes.iter() {
+            let _ = storage::route_config(&env, route);
+        }
         for token in tokens.iter() {
             let _ = storage::token_config(&env, &token);
-            storage::touch_claim_liability(&env, &token);
             for route in routes.iter() {
-                let _ = storage::route_config(&env, route);
+                let _ = storage::route_flow_limit(&env, &token, route);
                 storage::touch_flow(&env, &token, route);
             }
         }
@@ -436,14 +459,56 @@ impl HyperionRouter {
         }
     }
 
-    /// Extend retention TTLs for a supplied batch of replay tombstones.
-    pub fn keep_alive_replays(env: Env, replays: Vec<(RouteKind, BytesN<32>)>) {
-        env.storage()
-            .instance()
-            .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
-        for (route, message_id) in replays.iter() {
-            let _ = storage::touch_replay(&env, route, &message_id);
+    /// Bounded storage schema migration entrypoint, callable only by the reviewed upgrade
+    /// authority (`cfg.admin`) (#46).
+    pub fn migrate_storage(
+        env: Env,
+        caller: Address,
+        target_version: u32,
+        max_steps: u32,
+    ) -> Result<MigrationStatus, HyperionError> {
+        caller.require_auth();
+        let cfg = storage::config(&env)?;
+        if caller != cfg.admin {
+            return Err(HyperionError::Unauthorized);
         }
+        if max_steps == 0 || max_steps > MAX_MAINTENANCE_BATCH {
+            return Err(HyperionError::InvalidLimit);
+        }
+        if target_version != CURRENT_SCHEMA_VERSION {
+            return Err(HyperionError::InvalidLimit);
+        }
+        let current = storage::schema_version(&env);
+        if current == target_version {
+            return Ok(Self::get_migration_status(env));
+        }
+        let mut status = storage::migration_state(&env).ok_or(HyperionError::TimelockNotQueued)?;
+        let mut remaining = max_steps;
+        while remaining > 0 && status.migrated_transfers < status.total_transfers {
+            let nonce = status.migrated_transfers + 1;
+            let record = storage::transfer(&env, nonce).ok_or(HyperionError::UnknownNonce)?;
+            // Typed read/write canonicalizes the legacy payload; fixed cursors record its version.
+            // A missing/archived record aborts this transaction: restoration must precede migration.
+            storage::set_transfer(&env, &record);
+            status.migrated_transfers = nonce;
+            remaining -= 1;
+        }
+        while remaining > 0 && status.migrated_claims < status.total_claims {
+            let id = status.migrated_claims + 1;
+            let record = storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)?;
+            storage::set_claim(&env, &record);
+            status.migrated_claims = id;
+            remaining -= 1;
+        }
+        status.migration_pending = status.migrated_transfers < status.total_transfers
+            || status.migrated_claims < status.total_claims;
+        if !status.migration_pending {
+            storage::set_schema_version(&env, target_version);
+            status.current_version = target_version;
+        }
+        storage::set_migration_state(&env, &status);
+        events::storage_migrated(&env, &caller, &status);
+        Ok(status)
     }
 
     // ---------------------------------------------------------------------------------------
@@ -473,6 +538,22 @@ impl HyperionRouter {
 
     pub fn get_queued(env: Env, id: u64) -> Result<QueuedAction, HyperionError> {
         storage::queued(&env, id).ok_or(HyperionError::TimelockNotQueued)
+    }
+
+    pub fn get_action_payload(env: Env, id: u64) -> Result<QueuedAction, HyperionError> {
+        storage::action_payload(&env, id).ok_or(HyperionError::TimelockNotQueued)
+    }
+
+    pub fn get_migration_status(env: Env) -> MigrationStatus {
+        storage::migration_state(&env).unwrap_or(MigrationStatus {
+            current_version: storage::schema_version(&env),
+            target_version: CURRENT_SCHEMA_VERSION,
+            migration_pending: storage::schema_version(&env) < CURRENT_SCHEMA_VERSION,
+            migrated_transfers: 0,
+            migrated_claims: 0,
+            total_transfers: storage::out_nonce(&env),
+            total_claims: storage::claim_count(&env),
+        })
     }
 
     pub fn get_token(env: Env, token: Address) -> Result<TokenConfig, HyperionError> {
@@ -525,41 +606,6 @@ impl HyperionRouter {
 
     pub fn queue_count(env: Env) -> u64 {
         storage::queue_count(&env)
-    }
-
-    pub fn reconcile_claim_liability(
-        env: Env,
-        token: Address,
-    ) -> Result<ClaimLiabilityReport, HyperionError> {
-        let this = env.current_contract_address();
-        let client = token::Client::new(&env, &token);
-        let contract_balance = payout_balance(&client, &this)?;
-        let tracked_liability = storage::claim_liability(&env, &token);
-        Ok(ClaimLiabilityReport {
-            tracked_liability,
-            contract_balance,
-            balanced: contract_balance >= tracked_liability,
-        })
-    }
-
-    pub fn discover_keys(
-        env: Env,
-        open_claims: bool,
-        cursor: u64,
-        limit: u32,
-    ) -> KeyDiscoveryPage {
-        storage::discover_keys(&env, open_claims, cursor, limit)
-    }
-
-    pub fn discover_replays(env: Env, cursor: u64, limit: u32) -> Vec<ReplayRecord> {
-        storage::discover_replays(&env, cursor, limit)
-    }
-
-    pub fn inspect_ttls(
-        env: Env,
-        keys: Vec<InspectKey>,
-    ) -> Result<Vec<KeyTtlStatus>, HyperionError> {
-        storage::inspect_ttls(&env, &keys)
     }
 
     /// Check token metadata; success classifies transfer behavior as unverified.

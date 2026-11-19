@@ -1,5 +1,16 @@
 use hyperion_core::RouteKind;
-use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, String};
+
+pub use hyperion_core::MAX_MAINTENANCE_BATCH;
+
+/// Maximum length in bytes of a timelock cancellation reason note.
+pub const MAX_REASON_LEN: u32 = 128;
+
+/// Implicit schema version for already-initialized deployments that predate `DataKey::SchemaVersion`.
+pub const LEGACY_SCHEMA_VERSION: u32 = 1;
+
+/// Current Soroban storage schema version for `HyperionRouter`.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Everything the router needs to know about itself.
 ///
@@ -135,6 +146,8 @@ pub enum AdminAction {
     Upgrade(BytesN<32>),
     SetRouteConfig(RouteKind, RouteConfig),
     SetRouteMaxSingleTransfer(RouteKind, i128),
+    /// Authorize a fixed, bounded migration only after the ordinary review delay.
+    BeginStorageMigration(u32),
 }
 
 #[contracttype]
@@ -207,55 +220,38 @@ pub struct Destination {
 // reads exactly as it did when they were declared in this file.
 pub use hyperion_core::inbound::{Origin, Recipient};
 
-/// Read-only reconciliation of tracked parked-claim liabilities against the router's
-/// actual token balance.
+/// Structured reason code when a queued timelock action is cancelled.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimLiabilityReport {
-    pub tracked_liability: i128,
-    pub contract_balance: i128,
-    pub balanced: bool,
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum CancelReason {
+    Unspecified = 0,
+    Superseded = 1,
+    ParametersIncorrect = 2,
+    SecurityConcern = 3,
+    Expired = 4,
+    OperatorAborted = 5,
 }
 
-/// A bounded page of upkeep-relevant numeric keys (transfer nonces or open claim IDs).
+/// Lifecycle state of a timelock action in its audit record.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KeyDiscoveryPage {
-    pub ids: Vec<u64>,
-    pub next_cursor: u64,
-    pub total: u64,
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ActionAuditStatus {
+    Queued = 0,
+    Executed = 1,
+    Cancelled = 2,
 }
 
-/// Durable replay metadata preserving message identity and processing context.
+/// Progress and schema version status for bounded router storage migrations (#46).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReplayRecord {
-    pub route: RouteKind,
-    pub message_id: BytesN<32>,
-    pub processed_ledger: u32,
-    pub processed_at: u64,
-}
-
-/// Key specification for bounded TTL inspection in `inspect_ttls`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum InspectKey {
-    Token(Address),
-    Flow(Address, RouteKind),
-    Transfer(u64),
-    Replay(RouteKind, BytesN<32>),
-    Claim(u64),
-    ClaimLiability(Address),
-}
-
-/// Per-key TTL and presence status from host-supported inspection.
-/// `kind`: 0=Token, 1=Flow, 2=Transfer, 3=Replay, 4=Claim, 5=ClaimLiability.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KeyTtlStatus {
-    pub kind: u32,
-    pub present: bool,
-    /// Remaining TTL in ledgers when host `get_ttl` is available (testutils/simulation);
-    /// `0` when absent or on-chain where Soroban guest WASM does not expose `live_until_ledger`.
-    pub remaining_ttl: u32,
+pub struct MigrationStatus {
+    pub current_version: u32,
+    pub target_version: u32,
+    pub migration_pending: bool,
+    pub migrated_transfers: u64,
+    pub migrated_claims: u64,
+    pub total_transfers: u64,
+    pub total_claims: u64,
 }

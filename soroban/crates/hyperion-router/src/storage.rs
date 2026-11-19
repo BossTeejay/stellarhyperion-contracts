@@ -1,9 +1,9 @@
 use hyperion_core::{FlowWindow, HyperionError, RouteKind};
-use soroban_sdk::{contracttype, vec, Address, BytesN, Env, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 use crate::types::{
-    Config, InspectKey, KeyDiscoveryPage, KeyTtlStatus, PendingClaim, QueuedAction, ReplayRecord,
-    RouteConfig, TokenConfig, TransferRecord,
+    Config, MigrationStatus, PendingClaim, QueuedAction, RouteConfig, TokenConfig, TransferRecord,
+    LEGACY_SCHEMA_VERSION,
 };
 
 /// Ledgers of headroom below which the router tops a key's lifetime back up.
@@ -15,18 +15,8 @@ use crate::types::{
 pub const BUMP_THRESHOLD: u32 = 17_280; // about a day
 pub const BUMP_TO: u32 = 518_400; // about thirty days
 
-/// Durable retention parameters for replay tombstones (~180 days target, clamped to host max TTL).
-pub const REPLAY_BUMP_THRESHOLD: u32 = 518_400; // about thirty days
-pub const REPLAY_BUMP_TO: u32 = 3_110_400; // about 180 days
-
-/// Maximum number of keys returned per paginated discovery call.
-pub const MAX_DISCOVERY_LIMIT: u32 = 50;
-
-/// Maximum number of persistent keys inspected in a single `inspect_ttls` call.
-pub const MAX_TTL_INSPECT_KEYS: u32 = 64;
-
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Config,
     OutNonce,
@@ -54,27 +44,11 @@ pub enum DataKey {
     ClaimSeq,
     Queued(u64),
     QueueSeq,
-    /// Aggregate unsettled parked-claim liability per token.
-    ClaimLiability(Address),
-    /// Dense list of currently unsettled claim IDs for bounded discovery.
-    OpenClaims,
-    /// Number of indexed replay tombstones.
-    ReplayCount,
-    /// Maps slot index `0..ReplayCount` -> `ReplayRecord`.
-    ReplaySlot(u64),
-}
-
-#[inline(never)]
-fn extend_persistent_ttl(env: &Env, key: &DataKey, threshold: u32, extend_to: u32) {
-    let max_ttl = env.storage().max_ttl();
-    if max_ttl == 0 {
-        return;
-    }
-    let bounded_to = extend_to.min(max_ttl);
-    let bounded_threshold = threshold.min(bounded_to);
-    env.storage()
-        .persistent()
-        .extend_ttl(key, bounded_threshold, bounded_to);
+    /// Explicit storage schema version for upgrades and migrations (#46).
+    SchemaVersion,
+    /// Action lifecycle audit metadata (#44).
+    ResolvedAction(u64),
+    MigrationState,
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -276,39 +250,17 @@ pub fn set_transfer(env: &Env, record: &TransferRecord) {
 /// Whether a given inbound message has already been acted on.
 ///
 /// Persistent rather than temporary on purpose. A temporary entry that archives is a replay
-/// window, and a replay window on a bridge is a mint-twice bug. Checking an existing tombstone
-/// also refreshes its retention TTL so active keys do not silently age out.
+/// window, and a replay window on a bridge is a mint-twice bug.
 pub fn is_processed(env: &Env, route: RouteKind, message_id: &BytesN<32>) -> bool {
-    let key = DataKey::Processed(route, message_id.clone());
-    let present = env.storage().persistent().has(&key);
-    if present {
-        extend_persistent_ttl(env, &key, REPLAY_BUMP_THRESHOLD, REPLAY_BUMP_TO);
-    }
-    present
+    touch_persistent_key(env, &DataKey::Processed(route, message_id.clone()))
 }
 
-#[inline(never)]
 pub fn mark_processed(env: &Env, route: RouteKind, message_id: &BytesN<32>) {
     let key = DataKey::Processed(route, message_id.clone());
-    let already_processed = env.storage().persistent().has(&key);
     env.storage().persistent().set(&key, &true);
-    extend_persistent_ttl(env, &key, REPLAY_BUMP_THRESHOLD, REPLAY_BUMP_TO);
-
-    if !already_processed {
-        let count = replay_count(env);
-        let slot_key = DataKey::ReplaySlot(count);
-        let record = ReplayRecord {
-            route,
-            message_id: message_id.clone(),
-            processed_ledger: env.ledger().sequence(),
-            processed_at: env.ledger().timestamp(),
-        };
-        env.storage().persistent().set(&slot_key, &record);
-        extend_persistent_ttl(env, &slot_key, REPLAY_BUMP_THRESHOLD, REPLAY_BUMP_TO);
-        env.storage()
-            .instance()
-            .set(&DataKey::ReplayCount, &(count + 1));
-    }
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn next_claim_id(env: &Env) -> u64 {
@@ -346,6 +298,17 @@ pub fn set_claim(env: &Env, record: &PendingClaim) {
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn migration_state(env: &Env) -> Option<MigrationStatus> {
+    env.storage().instance().get(&DataKey::MigrationState)
+}
+
+pub fn set_migration_state(env: &Env, status: &MigrationStatus) {
+    env.storage()
+        .instance()
+        .set(&DataKey::MigrationState, status);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn next_queue_id(env: &Env) -> u64 {
@@ -390,241 +353,54 @@ pub fn clear_queued(env: &Env, id: u64) {
 pub fn touch_flow(env: &Env, token: &Address, route: RouteKind) {
     let key = DataKey::Flow(token.clone(), route);
     if env.storage().persistent().has(&key) {
-        extend_persistent_ttl(env, &key, BUMP_THRESHOLD, BUMP_TO);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
     }
 }
 
-// -------------------------------------------------------------------------------------------
-// #52: Per-token claim liabilities
-// -------------------------------------------------------------------------------------------
-
-#[inline(never)]
-pub fn claim_liability(env: &Env, token: &Address) -> i128 {
-    let key = DataKey::ClaimLiability(token.clone());
-    let total = env.storage().persistent().get(&key).unwrap_or(0i128);
-    if env.storage().persistent().has(&key) {
-        extend_persistent_ttl(env, &key, BUMP_THRESHOLD, BUMP_TO);
+/// Extend TTL on a persistent key if it currently exists in active storage.
+pub fn touch_persistent_key(env: &Env, key: &DataKey) -> bool {
+    if env.storage().persistent().has(key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
     }
-    total
 }
 
-#[inline(never)]
-pub fn add_claim_liability(
-    env: &Env,
-    token: &Address,
-    amount: i128,
-) -> Result<i128, HyperionError> {
-    let key = DataKey::ClaimLiability(token.clone());
-    let current = env.storage().persistent().get(&key).unwrap_or(0i128);
-    let next = current
-        .checked_add(amount)
-        .ok_or(HyperionError::DecimalOverflow)?;
-    env.storage().persistent().set(&key, &next);
-    extend_persistent_ttl(env, &key, BUMP_THRESHOLD, BUMP_TO);
-    Ok(next)
-}
-
-#[inline(never)]
-pub fn sub_claim_liability(env: &Env, token: &Address, amount: i128) -> i128 {
-    let key = DataKey::ClaimLiability(token.clone());
-    let current = env.storage().persistent().get(&key).unwrap_or(0i128);
-    // Saturate at zero so legacy pre-upgrade claims settled post-upgrade never strand funds.
-    let next = if current >= amount {
-        current - amount
+pub fn schema_version(env: &Env) -> u32 {
+    if let Some(v) = env.storage().instance().get(&DataKey::SchemaVersion) {
+        v
+    } else if is_initialized(env) {
+        LEGACY_SCHEMA_VERSION
     } else {
         0
-    };
-    env.storage().persistent().set(&key, &next);
-    extend_persistent_ttl(env, &key, BUMP_THRESHOLD, BUMP_TO);
-    next
-}
-
-pub fn touch_claim_liability(env: &Env, token: &Address) {
-    let key = DataKey::ClaimLiability(token.clone());
-    if env.storage().persistent().has(&key) {
-        extend_persistent_ttl(env, &key, BUMP_THRESHOLD, BUMP_TO);
     }
 }
 
-// -------------------------------------------------------------------------------------------
-// #51: Paginated maintenance-key discovery (open claims & transfers)
-// -------------------------------------------------------------------------------------------
-
-#[inline(never)]
-pub fn index_open_claim(env: &Env, claim_id: u64) {
-    let key = DataKey::OpenClaims;
-    let mut list: Vec<u64> = env
-        .storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or_else(|| vec![env]);
-    if !list.contains(claim_id) {
-        list.push_back(claim_id);
-        env.storage().persistent().set(&key, &list);
-    }
-    extend_persistent_ttl(env, &key, BUMP_THRESHOLD, BUMP_TO);
-}
-
-#[inline(never)]
-pub fn remove_open_claim(env: &Env, claim_id: u64) {
-    let key = DataKey::OpenClaims;
-    let Some(mut list) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
-        return;
-    };
-    if let Some(pos) = list.first_index_of(claim_id) {
-        let last_idx = list.len() - 1;
-        if pos != last_idx {
-            let last_val = list.get_unchecked(last_idx);
-            list.set(pos, last_val);
-        }
-        list.pop_back();
-        env.storage().persistent().set(&key, &list);
-        extend_persistent_ttl(env, &key, BUMP_THRESHOLD, BUMP_TO);
-    }
-}
-
-#[inline(never)]
-pub fn discover_keys(
-    env: &Env,
-    open_claims: bool,
-    cursor: u64,
-    limit: u32,
-) -> KeyDiscoveryPage {
-    if open_claims {
-        discover_open_claims(env, cursor, limit)
-    } else {
-        discover_transfers(env, cursor, limit)
-    }
-}
-
-#[inline(never)]
-fn page_bounds(cursor: u64, limit: u32, total: u64) -> (u64, u64) {
-    let bounded = limit.min(MAX_DISCOVERY_LIMIT) as u64;
-    let start = cursor.min(total);
-    let end = start.saturating_add(bounded).min(total);
-    (start, end)
-}
-
-#[inline(never)]
-fn discover_open_claims(env: &Env, cursor: u64, limit: u32) -> KeyDiscoveryPage {
-    let list: Vec<u64> = env
-        .storage()
-        .persistent()
-        .get(&DataKey::OpenClaims)
-        .unwrap_or_else(|| vec![env]);
-    let total = list.len() as u64;
-    let (start, end) = page_bounds(cursor, limit, total);
-    let mut ids = vec![env];
-    for i in start..end {
-        ids.push_back(list.get_unchecked(i as u32));
-    }
-    KeyDiscoveryPage {
-        ids,
-        next_cursor: end,
-        total,
-    }
-}
-
-#[inline(never)]
-fn discover_transfers(env: &Env, cursor: u64, limit: u32) -> KeyDiscoveryPage {
-    let total = out_nonce(env);
-    let bounded = limit.min(MAX_DISCOVERY_LIMIT) as u64;
-    let start = if cursor == 0 { 1 } else { cursor };
-    let mut ids = vec![env];
-    if total == 0 || start > total || bounded == 0 {
-        return KeyDiscoveryPage {
-            ids,
-            next_cursor: start,
-            total,
-        };
-    }
-    let end = start.saturating_add(bounded).min(total + 1);
-    for nonce in start..end {
-        if env.storage().persistent().has(&DataKey::Transfer(nonce)) {
-            ids.push_back(nonce);
-        }
-    }
-    KeyDiscoveryPage {
-        ids,
-        next_cursor: end,
-        total,
-    }
-}
-
-// -------------------------------------------------------------------------------------------
-// #50: Replay-record retention & discovery
-// -------------------------------------------------------------------------------------------
-
-pub fn replay_count(env: &Env) -> u64 {
+pub fn set_schema_version(env: &Env, version: u32) {
     env.storage()
         .instance()
-        .get(&DataKey::ReplayCount)
-        .unwrap_or(0u64)
+        .set(&DataKey::SchemaVersion, &version);
 }
 
-pub fn touch_replay(env: &Env, route: RouteKind, message_id: &BytesN<32>) -> bool {
-    let key = DataKey::Processed(route, message_id.clone());
-    if !env.storage().persistent().has(&key) {
-        return false;
-    }
-    extend_persistent_ttl(env, &key, REPLAY_BUMP_THRESHOLD, REPLAY_BUMP_TO);
-    true
+pub fn retain_action(env: &Env, action: &QueuedAction) {
+    let key = DataKey::ResolvedAction(action.id);
+    env.storage().persistent().set(&key, action);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
 }
 
-#[inline(never)]
-pub fn discover_replays(env: &Env, cursor: u64, limit: u32) -> Vec<ReplayRecord> {
-    let total = replay_count(env);
-    let (start, end) = page_bounds(cursor, limit, total);
-    let mut records = vec![env];
-    for i in start..end {
-        if let Some(rec) = env
-            .storage()
-            .persistent()
-            .get::<_, ReplayRecord>(&DataKey::ReplaySlot(i))
-        {
-            records.push_back(rec);
-        }
-    }
-    records
-}
-
-// -------------------------------------------------------------------------------------------
-// #48: Bounded TTL inspection
-// -------------------------------------------------------------------------------------------
-
-#[inline(never)]
-pub fn inspect_ttls(env: &Env, keys: &Vec<InspectKey>) -> Result<Vec<KeyTtlStatus>, HyperionError> {
-    if keys.len() > MAX_TTL_INSPECT_KEYS {
-        return Err(HyperionError::InvalidLimit);
-    }
-
-    let mut entries = vec![env];
-    for item in keys.iter() {
-        let (kind, key) = match item {
-            InspectKey::Token(t) => (0, DataKey::Token(t)),
-            InspectKey::Flow(t, r) => (1, DataKey::Flow(t, r)),
-            InspectKey::Transfer(n) => (2, DataKey::Transfer(n)),
-            InspectKey::Replay(r, m) => (3, DataKey::Processed(r, m)),
-            InspectKey::Claim(id) => (4, DataKey::Claim(id)),
-            InspectKey::ClaimLiability(t) => (5, DataKey::ClaimLiability(t)),
-        };
-        let present = env.storage().persistent().has(&key);
-        #[cfg(test)]
-        let remaining_ttl = if present {
-            use soroban_sdk::testutils::storage::Persistent as _;
-            env.storage().persistent().get_ttl(&key)
-        } else {
-            0
-        };
-        #[cfg(not(test))]
-        let remaining_ttl = 0;
-
-        entries.push_back(KeyTtlStatus {
-            kind,
-            present,
-            remaining_ttl,
-        });
-    }
-
-    Ok(entries)
+pub fn action_payload(env: &Env, id: u64) -> Option<QueuedAction> {
+    let key = if env.storage().persistent().has(&DataKey::Queued(id)) {
+        DataKey::Queued(id)
+    } else {
+        DataKey::ResolvedAction(id)
+    };
+    touch_persistent_key(env, &key);
+    env.storage().persistent().get(&key)
 }
