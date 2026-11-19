@@ -161,9 +161,14 @@ struct RouteQuote {
     bool available;
     /// Why not, when `available` is false. Zero when it is true.
     QuoteBlocker reason;
+    uint256 requestedAmount;
     uint256 grossAmount;
     uint256 fee;
     uint256 netAmount;
+    /// Unrepresentable tail floored off `requestedAmount - fee` and never debited.
+    uint256 retainedDust;
+    /// Actual source token debit for the transfer (`fee + netAmount`).
+    uint256 actualDebit;
     /// What lands, in the destination's own decimal base.
     uint256 destinationAmount;
     uint256 flowAvailable;

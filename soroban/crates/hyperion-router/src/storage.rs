@@ -11,6 +11,10 @@ use crate::types::{Config, PendingClaim, QueuedAction, RouteConfig, TokenConfig,
 /// read path bumps them and there is a permissionless keeper entrypoint for the rest.
 pub const BUMP_THRESHOLD: u32 = 17_280; // about a day
 pub const BUMP_TO: u32 = 518_400; // about thirty days
+/// Minimum age (in seconds) a settled claim must reach before its metadata may be archived.
+pub const MIN_CLAIM_RETENTION_SECONDS: u64 = 2_592_000; // 30 days
+/// Maximum number of settled claims that can be archived in a single bounded cleanup call.
+pub const MAX_CLAIM_CLEANUP_BATCH: u32 = 50;
 
 #[contracttype]
 #[derive(Clone)]
@@ -41,6 +45,10 @@ pub enum DataKey {
     ClaimSeq,
     Queued(u64),
     QueueSeq,
+    /// Settlement timestamp for a settled claim, used by bounded archival cleanup.
+    ClaimSettledAt(u64),
+    /// Total number of settled claims archived via bounded cleanup.
+    ArchivedClaimCount,
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -292,6 +300,49 @@ pub fn set_claim(env: &Env, record: &PendingClaim) {
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn claim_settled_at(env: &Env, id: u64) -> Option<u64> {
+    let key = DataKey::ClaimSettledAt(id);
+    let ts = env.storage().persistent().get(&key);
+    if ts.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    }
+    ts
+}
+
+pub fn set_claim_settled_at(env: &Env, id: u64, settled_at: u64) {
+    let key = DataKey::ClaimSettledAt(id);
+    env.storage().persistent().set(&key, &settled_at);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn remove_claim(env: &Env, id: u64) {
+    env.storage().persistent().remove(&DataKey::Claim(id));
+    env.storage()
+        .persistent()
+        .remove(&DataKey::ClaimSettledAt(id));
+}
+
+pub fn archived_claim_count(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::ArchivedClaimCount)
+        .unwrap_or(0u64)
+}
+
+pub fn inc_archived_claim_count(env: &Env, delta: u64) {
+    let next = archived_claim_count(env).saturating_add(delta);
+    env.storage()
+        .instance()
+        .set(&DataKey::ArchivedClaimCount, &next);
+    env.storage()
+        .instance()
+        .extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn next_queue_id(env: &Env) -> u64 {

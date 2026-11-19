@@ -160,15 +160,37 @@ pub struct RouteQuote {
     pub available: bool,
     /// Populated when `available` is false. Zero otherwise.
     pub reason: u32,
+    /// Amount originally requested by the caller before fee and decimal flooring.
+    pub requested_amount: i128,
     pub gross_amount: i128,
     pub fee: i128,
+    /// Representable net amount forwarded onto the rail.
     pub net_amount: i128,
+    /// Unrepresentable tail floored off `requested_amount - fee` and never debited.
+    pub retained_dust: i128,
+    /// Actual source token debit for the transfer (`fee + net_amount`).
+    pub actual_debit: i128,
     /// Amount the recipient sees, in the destination asset's decimal base.
     pub destination_amount: i128,
     /// Headroom left under the flow limit for this route right now.
     pub flow_available: i128,
     pub waits_on_attestation: bool,
     pub is_canonical: bool,
+}
+
+/// Summary of persistent/instance key counts and TTL policy parameters for storage maintenance.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StorageFootprint {
+    pub out_nonce: u64,
+    pub claim_count: u64,
+    pub archived_claims: u64,
+    pub active_claim_entries: u64,
+    pub queue_count: u64,
+    pub bump_threshold: u32,
+    pub bump_to: u32,
+    pub min_claim_retention_seconds: u64,
+    pub max_claim_cleanup_batch: u32,
 }
 
 /// Everything about an outbound transfer except who is sending it.

@@ -446,6 +446,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     ) public view override returns (RouteQuote memory) {
         RouteQuote memory q;
         q.route = route;
+        q.requestedAmount = amount;
         q.grossAmount = amount;
         q.waitsOnAttestation = RouteMeta.waitsOnAttestation(route);
         q.isCanonical = RouteMeta.isCanonical(route);
@@ -480,17 +481,23 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         uint256 net = AmountMath.floorToRepresentable(netRaw, cfg.decimals, destinationDecimals);
         if (net == 0) return _blocked(q, QuoteBlocker.NotRepresentable);
 
+        uint256 retainedDust = netRaw - net;
+        uint256 actualDebit = fee + net;
+        (uint256 landing,) = AmountMath.convertDecimals(net, cfg.decimals, destinationDecimals);
+
+        q.fee = fee;
+        q.netAmount = net;
+        q.retainedDust = retainedDust;
+        q.actualDebit = actualDebit;
+        q.grossAmount = actualDebit;
+        q.destinationAmount = landing;
+
         uint256 headroom = flowAvailable(token, route);
         q.flowAvailable = headroom;
         if (net > headroom) return _blocked(q, QuoteBlocker.FlowLimitExceeded);
 
-        (uint256 landing,) = AmountMath.convertDecimals(net, cfg.decimals, destinationDecimals);
         q.available = true;
         q.reason = QuoteBlocker.None;
-        q.fee = fee;
-        q.netAmount = net;
-        q.grossAmount = fee + net;
-        q.destinationAmount = landing;
         return q;
     }
 

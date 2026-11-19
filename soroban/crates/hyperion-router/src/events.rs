@@ -55,6 +55,20 @@ pub struct ClaimSettled {
     pub settled_by: Address,
 }
 
+#[contractevent(topics = ["hyperion", "claim_archived"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimArchived {
+    #[topic]
+    pub recipient: Address,
+    #[topic]
+    pub token: Address,
+    pub claim_id: u64,
+    pub amount: i128,
+    pub source_nonce: u64,
+    pub settled_at: u64,
+    pub archived_at: u64,
+}
+
 #[contractevent(topics = ["hyperion", "pause"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PauseSet {
@@ -156,6 +170,19 @@ pub fn claim_settled(env: &Env, claim: &PendingClaim, settled_by: &Address) {
         claim_id: claim.id,
         amount: claim.amount,
         settled_by: settled_by.clone(),
+    }
+    .publish(env);
+}
+
+pub fn claim_archived(env: &Env, claim: &PendingClaim, settled_at: u64, archived_at: u64) {
+    ClaimArchived {
+        recipient: claim.recipient.clone(),
+        token: claim.token.clone(),
+        claim_id: claim.id,
+        amount: claim.amount,
+        source_nonce: claim.source_nonce,
+        settled_at,
+        archived_at,
     }
     .publish(env);
 }

@@ -26,12 +26,13 @@ pub use storage::DataKey;
 pub use timelock::{GRACE_PERIOD, MAX_TIMELOCK_DELAY, MIN_TIMELOCK_DELAY};
 pub use types::{
     AdminAction, Config, Destination, InboundRecord, Origin, OutboundRequest, PendingClaim,
-    QueuedAction, Recipient, RouteConfig, RouteQuote, TokenConfig, TransferRecord,
+    QueuedAction, Recipient, RouteConfig, RouteQuote, StorageFootprint, TokenConfig,
+    TransferRecord,
 };
 
 use hyperion_core::{
     address::{assert_route_supports, bytes32_to_evm},
-    amount::{apply_fee, assert_exact_transfer, convert_decimals_exact, floor_to_representable},
+    amount::{assert_exact_transfer, compute_quote_breakdown, convert_decimals_exact},
     flow, HyperionError, RouteKind, MAX_FEE_BPS,
 };
 use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, Vec};
@@ -213,8 +214,49 @@ impl HyperionRouter {
         }
         claim.settled = true;
         storage::set_claim(&env, &claim);
+        storage::set_claim_settled_at(&env, id, env.ledger().timestamp());
         events::claim_settled(&env, &claim, &settler);
         Ok(())
+    }
+
+    /// Bounded archival cleanup for old settled claim metadata.
+    ///
+    /// Unsettled claims are never removed, and settled claims are only eligible once they have
+    /// aged past `min_age_seconds` (at least [`storage::MIN_CLAIM_RETENTION_SECONDS`]). Emits a
+    /// [`events::ClaimArchived`] audit event before deleting the persistent entry so off-chain
+    /// indexers retain full history without paying indefinite TTL rent.
+    pub fn archive_settled_claims(
+        env: Env,
+        ids: Vec<u64>,
+        min_age_seconds: u64,
+    ) -> Result<u32, HyperionError> {
+        if ids.len() > storage::MAX_CLAIM_CLEANUP_BATCH {
+            return Err(HyperionError::InvalidLimit);
+        }
+        if min_age_seconds < storage::MIN_CLAIM_RETENTION_SECONDS {
+            return Err(HyperionError::InvalidWindow);
+        }
+        let now = env.ledger().timestamp();
+        let mut archived: u32 = 0;
+        for id in ids.iter() {
+            let Some(claim) = storage::claim(&env, id) else {
+                continue;
+            };
+            if !claim.settled {
+                continue;
+            }
+            let settled_at = storage::claim_settled_at(&env, id).unwrap_or(claim.created_at);
+            if now.saturating_sub(settled_at) < min_age_seconds {
+                continue;
+            }
+            events::claim_archived(&env, &claim, settled_at, now);
+            storage::remove_claim(&env, id);
+            archived += 1;
+        }
+        if archived > 0 {
+            storage::inc_archived_claim_count(&env, archived as u64);
+        }
+        Ok(archived)
     }
 
     // ---------------------------------------------------------------------------------------
@@ -507,8 +549,28 @@ impl HyperionRouter {
         storage::claim_count(&env)
     }
 
+    pub fn archived_claim_count(env: Env) -> u64 {
+        storage::archived_claim_count(&env)
+    }
+
     pub fn queue_count(env: Env) -> u64 {
         storage::queue_count(&env)
+    }
+
+    pub fn get_storage_footprint(env: Env) -> StorageFootprint {
+        let claim_count = storage::claim_count(&env);
+        let archived_claims = storage::archived_claim_count(&env);
+        StorageFootprint {
+            out_nonce: storage::out_nonce(&env),
+            claim_count,
+            archived_claims,
+            active_claim_entries: claim_count.saturating_sub(archived_claims),
+            queue_count: storage::queue_count(&env),
+            bump_threshold: storage::BUMP_THRESHOLD,
+            bump_to: storage::BUMP_TO,
+            min_claim_retention_seconds: storage::MIN_CLAIM_RETENTION_SECONDS,
+            max_claim_cleanup_batch: storage::MAX_CLAIM_CLEANUP_BATCH,
+        }
     }
 
     /// Check token metadata; success classifies transfer behavior as unverified.
@@ -531,9 +593,12 @@ fn unavailable(route: RouteKind, amount: i128, reason: HyperionError) -> RouteQu
         route,
         available: false,
         reason: reason as u32,
+        requested_amount: amount,
         gross_amount: amount,
         fee: 0,
         net_amount: 0,
+        retained_dust: 0,
+        actual_debit: 0,
         destination_amount: 0,
         flow_available: 0,
         waits_on_attestation: route.waits_on_attestation(),
@@ -574,23 +639,15 @@ fn quote_one(
         }
     }
 
-    let split = match apply_fee(amount, cfg.fee_bps) {
-        Ok(v) => v,
+    let breakdown = match compute_quote_breakdown(
+        amount,
+        cfg.fee_bps,
+        token_cfg.decimals,
+        destination_decimals,
+    ) {
+        Ok(b) => b,
         Err(e) => return unavailable(route, amount, e),
     };
-    let fee = split.fee;
-    let net = match floor_to_representable(split.net, token_cfg.decimals, destination_decimals) {
-        Ok(v) => v,
-        Err(e) => return unavailable(route, amount, e),
-    };
-    if net <= 0 {
-        return unavailable(route, amount, HyperionError::AmountNotRepresentable);
-    }
-    let destination_amount =
-        match convert_decimals_exact(net, token_cfg.decimals, destination_decimals) {
-            Ok(v) => v,
-            Err(e) => return unavailable(route, amount, e),
-        };
 
     let limit = match storage::effective_flow_limit(env, token, route) {
         Ok(v) => v,
@@ -598,12 +655,15 @@ fn quote_one(
     };
     let window = storage::flow_window(env, token, route);
     let headroom = flow::available(&window, limit, ledger, cfg.flow_window_ledgers).unwrap_or(0);
-    if net > headroom {
+    if breakdown.net_amount > headroom {
         let mut quote = unavailable(route, amount, HyperionError::FlowLimitExceeded);
         quote.flow_available = headroom;
-        quote.fee = fee;
-        quote.net_amount = net;
-        quote.destination_amount = destination_amount;
+        quote.fee = breakdown.fee;
+        quote.net_amount = breakdown.net_amount;
+        quote.retained_dust = breakdown.retained_dust;
+        quote.actual_debit = breakdown.actual_debit;
+        quote.gross_amount = breakdown.actual_debit;
+        quote.destination_amount = breakdown.destination_amount;
         return quote;
     }
 
@@ -611,10 +671,13 @@ fn quote_one(
         route,
         available: true,
         reason: 0,
-        gross_amount: fee + net,
-        fee,
-        net_amount: net,
-        destination_amount,
+        requested_amount: breakdown.requested_amount,
+        gross_amount: breakdown.actual_debit,
+        fee: breakdown.fee,
+        net_amount: breakdown.net_amount,
+        retained_dust: breakdown.retained_dust,
+        actual_debit: breakdown.actual_debit,
+        destination_amount: breakdown.destination_amount,
         flow_available: headroom,
         waits_on_attestation: route.waits_on_attestation(),
         is_canonical: route.is_canonical(),
@@ -665,12 +728,10 @@ fn bridge_out_inner(
         return Err(HyperionError::TokenNotRegistered);
     }
 
-    let split = apply_fee(amount, cfg.fee_bps)?;
-    let fee = split.fee;
-    let net = floor_to_representable(split.net, token_cfg.decimals, destination_decimals)?;
-    if net <= 0 {
-        return Err(HyperionError::AmountNotRepresentable);
-    }
+    let breakdown =
+        compute_quote_breakdown(amount, cfg.fee_bps, token_cfg.decimals, destination_decimals)?;
+    let fee = breakdown.fee;
+    let net = breakdown.net_amount;
     // Circle's forwarding fee is paid from the burned USDC. Protect the user's minimum
     // after that entire fee budget, rather than comparing against the pre-fee burn.
     let minimum_net = match (route, gas_amount) {
@@ -687,7 +748,7 @@ fn bridge_out_inner(
     if destination_amount < min_destination_amount {
         return Err(HyperionError::SlippageExceeded);
     }
-    let gross = fee + net;
+    let gross = breakdown.actual_debit;
 
     // Charge the flow limit against what actually crosses, not against what the sender
     // handed over. The fee never leaves Stellar, so it is not cross-chain exposure.

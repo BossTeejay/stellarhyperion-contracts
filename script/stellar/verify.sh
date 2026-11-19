@@ -100,6 +100,24 @@ else
   check "token flow limit" "$(tfield flow_limit)" "$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const t=d.networks[process.argv[2]].tokens;process.stdout.write(t[Object.keys(t)[0]].flowLimit)' "$RECORD" "$CHAIN_KEY")"
 fi
 
+note "storage footprint & cost projection"
+FOOTPRINT=$(read_only "$ROUTER" get_storage_footprint 2>/dev/null || echo "")
+if [ -n "$FOOTPRINT" ]; then
+  FP_TMP=$(mktemp)
+  printf '%s' "$FOOTPRINT" > "$FP_TMP"
+  node "$(dirname "$0")/storage-cost.mjs" --record "$RECORD" --footprint "$FP_TMP" | sed 's/^/   /'
+  rm -f "$FP_TMP"
+else
+  OUT_NONCE=$(read_only "$ROUTER" last_out_nonce 2>/dev/null | tr -d '[:space:]' || echo "0")
+  CLAIMS=$(read_only "$ROUTER" claim_count 2>/dev/null | tr -d '[:space:]' || echo "0")
+  QUEUED=$(read_only "$ROUTER" queue_count 2>/dev/null | tr -d '[:space:]' || echo "0")
+  node "$(dirname "$0")/storage-cost.mjs" \
+    --record "$RECORD" \
+    --out-nonce "${OUT_NONCE:-0}" \
+    --claim-count "${CLAIMS:-0}" \
+    --queue-count "${QUEUED:-0}" | sed 's/^/   /'
+fi
+
 printf '\n'
 if [ "$problems" -eq 0 ]; then
   printf '\033[32mEverything on chain matches the record.\033[0m\n'
