@@ -218,10 +218,10 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         OutboundPlan memory plan = _planOutbound(request);
 
         IERC20 token = IERC20(request.token);
-        uint256 balanceBefore = token.balanceOf(address(this));
+        uint256 tokenBalBefore = token.balanceOf(address(this));
         token.safeTransferFrom(msg.sender, address(this), plan.gross);
-        uint256 balanceAfter = token.balanceOf(address(this));
-        if (balanceAfter - balanceBefore != plan.gross) revert InvalidAmount();
+        uint256 tokenBalAfter = token.balanceOf(address(this));
+        if (tokenBalAfter - tokenBalBefore != plan.gross) revert InvalidAmount();
 
         if (plan.fee != 0) {
             uint256 treasuryBefore = token.balanceOf(treasury);
@@ -341,10 +341,10 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         // Pull rather than trust. The receiver approves this transfer before calling in, so if
         // the funds are not actually here the delivery reverts now instead of writing down a
         // claim against money nobody holds.
-        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
+        uint256 tokenBalBefore = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        uint256 balanceAfter = IERC20(token).balanceOf(address(this));
-        if (balanceAfter - balanceBefore != amount) revert InvalidAmount();
+        uint256 tokenBalAfter = IERC20(token).balanceOf(address(this));
+        if (tokenBalAfter - tokenBalBefore != amount) revert InvalidAmount();
 
         if (_tryPay(token, recipient, amount)) {
             emit BridgeIn(route, recipient, token, amount, origin.chain, origin.nonce, origin.messageId);
@@ -761,9 +761,8 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             if (!okDec || retDec.length < 32 || abi.decode(retDec, (uint8)) != action.decimals) {
                 revert InvalidDecimals();
             }
-            (bool okBal, bytes memory retBal) = action.subject.staticcall(
-                abi.encodeWithSignature("balanceOf(address)", address(this))
-            );
+            (bool okBal, bytes memory retBal) =
+                action.subject.staticcall(abi.encodeWithSignature("balanceOf(address)", address(this)));
             if (!okBal || retBal.length < 32) {
                 revert TokenNotRegistered();
             }
