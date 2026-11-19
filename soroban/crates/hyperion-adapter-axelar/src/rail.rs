@@ -7,6 +7,37 @@
 //! so a transcription that has drifted fails immediately and loudly on the first call rather than
 //! quietly doing the wrong thing.
 //!
+//! # Message and Trust Surfaces: GMP vs ITS Token-Manager Transitions
+//!
+//! Axelar routes encompass two trust and message boundaries:
+//! 1. **ITS Token-Manager transitions**: Native interchain token transfers, mint/burn, and lock/unlock
+//!    managers authenticate token operations and gas relaying. Token mappings are verified against ITS
+//!    at registration (`map_token`), ensuring asset alignment.
+//! 2. **GMP message transitions**: Payloads attached to transfers specify the far-side recipient and
+//!    origin router metadata. Inbound execution (`execute_with_interchain_token`) strictly enforces
+//!    that the source caller matches ITS and the originating payload sender matches the trusted `peer`
+//!    configured for the source chain.
+//!
+//! # Source-Note and Destination-Payment Reconciliation
+//!
+//! Axelar paid ITS dispatch authenticates the sender and native gas payment. Reconciling cross-chain
+//! dispatches requires joining encoded note intent with candidate destination ITS payment events:
+//! - **Exact agreement criteria**:
+//!   1. Recipient decoded from source note must match the destination payment recipient.
+//!   2. Axelar token ID must match between source dispatch and destination receipt.
+//!   3. Dispatched amount and destination received amount must match exactly as integers (no float math).
+//!   4. Full command identity (e.g. Axelar `commandId` or `messageId` reference) must be present and verified.
+//! - **Unverified reporting**: Partial receipts (missing amount, recipient, or command identity) or
+//!   mismatched receipts are reported as unverified development evidence with explicit discrepancy tags.
+//! - **Raw reference retention**: Reconciliation tools must retain original raw references (transaction
+//!   hashes, block numbers, raw note payloads, token addresses) without relying on display nonces for
+//!   correctness.
+//!
+//! # Deployment Gating
+//!
+//! The active deployment is Stellar Testnet outbound ITS/CCTP. EVM contracts, GMP inbound execution,
+//! and other rail development remain strictly gated until independently validated on testnets.
+//!
 //! Transcribed from `axelarnetwork/axelar-amplifier-stellar` on branch `main`:
 //!
 //! - `contracts/stellar-interchain-token-service/src/interface.rs`

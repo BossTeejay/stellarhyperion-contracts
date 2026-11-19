@@ -775,6 +775,33 @@ contract AxelarItsAdapterTest is Fixture {
         adapter.topUpGas{value: 0.1 ether}(keccak256("x"), 0, address(0));
     }
 
+    function test_inspect_outbound_note() public view {
+        bytes memory note = _outboundNote(alice, 42);
+        (address recipient, uint64 nonce) = adapter.inspectOutboundNote(note);
+        assertEq(recipient, alice);
+        assertEq(nonce, 42);
+    }
+
+    function test_inspect_inbound_note() public view {
+        bytes memory note = _inboundNote(AddressKind.Account, STELLAR_ALICE, 99);
+        (AddressKind kind, string memory strkey, uint64 nonce) = adapter.inspectInboundNote(note);
+        assertEq(uint8(kind), uint8(AddressKind.Account));
+        assertEq(strkey, STELLAR_ALICE);
+        assertEq(nonce, 99);
+    }
+
+    function test_inspect_outbound_note_reverts_on_malformed() public {
+        bytes memory badNote = hex"010203";
+        vm.expectRevert(MalformedMessage.selector);
+        adapter.inspectOutboundNote(badNote);
+    }
+
+    function test_inspect_inbound_note_reverts_on_malformed() public {
+        bytes memory badNote = hex"010203";
+        vm.expectRevert(MalformedMessage.selector);
+        adapter.inspectInboundNote(badNote);
+    }
+
     // -------------------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------------------

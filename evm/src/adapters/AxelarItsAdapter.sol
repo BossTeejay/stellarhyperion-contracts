@@ -309,6 +309,24 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         return _byAxelarName[axelarChain];
     }
 
+    /// @notice Read-only inspection of an Axelar outbound note payload.
+    function inspectOutboundNote(bytes calldata payload)
+        external
+        pure
+        returns (address recipient, uint64 nonce)
+    {
+        return HyperionNotes.decodeOutboundNote(payload);
+    }
+
+    /// @notice Read-only inspection of an Axelar inbound note payload.
+    function inspectInboundNote(bytes calldata payload)
+        external
+        pure
+        returns (AddressKind kind, string memory strkey, uint64 nonce)
+    {
+        return HyperionNotes.decodeInboundNote(payload);
+    }
+
     function _refund() private {
         uint256 balance = address(this).balance;
         if (balance == 0) return;
