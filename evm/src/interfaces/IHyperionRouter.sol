@@ -2,7 +2,6 @@
 pragma solidity 0.8.28;
 
 import {
-    ActionAudit,
     ActionAuditStatus,
     ActionKind,
     AdminAction,
@@ -125,7 +124,14 @@ interface IHyperionRouter {
     event ActionCancelled(uint64 indexed id, address indexed by);
 
     /// @notice Emitted on queue, execute, and cancel with bounded audit metadata.
+    /// @param version Audit encoding version, currently one.
+    /// @param id The original action identifier.
+    /// @param status The lifecycle transition.
+    /// @param actor The caller responsible for this transition.
+    /// @param cancelReason Structured cancellation reason, or Unspecified.
+    /// @param reasonNote At most 128 printable ASCII bytes.
     event ActionAuditUpdated(
+        uint32 version,
         uint64 indexed id,
         ActionAuditStatus indexed status,
         address indexed actor,
@@ -290,9 +296,9 @@ interface IHyperionRouter {
     /// @return The action, its timestamps, and whether it has already been executed.
     function queuedAction(uint64 id) external view returns (QueuedAction memory);
 
-    /// @notice Read the lifecycle audit record for a timelock action.
+    /// @notice Whether the action was cancelled; its original payload remains queryable.
     /// @param id The action to read.
-    function actionAudit(uint64 id) external view returns (ActionAudit memory);
+    function actionCancelled(uint64 id) external view returns (bool);
 
     /// @notice Read a parked claim.
     /// @param id The claim to read.

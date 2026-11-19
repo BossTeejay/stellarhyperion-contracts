@@ -4,8 +4,8 @@ use soroban_sdk::{Address, ContractExecutable, Env, String};
 
 use crate::storage;
 use crate::types::{
-    ActionAudit, ActionAuditStatus, AdminAction, CancelReason, Config, QueuedAction, RouteConfig,
-    TokenConfig, MAX_REASON_LEN,
+    ActionAuditStatus, AdminAction, CancelReason, Config, MigrationStatus, QueuedAction,
+    RouteConfig, TokenConfig, CURRENT_SCHEMA_VERSION, MAX_REASON_LEN,
 };
 
 /// Shortest and longest delay the router will accept.
@@ -46,21 +46,14 @@ pub fn queue(
         expires_at: now + cfg.timelock_delay + GRACE_PERIOD,
     };
     storage::set_queued(env, &queued);
-    let audit = ActionAudit {
+    crate::events::action_audit(
+        env,
         id,
-        action,
-        status: ActionAuditStatus::Queued,
-        queued_by: queued_by.clone(),
-        queued_at: now,
-        eta: queued.eta,
-        expires_at: queued.expires_at,
-        resolved_by: None,
-        resolved_at: 0,
-        cancel_reason: CancelReason::Unspecified,
-        reason_note: String::from_str(env, ""),
-    };
-    storage::set_action_audit(env, &audit);
-    crate::events::action_audit(env, &audit);
+        ActionAuditStatus::Queued,
+        queued_by,
+        CancelReason::Unspecified,
+        String::from_str(env, ""),
+    );
     Ok(queued)
 }
 
@@ -73,25 +66,16 @@ pub fn take_matured(env: &Env, caller: &Address, id: u64) -> Result<QueuedAction
     if now > queued.expires_at {
         return Err(HyperionError::TimelockExpired);
     }
+    storage::retain_action(env, &queued);
     storage::clear_queued(env, id);
-    let mut audit = storage::action_audit(env, id).unwrap_or(ActionAudit {
+    crate::events::action_audit(
+        env,
         id,
-        action: queued.action.clone(),
-        status: ActionAuditStatus::Queued,
-        queued_by: caller.clone(),
-        queued_at: queued.queued_at,
-        eta: queued.eta,
-        expires_at: queued.expires_at,
-        resolved_by: None,
-        resolved_at: 0,
-        cancel_reason: CancelReason::Unspecified,
-        reason_note: String::from_str(env, ""),
-    });
-    audit.status = ActionAuditStatus::Executed;
-    audit.resolved_by = Some(caller.clone());
-    audit.resolved_at = now;
-    storage::set_action_audit(env, &audit);
-    crate::events::action_audit(env, &audit);
+        ActionAuditStatus::Executed,
+        caller,
+        CancelReason::Unspecified,
+        String::from_str(env, ""),
+    );
     Ok(queued)
 }
 
@@ -101,35 +85,24 @@ pub fn cancel(
     id: u64,
     reason: CancelReason,
     note: String,
-) -> Result<ActionAudit, HyperionError> {
+) -> Result<(), HyperionError> {
     if note.len() > MAX_REASON_LEN {
         return Err(HyperionError::InvalidLimit);
     }
+    // Printable ASCII is the deliberately narrow, shared EVM/Soroban wire encoding.
+    if note
+        .to_bytes()
+        .iter()
+        .any(|byte| !(32..=126).contains(&byte))
+    {
+        return Err(HyperionError::InvalidLimit);
+    }
     let queued = storage::queued(env, id).ok_or(HyperionError::TimelockNotQueued)?;
+    storage::retain_action(env, &queued);
     storage::clear_queued(env, id);
-    let now = env.ledger().timestamp();
-    let mut audit = storage::action_audit(env, id).unwrap_or(ActionAudit {
-        id,
-        action: queued.action,
-        status: ActionAuditStatus::Queued,
-        queued_by: caller.clone(),
-        queued_at: queued.queued_at,
-        eta: queued.eta,
-        expires_at: queued.expires_at,
-        resolved_by: None,
-        resolved_at: 0,
-        cancel_reason: CancelReason::Unspecified,
-        reason_note: String::from_str(env, ""),
-    });
-    audit.status = ActionAuditStatus::Cancelled;
-    audit.resolved_by = Some(caller.clone());
-    audit.resolved_at = now;
-    audit.cancel_reason = reason;
-    audit.reason_note = note;
-    storage::set_action_audit(env, &audit);
     crate::events::action_cancelled(env, id, caller);
-    crate::events::action_audit(env, &audit);
-    Ok(audit)
+    crate::events::action_audit(env, id, ActionAuditStatus::Cancelled, caller, reason, note);
+    Ok(())
 }
 
 /// Reject a queued action that could never be executed successfully.
@@ -170,6 +143,9 @@ fn validate(action: &AdminAction) -> Result<(), HyperionError> {
             return Err(HyperionError::InvalidLimit)
         }
         AdminAction::SetRouteConfig(_, cfg) if cfg.max_single_transfer < 0 => {
+            return Err(HyperionError::InvalidLimit);
+        }
+        AdminAction::BeginStorageMigration(version) if *version != CURRENT_SCHEMA_VERSION => {
             return Err(HyperionError::InvalidLimit);
         }
         _ => {}
@@ -290,6 +266,24 @@ pub fn apply(env: &Env, action: &AdminAction) -> Result<(), HyperionError> {
         AdminAction::Upgrade(wasm_hash) => {
             env.deployer()
                 .update_current_contract(ContractExecutable::Wasm(wasm_hash.clone()));
+        }
+        AdminAction::BeginStorageMigration(version) => {
+            // The fixed high-water marks keep concurrent new deliveries from moving the goal.
+            // Repeating a reviewed authorization never resets an interrupted migration.
+            if storage::schema_version(env) < *version && storage::migration_state(env).is_none() {
+                storage::set_migration_state(
+                    env,
+                    &MigrationStatus {
+                        current_version: storage::schema_version(env),
+                        target_version: *version,
+                        migration_pending: true,
+                        migrated_transfers: 0,
+                        migrated_claims: 0,
+                        total_transfers: storage::out_nonce(env),
+                        total_claims: storage::claim_count(env),
+                    },
+                );
+            }
         }
         AdminAction::SetRouteConfig(route, route_cfg) => {
             if route_cfg.max_single_transfer < 0 {

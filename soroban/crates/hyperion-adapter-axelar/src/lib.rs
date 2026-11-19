@@ -65,7 +65,7 @@ use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contractimpl, token, vec,
     xdr::ToXdr,
-    Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 use rail::{InterchainTokenServiceClient, Token, TokenManagerType};
@@ -513,6 +513,14 @@ impl AxelarAdapter {
             || peer_domains.len() > MAX_MAINTENANCE_BATCH
             || remote_tokens.len() > MAX_MAINTENANCE_BATCH
             || inbound_messages.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains
+                .len()
+                .saturating_add(tokens.len())
+                .saturating_add(remote_tokens.len())
+                .saturating_mul(2)
+                > MAX_MAINTENANCE_BATCH
+            || !peer_domains.is_empty()
+            || !inbound_messages.is_empty()
         {
             return Err(HyperionError::InvalidLimit);
         }

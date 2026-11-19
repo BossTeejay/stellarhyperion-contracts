@@ -515,7 +515,14 @@ impl AllbridgeAdapter {
             || peer_domains.len() > MAX_MAINTENANCE_BATCH
             || remote_tokens.len() > MAX_MAINTENANCE_BATCH
             || inbound_messages.len() > MAX_MAINTENANCE_BATCH
-            || tokens.len().saturating_mul(peer_domains.len()) > MAX_MAINTENANCE_BATCH
+            || peer_chains
+                .len()
+                .saturating_mul(2)
+                .saturating_add(peer_domains.len())
+                .saturating_add(tokens.len().saturating_mul(peer_domains.len()))
+                .saturating_add(inbound_messages.len())
+                > MAX_MAINTENANCE_BATCH
+            || !remote_tokens.is_empty()
         {
             return Err(HyperionError::InvalidLimit);
         }
@@ -561,8 +568,8 @@ impl AllbridgeAdapter {
     }
 
     /// Explicit key coverage for Allbridge adapter storage maintenance.
-    pub fn key_coverage(_env: Env) -> AdapterKeyCoverage {
-        AdapterKeyCoverage {
+    pub fn key_coverage(_env: Env) -> Result<AdapterKeyCoverage, HyperionError> {
+        Ok(AdapterKeyCoverage {
             route: RouteKind::Allbridge,
             has_token_mappings: true,
             has_peer_trust: true,
@@ -570,7 +577,7 @@ impl AllbridgeAdapter {
             token_mapping_keys: 1,
             peer_trust_keys: 2,
             inbound_record_keys: 1,
-        }
+        })
     }
 
     // ---------------------------------------------------------------------------------------

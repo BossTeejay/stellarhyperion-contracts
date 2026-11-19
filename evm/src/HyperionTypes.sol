@@ -190,21 +190,6 @@ enum ActionAuditStatus {
     Cancelled
 }
 
-/// @dev Stable action lifecycle audit metadata for off-chain consumers and operators.
-struct ActionAudit {
-    uint64 id;
-    AdminAction action;
-    ActionAuditStatus status;
-    address queuedBy;
-    uint64 queuedAt;
-    uint64 eta;
-    uint64 expiresAt;
-    address resolvedBy;
-    uint64 resolvedAt;
-    CancelReason cancelReason;
-    string reasonNote;
-}
-
 /// @dev Why a route turned a quote down.
 enum QuoteBlocker {
     None,

@@ -2,7 +2,7 @@ use hyperion_core::{FlowWindow, HyperionError, RouteKind};
 use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 use crate::types::{
-    ActionAudit, Config, PendingClaim, QueuedAction, RouteConfig, TokenConfig, TransferRecord,
+    Config, MigrationStatus, PendingClaim, QueuedAction, RouteConfig, TokenConfig, TransferRecord,
     LEGACY_SCHEMA_VERSION,
 };
 
@@ -46,10 +46,9 @@ pub enum DataKey {
     QueueSeq,
     /// Explicit storage schema version for upgrades and migrations (#46).
     SchemaVersion,
-    /// Bounded migration progress cursor `(migrated_transfers, migrated_claims)` (#46).
-    MigrationCursor,
     /// Action lifecycle audit metadata (#44).
-    ActionAudit(u64),
+    ResolvedAction(u64),
+    MigrationState,
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -253,9 +252,7 @@ pub fn set_transfer(env: &Env, record: &TransferRecord) {
 /// Persistent rather than temporary on purpose. A temporary entry that archives is a replay
 /// window, and a replay window on a bridge is a mint-twice bug.
 pub fn is_processed(env: &Env, route: RouteKind, message_id: &BytesN<32>) -> bool {
-    env.storage()
-        .persistent()
-        .has(&DataKey::Processed(route, message_id.clone()))
+    touch_persistent_key(env, &DataKey::Processed(route, message_id.clone()))
 }
 
 pub fn mark_processed(env: &Env, route: RouteKind, message_id: &BytesN<32>) {
@@ -301,6 +298,17 @@ pub fn set_claim(env: &Env, record: &PendingClaim) {
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn migration_state(env: &Env) -> Option<MigrationStatus> {
+    env.storage().instance().get(&DataKey::MigrationState)
+}
+
+pub fn set_migration_state(env: &Env, status: &MigrationStatus) {
+    env.storage()
+        .instance()
+        .set(&DataKey::MigrationState, status);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn next_queue_id(env: &Env) -> u64 {
@@ -351,11 +359,6 @@ pub fn touch_flow(env: &Env, token: &Address, route: RouteKind) {
     }
 }
 
-/// Pure read-only check for persistent key presence (does not mutate TTL).
-pub fn has_persistent_key(env: &Env, key: &DataKey) -> bool {
-    env.storage().persistent().has(key)
-}
-
 /// Extend TTL on a persistent key if it currently exists in active storage.
 pub fn touch_persistent_key(env: &Env, key: &DataKey) -> bool {
     if env.storage().persistent().has(key) {
@@ -382,38 +385,22 @@ pub fn set_schema_version(env: &Env, version: u32) {
     env.storage()
         .instance()
         .set(&DataKey::SchemaVersion, &version);
-    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
-pub fn migration_cursor(env: &Env) -> (u64, u64) {
-    env.storage()
-        .instance()
-        .get(&DataKey::MigrationCursor)
-        .unwrap_or((0u64, 0u64))
-}
-
-pub fn set_migration_cursor(env: &Env, transfers: u64, claims: u64) {
-    env.storage()
-        .instance()
-        .set(&DataKey::MigrationCursor, &(transfers, claims));
-    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
-}
-
-pub fn action_audit(env: &Env, id: u64) -> Option<ActionAudit> {
-    let key = DataKey::ActionAudit(id);
-    let audit = env.storage().persistent().get(&key);
-    if audit.is_some() {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
-    }
-    audit
-}
-
-pub fn set_action_audit(env: &Env, audit: &ActionAudit) {
-    let key = DataKey::ActionAudit(audit.id);
-    env.storage().persistent().set(&key, audit);
+pub fn retain_action(env: &Env, action: &QueuedAction) {
+    let key = DataKey::ResolvedAction(action.id);
+    env.storage().persistent().set(&key, action);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn action_payload(env: &Env, id: u64) -> Option<QueuedAction> {
+    let key = if env.storage().persistent().has(&DataKey::Queued(id)) {
+        DataKey::Queued(id)
+    } else {
+        DataKey::ResolvedAction(id)
+    };
+    touch_persistent_key(env, &key);
+    env.storage().persistent().get(&key)
 }

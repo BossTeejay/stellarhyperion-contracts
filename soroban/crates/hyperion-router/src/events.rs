@@ -2,8 +2,8 @@ use hyperion_core::RouteKind;
 use soroban_sdk::{contractevent, Address, Env};
 
 use crate::types::{
-    ActionAudit, AdminAction, Config, InboundRecord, MigrationStatus, PendingClaim, QueuedAction,
-    TokenConfig, TransferRecord,
+    ActionAuditStatus, AdminAction, CancelReason, Config, InboundRecord, MigrationStatus,
+    PendingClaim, QueuedAction, TokenConfig, TransferRecord,
 };
 
 /// Every state change the router makes is announced here.
@@ -95,13 +95,19 @@ pub struct ActionCancelled {
 pub struct ActionAuditRecorded {
     #[topic]
     pub id: u64,
-    pub audit: ActionAudit,
+    pub version: u32,
+    pub status: ActionAuditStatus,
+    /// Actor for this lifecycle transition; legacy queuing authors are never invented.
+    pub actor: Address,
+    pub reason: CancelReason,
+    pub note: soroban_sdk::String,
 }
 
 /// Emitted when bounded storage migration advances or completes (#46).
 #[contractevent(topics = ["hyperion", "migrated"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageMigrated {
+    pub version: u32,
     #[topic]
     pub by: Address,
     pub status: MigrationStatus,
@@ -210,16 +216,28 @@ pub fn action_cancelled(env: &Env, id: u64, by: &Address) {
     ActionCancelled { by: by.clone(), id }.publish(env);
 }
 
-pub fn action_audit(env: &Env, audit: &ActionAudit) {
+pub fn action_audit(
+    env: &Env,
+    id: u64,
+    status: ActionAuditStatus,
+    actor: &Address,
+    reason: CancelReason,
+    note: soroban_sdk::String,
+) {
     ActionAuditRecorded {
-        id: audit.id,
-        audit: audit.clone(),
+        id,
+        version: 1,
+        status,
+        actor: actor.clone(),
+        reason,
+        note,
     }
     .publish(env);
 }
 
 pub fn storage_migrated(env: &Env, by: &Address, status: &MigrationStatus) {
     StorageMigrated {
+        version: 1,
         by: by.clone(),
         status: status.clone(),
     }

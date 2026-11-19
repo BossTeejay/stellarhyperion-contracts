@@ -39,7 +39,6 @@ import {
     ZeroAddress
 } from "./HyperionErrors.sol";
 import {
-    ActionAudit,
     ActionAuditStatus,
     ActionKind,
     AddressKind,
@@ -161,7 +160,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
 
     mapping(uint64 claimId => PendingClaim claim) private _claims;
     mapping(uint64 actionId => QueuedAction queued) private _actions;
-    mapping(uint64 actionId => ActionAudit audit) private _actionAudits;
+    mapping(uint64 actionId => bool cancelled) private _cancelledActions;
 
     /// @param admin Holds every privileged power, all of them behind the timelock.
     /// @notice Wires up the router with its roles, its treasury, and its fee and timing limits.
@@ -608,27 +607,14 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             expiresAt: expiresAt,
             executed: false
         });
-        _actionAudits[id] = ActionAudit({
-            id: id,
-            action: action,
-            status: ActionAuditStatus.Queued,
-            queuedBy: msg.sender,
-            queuedAt: uint64(block.timestamp),
-            eta: eta,
-            expiresAt: expiresAt,
-            resolvedBy: address(0),
-            resolvedAt: 0,
-            cancelReason: CancelReason.Unspecified,
-            reasonNote: ""
-        });
         emit ActionQueued(id, action.kind, eta, expiresAt);
-        emit ActionAuditUpdated(id, ActionAuditStatus.Queued, msg.sender, CancelReason.Unspecified, "");
+        emit ActionAuditUpdated(1, id, ActionAuditStatus.Queued, msg.sender, CancelReason.Unspecified, "");
     }
 
     /// @inheritdoc IHyperionRouter
     function executeAction(uint64 id) external override onlyRole(DEFAULT_ADMIN_ROLE) {
         QueuedAction storage queued = _actions[id];
-        if (queued.id == 0) revert TimelockNotQueued();
+        if (queued.id == 0 || _cancelledActions[id]) revert TimelockNotQueued();
         if (queued.executed) revert TimelockAlreadyExecuted();
         if (block.timestamp < queued.eta) revert TimelockNotReady(queued.eta);
         if (block.timestamp > queued.expiresAt) revert TimelockExpired(queued.expiresAt);
@@ -640,12 +626,8 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         // under another.
         _validateAction(action);
         _applyAction(action);
-        ActionAudit storage audit = _actionAudits[id];
-        audit.status = ActionAuditStatus.Executed;
-        audit.resolvedBy = msg.sender;
-        audit.resolvedAt = uint64(block.timestamp);
         emit ActionExecuted(id, action.kind);
-        emit ActionAuditUpdated(id, ActionAuditStatus.Executed, msg.sender, CancelReason.Unspecified, "");
+        emit ActionAuditUpdated(1, id, ActionAuditStatus.Executed, msg.sender, CancelReason.Unspecified, "");
     }
 
     /// @inheritdoc IHyperionRouter
@@ -656,10 +638,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     }
 
     /// @inheritdoc IHyperionRouter
-    function cancelActionWithReason(uint64 id, CancelReason reason, string calldata note)
-        external
-        override
-    {
+    function cancelActionWithReason(uint64 id, CancelReason reason, string calldata note) external override {
         _cancelAction(id, reason, note);
     }
 
@@ -667,19 +646,18 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
             revert Unauthorized();
         }
-        if (bytes(note).length > MAX_REASON_LEN) revert InvalidLimit();
+        bytes memory raw = bytes(note);
+        if (raw.length > MAX_REASON_LEN) revert InvalidLimit();
+        for (uint256 i; i < raw.length; ++i) {
+            if (uint8(raw[i]) < 32 || uint8(raw[i]) > 126) revert InvalidLimit();
+        }
         QueuedAction storage queued = _actions[id];
-        if (queued.id == 0) revert TimelockNotQueued();
+        if (queued.id == 0 || _cancelledActions[id]) revert TimelockNotQueued();
         if (queued.executed) revert TimelockAlreadyExecuted();
-        ActionAudit storage audit = _actionAudits[id];
-        audit.status = ActionAuditStatus.Cancelled;
-        audit.resolvedBy = msg.sender;
-        audit.resolvedAt = uint64(block.timestamp);
-        audit.cancelReason = reason;
-        audit.reasonNote = note;
-        delete _actions[id];
+        _cancelledActions[id] = true;
+        // Retain the canonical payload and schedule. The audit status blocks execution forever.
         emit ActionCancelled(id, msg.sender);
-        emit ActionAuditUpdated(id, ActionAuditStatus.Cancelled, msg.sender, reason, note);
+        emit ActionAuditUpdated(1, id, ActionAuditStatus.Cancelled, msg.sender, reason, note);
     }
 
     /// @notice Role changes go through the timelock like everything else.
@@ -704,8 +682,8 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     }
 
     /// @inheritdoc IHyperionRouter
-    function actionAudit(uint64 id) external view override returns (ActionAudit memory) {
-        return _actionAudits[id];
+    function actionCancelled(uint64 id) external view override returns (bool) {
+        return _cancelledActions[id];
     }
 
     /// @inheritdoc IHyperionRouter

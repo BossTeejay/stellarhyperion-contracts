@@ -441,7 +441,14 @@ impl CctpAdapter {
             || peer_domains.len() > MAX_MAINTENANCE_BATCH
             || remote_tokens.len() > MAX_MAINTENANCE_BATCH
             || inbound_messages.len() > MAX_MAINTENANCE_BATCH
-            || peer_domains.len().saturating_mul(remote_tokens.len()) > MAX_MAINTENANCE_BATCH
+            || peer_chains
+                .len()
+                .saturating_add(peer_domains.len())
+                .saturating_mul(3)
+                .saturating_add(peer_domains.len().saturating_mul(remote_tokens.len()))
+                > MAX_MAINTENANCE_BATCH
+            || !tokens.is_empty()
+            || !inbound_messages.is_empty()
         {
             return Err(HyperionError::InvalidLimit);
         }
@@ -476,8 +483,8 @@ impl CctpAdapter {
     }
 
     /// Explicit key coverage for CCTP adapter storage maintenance.
-    pub fn key_coverage(_env: Env) -> AdapterKeyCoverage {
-        AdapterKeyCoverage {
+    pub fn key_coverage(_env: Env) -> Result<AdapterKeyCoverage, HyperionError> {
+        Ok(AdapterKeyCoverage {
             route: RouteKind::Cctp,
             has_token_mappings: true,
             has_peer_trust: true,
@@ -485,7 +492,7 @@ impl CctpAdapter {
             token_mapping_keys: 1,
             peer_trust_keys: 3,
             inbound_record_keys: 0,
-        }
+        })
     }
 
     // ---------------------------------------------------------------------------------------

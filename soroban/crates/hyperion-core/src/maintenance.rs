@@ -46,6 +46,7 @@ pub struct AdapterKeyCoverage {
 /// Bounded storage maintenance interface implemented by rail adapters.
 #[contractclient(name = "AdapterMaintenanceClient")]
 pub trait AdapterMaintenance {
+    fn key_coverage(env: Env) -> Result<AdapterKeyCoverage, HyperionError>;
     /// Extend TTL on bounded batches of adapter persistent entries.
     fn maintain_storage(
         env: Env,
