@@ -775,6 +775,12 @@ contract AxelarItsAdapterTest is Fixture {
         adapter.topUpGas{value: 0.1 ether}(keccak256("x"), 0, address(0));
     }
 
+    function test_inspect_paid_dispatch_targets() public view {
+        (address itsSpender, address gasServiceRecipient) = adapter.inspectPaidDispatchTargets();
+        assertEq(itsSpender, address(its));
+        assertEq(gasServiceRecipient, address(gasService));
+    }
+
     // -------------------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------------------

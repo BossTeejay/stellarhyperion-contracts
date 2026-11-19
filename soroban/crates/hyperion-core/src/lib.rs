@@ -23,7 +23,10 @@ pub use amount::{
     convert_decimals, convert_decimals_exact, floor_to_representable, scale_amount, Conversion,
     FeeSplit,
 };
-pub use axelar::{InboundNote, OutboundNote};
+pub use axelar::{
+    inspect_auth_tree_snapshot, AuthorizedDebit, InboundNote, OutboundNote,
+    PaidDispatchAuthSnapshot, PrivilegeExpansion,
+};
 pub use cctp::{BurnMessage, CctpMessage, HyperionHook};
 pub use error::HyperionError;
 pub use flow::FlowWindow;

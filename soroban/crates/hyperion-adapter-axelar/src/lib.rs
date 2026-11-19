@@ -69,7 +69,7 @@ use soroban_sdk::{
 };
 
 use rail::{InterchainTokenServiceClient, Token, TokenManagerType};
-use types::{ChainLink, Config};
+use types::{ChainLink, Config, PaidDispatchAuthSpec};
 
 #[contract]
 pub struct AxelarAdapter;
@@ -698,6 +698,46 @@ impl AxelarAdapter {
         let cfg = storage::config(&env)?;
         let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
         Ok(InterchainTokenServiceClient::new(&env, &cfg.its).flow_limit(&token_id))
+    }
+
+    /// Read-only inspection of the exact expected spender and gas recipient parameters for a paid dispatch.
+    /// Provides an offline-verifiable baseline to inspect simulated authorization trees against before signing.
+    pub fn paid_dispatch_auth_spec(
+        env: Env,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        gas_amount: i128,
+    ) -> Result<PaidDispatchAuthSpec, HyperionError> {
+        let cfg = storage::config(&env)?;
+        if cfg.route != RouteKind::AxelarIts {
+            return Err(HyperionError::UnsupportedRoute);
+        }
+        if amount <= 0 || gas_amount <= 0 {
+            return Err(HyperionError::InvalidAmount);
+        }
+        let _link = storage::link(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
+        let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
+        let its = InterchainTokenServiceClient::new(&env, &cfg.its);
+        let manager_type = its.token_manager_type(&token_id);
+        let takes_by_burning = manager_type.takes_by_burning();
+        let token_manager = if takes_by_burning {
+            token.clone()
+        } else {
+            its.deployed_token_manager(&token_id)
+        };
+        let gas_token = its.native_token_address();
+        let gas_recipient = cfg.its.clone();
+
+        Ok(PaidDispatchAuthSpec {
+            token,
+            amount,
+            token_manager,
+            takes_by_burning,
+            gas_token,
+            gas_recipient,
+            gas_amount,
+        })
     }
 }
 

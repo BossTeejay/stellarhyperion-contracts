@@ -28,3 +28,16 @@ pub struct ChainLink {
     /// the single address an inbound note is accepted from.
     pub peer: BytesN<20>,
 }
+
+/// Expected parameters for a paid dispatch authorization tree, readable offline.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaidDispatchAuthSpec {
+    pub token: Address,
+    pub amount: i128,
+    pub token_manager: Address,
+    pub takes_by_burning: bool,
+    pub gas_token: Address,
+    pub gas_recipient: Address,
+    pub gas_amount: i128,
+}

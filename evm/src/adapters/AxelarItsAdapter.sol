@@ -309,6 +309,13 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         return _byAxelarName[axelarChain];
     }
 
+    /// @notice Read-only inspection of the expected spender and gas recipient for paid dispatch on EVM.
+    /// @dev On EVM, the router is the sole caller to dispatch, and ITS is the only spender approved for token movement.
+    /// Gas payment is forwarded directly in msg.value to ITS, which relays to AxelarGasService.
+    function inspectPaidDispatchTargets() external view returns (address itsSpender, address gasServiceRecipient) {
+        return (address(ITS), address(GAS_SERVICE));
+    }
+
     function _refund() private {
         uint256 balance = address(this).balance;
         if (balance == 0) return;

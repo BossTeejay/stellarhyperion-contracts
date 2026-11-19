@@ -7,6 +7,35 @@
 //! so a transcription that has drifted fails immediately and loudly on the first call rather than
 //! quietly doing the wrong thing.
 //!
+//! # Paid Dispatch Authorization Trees and Privilege Expansion
+//!
+//! Axelar paid ITS dispatch authenticates the sender and native gas payment in a single atomic authorization
+//! tree signed by the source wallet:
+//! - **Nested authorization structure**:
+//!   1. Root invocation: `router.bridge_out_with_gas(user, request, gas_amount)`
+//!   2. Fee debit: `token.transfer(user, treasury, fee_amount)`
+//!   3. Adapter dispatch: `adapter.dispatch_from(router, user, token, net_amount, destination_chain, destination, nonce, gas_amount)`
+//!      - ITS transfer: `its.interchain_transfer(user, token_id, destination_chain, recipient, net_amount, None, gas_token)`
+//!        - Principal debit: `token.burn(user, net_amount)` (for mint/burn managers) OR `token.transfer(user, manager, net_amount)` (for lock/unlock)
+//!        - Gas debit: `gas_token.transfer(user, its_gas_recipient, gas_amount)`
+//!
+//! - **Privilege expansion protection**:
+//!   Before signing, the simulated authorization tree must be verified against expected snapshot invariants:
+//!   - **Spender identity**: Only the configured treasury, registered token manager, or token burn may be authorized.
+//!   - **Gas recipient**: Only the trusted ITS contract or native gas service may receive the gas payment.
+//!   - **Exact integer amounts**: Principal amount, router fee, and gas payment must match exact integers without inflation.
+//!   - **Zero unapproved calls**: Any unexpected sub-invocation (e.g. extraneous token transfers, approvals, or admin calls)
+//!     is treated as a critical privilege escalation and rejected.
+//!
+//! - **Offline snapshot inspection**:
+//!   Snapshot generation and inspection require no private keys and no network broadcast. Simulation footprints and
+//!   authorization specs are verifiable entirely offline or through simulated view calls.
+//!
+//! # Deployment Gating
+//!
+//! The active deployment is Stellar Testnet outbound ITS/CCTP. EVM contracts, GMP inbound execution, and other rail
+//! development remain strictly gated until independently validated.
+//!
 //! Transcribed from `axelarnetwork/axelar-amplifier-stellar` on branch `main`:
 //!
 //! - `contracts/stellar-interchain-token-service/src/interface.rs`

@@ -17,7 +17,7 @@
 //! and it lets an indexer say *this delivery is that transfer* rather than guessing from amounts
 //! and timestamps.
 
-use soroban_sdk::{Bytes, BytesN, Env};
+use soroban_sdk::{Address, Bytes, BytesN, Env};
 
 use crate::error::HyperionError;
 use crate::strkey::StrkeyDestination;
@@ -157,10 +157,93 @@ fn read_nonce(raw: &Bytes, offset: u32) -> Result<u64, HyperionError> {
     Ok(value)
 }
 
+/// Authorized debit in a paid dispatch authorization tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedDebit {
+    pub contract: Address,
+    pub spender: Address,
+    pub amount: i128,
+}
+
+/// Authorization snapshot representing the authenticated debits of an Axelar paid dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaidDispatchAuthSnapshot {
+    /// The user account authenticating the debits.
+    pub sender: Address,
+    /// Principal bridge debit (burn or transfer to manager).
+    pub principal_token: Address,
+    pub principal_spender: Address,
+    pub principal_amount: i128,
+    pub is_burn: bool,
+    /// Fee debit paid to the treasury.
+    pub fee_token: Address,
+    pub fee_recipient: Address,
+    pub fee_amount: i128,
+    /// Gas debit paid to Axelar ITS / gas service.
+    pub gas_token: Address,
+    pub gas_recipient: Address,
+    pub gas_amount: i128,
+}
+
+/// Potential privilege expansions detected when inspecting an authorization tree against expectations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PrivilegeExpansion {
+    SenderMismatch,
+    ChangedPrincipalSpender,
+    ChangedGasRecipient,
+    ChangedFeeRecipient,
+    PrincipalAmountMismatch,
+    FeeAmountMismatch,
+    GasAmountMismatch,
+    UnexpectedBurnStatus,
+}
+
+/// Verify candidate paid dispatch authorization parameters against expected snapshot baseline.
+pub fn inspect_auth_tree_snapshot(
+    expected: &PaidDispatchAuthSnapshot,
+    candidate: &PaidDispatchAuthSnapshot,
+) -> Result<(), PrivilegeExpansion> {
+    if expected.sender != candidate.sender {
+        return Err(PrivilegeExpansion::SenderMismatch);
+    }
+    if expected.principal_token != candidate.principal_token {
+        return Err(PrivilegeExpansion::ChangedPrincipalSpender);
+    }
+    if expected.principal_spender != candidate.principal_spender {
+        return Err(PrivilegeExpansion::ChangedPrincipalSpender);
+    }
+    if expected.is_burn != candidate.is_burn {
+        return Err(PrivilegeExpansion::UnexpectedBurnStatus);
+    }
+    if expected.principal_amount != candidate.principal_amount {
+        return Err(PrivilegeExpansion::PrincipalAmountMismatch);
+    }
+    if expected.fee_token != candidate.fee_token {
+        return Err(PrivilegeExpansion::ChangedFeeRecipient);
+    }
+    if expected.fee_recipient != candidate.fee_recipient {
+        return Err(PrivilegeExpansion::ChangedFeeRecipient);
+    }
+    if expected.fee_amount != candidate.fee_amount {
+        return Err(PrivilegeExpansion::FeeAmountMismatch);
+    }
+    if expected.gas_token != candidate.gas_token {
+        return Err(PrivilegeExpansion::ChangedGasRecipient);
+    }
+    if expected.gas_recipient != candidate.gas_recipient {
+        return Err(PrivilegeExpansion::ChangedGasRecipient);
+    }
+    if expected.gas_amount != candidate.gas_amount {
+        return Err(PrivilegeExpansion::GasAmountMismatch);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::address::AddressKind;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Env, String};
 
     /// Real strkeys with real checksums, the same ones the strkey module is tested against.
@@ -351,5 +434,81 @@ mod tests {
         // One envelope version across both rails. If these ever diverge it should be because
         // somebody changed one deliberately, and this is the test that makes them notice.
         assert_eq!(NOTE_VERSION, crate::cctp::HOOK_VERSION);
+    }
+
+    #[test]
+    fn auth_tree_snapshot_verifies_exact_match_and_detects_privilege_expansion() {
+        let env = Env::default();
+        let user = Address::generate(&env);
+        let token = Address::generate(&env);
+        let manager = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let gas_token = Address::generate(&env);
+        let its = Address::generate(&env);
+
+        let baseline = PaidDispatchAuthSnapshot {
+            sender: user.clone(),
+            principal_token: token.clone(),
+            principal_spender: manager.clone(),
+            principal_amount: 10_000_000,
+            is_burn: false,
+            fee_token: token.clone(),
+            fee_recipient: treasury.clone(),
+            fee_amount: 50_000,
+            gas_token: gas_token.clone(),
+            gas_recipient: its.clone(),
+            gas_amount: 1_000,
+        };
+
+        // Exact match passes
+        assert_eq!(inspect_auth_tree_snapshot(&baseline, &baseline), Ok(()));
+
+        // Changed sender
+        let mut candidate = baseline.clone();
+        candidate.sender = Address::generate(&env);
+        assert_eq!(
+            inspect_auth_tree_snapshot(&baseline, &candidate),
+            Err(PrivilegeExpansion::SenderMismatch)
+        );
+
+        // Changed principal spender
+        candidate = baseline.clone();
+        candidate.principal_spender = Address::generate(&env);
+        assert_eq!(
+            inspect_auth_tree_snapshot(&baseline, &candidate),
+            Err(PrivilegeExpansion::ChangedPrincipalSpender)
+        );
+
+        // Changed gas recipient
+        candidate = baseline.clone();
+        candidate.gas_recipient = Address::generate(&env);
+        assert_eq!(
+            inspect_auth_tree_snapshot(&baseline, &candidate),
+            Err(PrivilegeExpansion::ChangedGasRecipient)
+        );
+
+        // Changed fee recipient
+        candidate = baseline.clone();
+        candidate.fee_recipient = Address::generate(&env);
+        assert_eq!(
+            inspect_auth_tree_snapshot(&baseline, &candidate),
+            Err(PrivilegeExpansion::ChangedFeeRecipient)
+        );
+
+        // Principal amount expansion
+        candidate = baseline.clone();
+        candidate.principal_amount = 10_000_001;
+        assert_eq!(
+            inspect_auth_tree_snapshot(&baseline, &candidate),
+            Err(PrivilegeExpansion::PrincipalAmountMismatch)
+        );
+
+        // Gas amount expansion
+        candidate = baseline.clone();
+        candidate.gas_amount = 2_000;
+        assert_eq!(
+            inspect_auth_tree_snapshot(&baseline, &candidate),
+            Err(PrivilegeExpansion::GasAmountMismatch)
+        );
     }
 }
