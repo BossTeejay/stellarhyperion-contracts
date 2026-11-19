@@ -218,9 +218,22 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         OutboundPlan memory plan = _planOutbound(request);
 
         IERC20 token = IERC20(request.token);
+        uint256 balanceBefore = token.balanceOf(address(this));
         token.safeTransferFrom(msg.sender, address(this), plan.gross);
-        if (plan.fee != 0) token.safeTransfer(treasury, plan.fee);
+        uint256 balanceAfter = token.balanceOf(address(this));
+        if (balanceAfter - balanceBefore != plan.gross) revert InvalidAmount();
+
+        if (plan.fee != 0) {
+            uint256 treasuryBefore = token.balanceOf(treasury);
+            token.safeTransfer(treasury, plan.fee);
+            uint256 treasuryAfter = token.balanceOf(treasury);
+            if (treasuryAfter - treasuryBefore != plan.fee) revert InvalidAmount();
+        }
+
+        uint256 adapterBefore = token.balanceOf(plan.adapterAddress);
         token.safeTransfer(plan.adapterAddress, plan.net);
+        uint256 adapterAfter = token.balanceOf(plan.adapterAddress);
+        if (adapterAfter - adapterBefore != plan.net) revert InvalidAmount();
 
         nonce = ++outboundNonce;
 
@@ -328,7 +341,10 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         // Pull rather than trust. The receiver approves this transfer before calling in, so if
         // the funds are not actually here the delivery reverts now instead of writing down a
         // claim against money nobody holds.
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 balanceAfter = IERC20(token).balanceOf(address(this));
+        if (balanceAfter - balanceBefore != amount) revert InvalidAmount();
 
         if (_tryPay(token, recipient, amount)) {
             emit BridgeIn(route, recipient, token, amount, origin.chain, origin.nonce, origin.messageId);
@@ -738,8 +754,19 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             if (action.amount > 1) revert InvalidLimit();
             if (!_tokens[action.subject].registered) revert TokenNotRegistered();
         }
-        if (kind == ActionKind.RegisterToken && action.decimals > AmountMath.MAX_DECIMALS) {
-            revert InvalidDecimals();
+        if (kind == ActionKind.RegisterToken) {
+            if (action.decimals > AmountMath.MAX_DECIMALS) revert InvalidDecimals();
+            (bool okDec, bytes memory retDec) =
+                action.subject.staticcall(abi.encodeWithSignature("decimals()"));
+            if (!okDec || retDec.length < 32 || abi.decode(retDec, (uint8)) != action.decimals) {
+                revert InvalidDecimals();
+            }
+            (bool okBal, bytes memory retBal) = action.subject.staticcall(
+                abi.encodeWithSignature("balanceOf(address)", address(this))
+            );
+            if (!okBal || retBal.length < 32) {
+                revert TokenNotRegistered();
+            }
         }
         if (kind == ActionKind.RaiseTokenFlowLimit) {
             TokenConfig memory cfg = _tokens[action.subject];

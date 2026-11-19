@@ -31,7 +31,7 @@ pub use types::{
 
 use hyperion_core::{
     address::{assert_route_supports, bytes32_to_evm},
-    amount::{apply_fee, convert_decimals_exact, floor_to_representable},
+    amount::{apply_fee, assert_exact_transfer, convert_decimals_exact, floor_to_representable},
     flow, HyperionError, RouteKind, MAX_FEE_BPS,
 };
 use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, Vec};
@@ -154,7 +154,10 @@ impl HyperionRouter {
         // Pull rather than trust. The receiver pre-authorises this transfer before calling in,
         // so if the funds are not actually there the whole delivery reverts here instead of
         // writing down a claim against money nobody holds.
+        let before = client.balance(&this);
         client.transfer(&caller, &this, &amount);
+        let after = client.balance(&this);
+        assert_exact_transfer(before, after, amount)?;
 
         let delivered = matches!(
             client.try_transfer(&this, &recipient.address, &amount),
@@ -517,6 +520,18 @@ impl HyperionRouter {
     pub fn queue_count(env: Env) -> u64 {
         storage::queue_count(&env)
     }
+
+    /// Check and diagnose whether a token meets router accounting and admission assumptions.
+    ///
+    /// Verifies that the token contract exists, correctly implements SEP-41 decimals matching
+    /// `expected_decimals`, does not exceed `MAX_DECIMALS`, and responds to standard balance checks.
+    pub fn check_token_behavior(
+        env: Env,
+        token: Address,
+        expected_decimals: u32,
+    ) -> Result<(), HyperionError> {
+        timelock::validate_token_behavior(&env, &token, expected_decimals)
+    }
 }
 
 /// A quote for a route that cannot be used, carrying the reason it cannot.
@@ -698,7 +713,10 @@ fn bridge_out_inner(
     let nonce = storage::next_out_nonce(&env);
     if let Some(gas) = gas_amount {
         if fee > 0 {
+            let before_treasury = client.balance(&cfg.treasury);
             client.transfer(&sender, &cfg.treasury, &fee);
+            let after_treasury = client.balance(&cfg.treasury);
+            assert_exact_transfer(before_treasury, after_treasury, fee)?;
         }
         adapter::PaidRailAdapterClient::new(&env, &adapter_addr).dispatch_from(
             &this,
@@ -711,11 +729,23 @@ fn bridge_out_inner(
             &gas,
         );
     } else {
+        let before_this = client.balance(&this);
         client.transfer(&sender, &this, &gross);
+        let after_this = client.balance(&this);
+        assert_exact_transfer(before_this, after_this, gross)?;
+
         if fee > 0 {
+            let before_treasury = client.balance(&cfg.treasury);
             client.transfer(&this, &cfg.treasury, &fee);
+            let after_treasury = client.balance(&cfg.treasury);
+            assert_exact_transfer(before_treasury, after_treasury, fee)?;
         }
+
+        let before_adapter = client.balance(&adapter_addr);
         client.transfer(&this, &adapter_addr, &net);
+        let after_adapter = client.balance(&adapter_addr);
+        assert_exact_transfer(before_adapter, after_adapter, net)?;
+
         RailAdapterClient::new(&env, &adapter_addr).dispatch(
             &this,
             &token,

@@ -1,5 +1,6 @@
+use hyperion_core::amount::MAX_DECIMALS;
 use hyperion_core::{HyperionError, MAX_FEE_BPS};
-use soroban_sdk::{ContractExecutable, Env};
+use soroban_sdk::{Address, ContractExecutable, Env};
 
 use crate::storage;
 use crate::types::{AdminAction, Config, QueuedAction, RouteConfig, TokenConfig};
@@ -91,6 +92,33 @@ fn validate(action: &AdminAction) -> Result<(), HyperionError> {
     Ok(())
 }
 
+/// Validate token admission against router accounting assumptions before activation.
+///
+/// Ensures the token contract exists, correctly implements SEP-41 decimals matching
+/// `decimals`, does not exceed `MAX_DECIMALS`, and responds to standard balance checks.
+pub fn validate_token_behavior(
+    env: &Env,
+    token: &Address,
+    decimals: u32,
+) -> Result<(), HyperionError> {
+    if decimals > MAX_DECIMALS {
+        return Err(HyperionError::InvalidDecimals);
+    }
+    let client = soroban_sdk::token::Client::new(env, token);
+    let onchain_decimals = match client.try_decimals() {
+        Ok(Ok(d)) => d,
+        _ => return Err(HyperionError::InvalidDecimals),
+    };
+    if onchain_decimals != decimals {
+        return Err(HyperionError::InvalidDecimals);
+    }
+    let this = env.current_contract_address();
+    if client.try_balance(&this).is_err() {
+        return Err(HyperionError::InvalidAmount);
+    }
+    Ok(())
+}
+
 pub fn apply(env: &Env, action: &AdminAction) -> Result<(), HyperionError> {
     let mut cfg = storage::config(env)?;
     match action {
@@ -134,6 +162,7 @@ pub fn apply(env: &Env, action: &AdminAction) -> Result<(), HyperionError> {
             if *decimals > 38 {
                 return Err(HyperionError::InvalidDecimals);
             }
+            validate_token_behavior(env, token, *decimals)?;
             let token_cfg = TokenConfig {
                 decimals: *decimals,
                 flow_limit: *limit,

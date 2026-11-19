@@ -269,6 +269,70 @@ impl FailableToken {
 }
 
 // ------------------------------------------------------------------------------------------
+// FeeOnTransferToken
+// ------------------------------------------------------------------------------------------
+
+#[contracttype]
+#[derive(Clone)]
+enum FotKey {
+    Balance(Address),
+    Decimals,
+    FeeBps,
+}
+
+/// A token that charges a fee on transfer, delivering less than requested.
+#[contract]
+pub struct FeeOnTransferToken;
+
+#[contractimpl]
+impl FeeOnTransferToken {
+    pub fn init(env: Env, decimals: u32, fee_bps: u32) {
+        env.storage().instance().set(&FotKey::Decimals, &decimals);
+        env.storage().instance().set(&FotKey::FeeBps, &fee_bps);
+    }
+
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let current = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .instance()
+            .set(&FotKey::Balance(to), &(current + amount));
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&FotKey::Balance(id))
+            .unwrap_or(0i128)
+    }
+
+    pub fn decimals(env: Env) -> u32 {
+        env.storage().instance().get(&FotKey::Decimals).unwrap_or(7)
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<(), TokenError> {
+        from.require_auth();
+        if amount < 0 {
+            return Err(TokenError::NegativeAmount);
+        }
+        let from_balance = Self::balance(env.clone(), from.clone());
+        if from_balance < amount {
+            return Err(TokenError::InsufficientBalance);
+        }
+        let fee_bps: u32 = env.storage().instance().get(&FotKey::FeeBps).unwrap_or(500); // 5% fee
+        let fee = (amount * fee_bps as i128) / 10_000;
+        let net = amount - fee;
+        let to_balance = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .instance()
+            .set(&FotKey::Balance(from), &(from_balance - amount));
+        env.storage()
+            .instance()
+            .set(&FotKey::Balance(to), &(to_balance + net));
+        Ok(())
+    }
+}
+
+// ------------------------------------------------------------------------------------------
 // Helpers shared by the test modules
 // ------------------------------------------------------------------------------------------
 

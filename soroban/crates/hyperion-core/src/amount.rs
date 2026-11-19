@@ -143,6 +143,26 @@ pub fn apply_fee(amount: i128, fee_bps: u32) -> Result<FeeSplit, HyperionError> 
     Ok(FeeSplit { net, fee })
 }
 
+/// Check that an actual transferred amount matches the expected exact amount,
+/// refusing fee-on-transfer, deflationary, or hostile balance mutations that
+/// violate router accounting assumptions.
+pub fn assert_exact_transfer(
+    balance_before: i128,
+    balance_after: i128,
+    expected_amount: i128,
+) -> Result<(), HyperionError> {
+    if expected_amount < 0 {
+        return Err(HyperionError::InvalidAmount);
+    }
+    let diff = balance_after
+        .checked_sub(balance_before)
+        .ok_or(HyperionError::DecimalOverflow)?;
+    if diff != expected_amount {
+        return Err(HyperionError::InvalidAmount);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +356,28 @@ mod tests {
             prop_assert!(fee >= 0);
             prop_assert!(net > 0);
             prop_assert!(fee <= amount / 100);
+        }
+
+        #[test]
+        fn exact_transfer_assertions(
+            before in 0i128..1_000_000_000i128,
+            transfer in 0i128..1_000_000_000i128,
+            fee in 1i128..10_000i128,
+        ) {
+            // Exact transfer succeeds
+            prop_assert!(assert_exact_transfer(before, before + transfer, transfer).is_ok());
+            // Fee on transfer (receiving less) fails
+            if transfer > fee {
+                prop_assert_eq!(
+                    assert_exact_transfer(before, before + transfer - fee, transfer),
+                    Err(HyperionError::InvalidAmount)
+                );
+            }
+            // Hostile balance inflation (receiving more) fails
+            prop_assert_eq!(
+                assert_exact_transfer(before, before + transfer + fee, transfer),
+                Err(HyperionError::InvalidAmount)
+            );
         }
     }
 }
