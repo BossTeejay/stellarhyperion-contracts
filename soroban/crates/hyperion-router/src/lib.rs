@@ -25,8 +25,9 @@ pub use adapter::{PaidRailAdapter, PaidRailAdapterClient, RailAdapter, RailAdapt
 pub use storage::DataKey;
 pub use timelock::{GRACE_PERIOD, MAX_TIMELOCK_DELAY, MIN_TIMELOCK_DELAY};
 pub use types::{
-    AdminAction, Config, Destination, InboundRecord, Origin, OutboundRequest, PendingClaim,
-    QueuedAction, Recipient, RouteConfig, RouteQuote, TokenConfig, TransferRecord,
+    AdminAction, ClaimLiabilityReport, Config, Destination, InboundRecord, InspectKey,
+    KeyDiscoveryPage, KeyTtlStatus, Origin, OutboundRequest, PendingClaim, QueuedAction, Recipient,
+    ReplayRecord, RouteConfig, RouteQuote, TokenConfig, TransferRecord,
 };
 
 use hyperion_core::{
@@ -176,6 +177,8 @@ impl HyperionRouter {
                 settled: false,
             };
             storage::set_claim(&env, &claim);
+            storage::add_claim_liability(&env, &token, amount)?;
+            storage::index_open_claim(&env, id);
             events::claim_parked(&env, &claim);
             id
         };
@@ -213,6 +216,8 @@ impl HyperionRouter {
         }
         claim.settled = true;
         storage::set_claim(&env, &claim);
+        storage::sub_claim_liability(&env, &claim.token, claim.amount);
+        storage::remove_open_claim(&env, id);
         events::claim_settled(&env, &claim, &settler);
         Ok(())
     }
@@ -417,6 +422,7 @@ impl HyperionRouter {
             .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
         for token in tokens.iter() {
             let _ = storage::token_config(&env, &token);
+            storage::touch_claim_liability(&env, &token);
             for route in routes.iter() {
                 let _ = storage::route_config(&env, route);
                 storage::touch_flow(&env, &token, route);
@@ -427,6 +433,16 @@ impl HyperionRouter {
         }
         for nonce in transfers.iter() {
             let _ = storage::transfer(&env, nonce);
+        }
+    }
+
+    /// Extend retention TTLs for a supplied batch of replay tombstones.
+    pub fn keep_alive_replays(env: Env, replays: Vec<(RouteKind, BytesN<32>)>) {
+        env.storage()
+            .instance()
+            .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
+        for (route, message_id) in replays.iter() {
+            let _ = storage::touch_replay(&env, route, &message_id);
         }
     }
 
@@ -509,6 +525,41 @@ impl HyperionRouter {
 
     pub fn queue_count(env: Env) -> u64 {
         storage::queue_count(&env)
+    }
+
+    pub fn reconcile_claim_liability(
+        env: Env,
+        token: Address,
+    ) -> Result<ClaimLiabilityReport, HyperionError> {
+        let this = env.current_contract_address();
+        let client = token::Client::new(&env, &token);
+        let contract_balance = payout_balance(&client, &this)?;
+        let tracked_liability = storage::claim_liability(&env, &token);
+        Ok(ClaimLiabilityReport {
+            tracked_liability,
+            contract_balance,
+            balanced: contract_balance >= tracked_liability,
+        })
+    }
+
+    pub fn discover_keys(
+        env: Env,
+        open_claims: bool,
+        cursor: u64,
+        limit: u32,
+    ) -> KeyDiscoveryPage {
+        storage::discover_keys(&env, open_claims, cursor, limit)
+    }
+
+    pub fn discover_replays(env: Env, cursor: u64, limit: u32) -> Vec<ReplayRecord> {
+        storage::discover_replays(&env, cursor, limit)
+    }
+
+    pub fn inspect_ttls(
+        env: Env,
+        keys: Vec<InspectKey>,
+    ) -> Result<Vec<KeyTtlStatus>, HyperionError> {
+        storage::inspect_ttls(&env, &keys)
     }
 
     /// Check token metadata; success classifies transfer behavior as unverified.

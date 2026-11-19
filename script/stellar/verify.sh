@@ -98,6 +98,30 @@ else
   check "token enabled"    "$(tfield enabled)"    "true"
   check "token decimals"   "$(tfield decimals)"   "7"
   check "token flow limit" "$(tfield flow_limit)" "$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const t=d.networks[process.argv[2]].tokens;process.stdout.write(t[Object.keys(t)[0]].flowLimit)' "$RECORD" "$CHAIN_KEY")"
+
+  note "maintenance and reconciliation"
+  RECON=$(read_only "$ROUTER" reconcile_claim_liability --token "$SAC" 2>/dev/null || echo "")
+  if [ -z "$RECON" ]; then
+    printf '   \033[31mBAD  reconcile_claim_liability failed for %s\033[0m\n' "$SAC"
+    problems=$((problems + 1))
+  else
+    rfield() { printf '%s' "$RECON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);process.stdout.write(String(o[process.argv[1]]))})' "$1"; }
+    check "claim liability bal" "$(rfield balanced)" "true"
+    say "tracked_liability=$(rfield tracked_liability) contract_balance=$(rfield contract_balance)"
+  fi
+
+  OPEN_CLAIMS=$(read_only "$ROUTER" discover_keys --open_claims true --cursor 0 --limit 10 2>/dev/null || echo "")
+  TRANSFERS=$(read_only "$ROUTER" discover_keys --open_claims false --cursor 1 --limit 10 2>/dev/null || echo "")
+  REPLAYS=$(read_only "$ROUTER" discover_replays --cursor 0 --limit 10 2>/dev/null || echo "")
+  TTL_REPORT=$(read_only "$ROUTER" inspect_ttls \
+    --keys "[{\"Token\":\"$SAC\"},{\"ClaimLiability\":\"$SAC\"},{\"Flow\":[\"$SAC\",\"$ROUTE_CCTP\"]}]" \
+    2>/dev/null || echo "")
+  if [ -n "$OPEN_CLAIMS" ] && [ -n "$TRANSFERS" ] && [ -n "$REPLAYS" ] && [ -n "$TTL_REPORT" ]; then
+    printf '   ok   %-24s %s\n' "maintenance views" "discovery, replay index, and TTL report responded"
+  else
+    printf '   \033[31mBAD  one or more maintenance views failed\033[0m\n'
+    problems=$((problems + 1))
+  fi
 fi
 
 printf '\n'

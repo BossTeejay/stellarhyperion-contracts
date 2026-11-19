@@ -1,5 +1,5 @@
 use hyperion_core::RouteKind;
-use soroban_sdk::{contracttype, Address, BytesN, String};
+use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
 
 /// Everything the router needs to know about itself.
 ///
@@ -206,3 +206,56 @@ pub struct Destination {
 // router's own entry points into its WASM. They are re-exported so the router's public surface
 // reads exactly as it did when they were declared in this file.
 pub use hyperion_core::inbound::{Origin, Recipient};
+
+/// Read-only reconciliation of tracked parked-claim liabilities against the router's
+/// actual token balance.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimLiabilityReport {
+    pub tracked_liability: i128,
+    pub contract_balance: i128,
+    pub balanced: bool,
+}
+
+/// A bounded page of upkeep-relevant numeric keys (transfer nonces or open claim IDs).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyDiscoveryPage {
+    pub ids: Vec<u64>,
+    pub next_cursor: u64,
+    pub total: u64,
+}
+
+/// Durable replay metadata preserving message identity and processing context.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayRecord {
+    pub route: RouteKind,
+    pub message_id: BytesN<32>,
+    pub processed_ledger: u32,
+    pub processed_at: u64,
+}
+
+/// Key specification for bounded TTL inspection in `inspect_ttls`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InspectKey {
+    Token(Address),
+    Flow(Address, RouteKind),
+    Transfer(u64),
+    Replay(RouteKind, BytesN<32>),
+    Claim(u64),
+    ClaimLiability(Address),
+}
+
+/// Per-key TTL and presence status from host-supported inspection.
+/// `kind`: 0=Token, 1=Flow, 2=Transfer, 3=Replay, 4=Claim, 5=ClaimLiability.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyTtlStatus {
+    pub kind: u32,
+    pub present: bool,
+    /// Remaining TTL in ledgers when host `get_ttl` is available (testutils/simulation);
+    /// `0` when absent or on-chain where Soroban guest WASM does not expose `live_until_ledger`.
+    pub remaining_ttl: u32,
+}
