@@ -148,6 +148,7 @@ impl HyperionRouter {
         if amount <= 0 {
             return Err(HyperionError::InvalidAmount);
         }
+        storage::assert_liability_migration_not_running(&env)?;
         if storage::is_processed(&env, route, &origin.message_id) {
             return Err(HyperionError::ReplayedMessage);
         }
@@ -221,6 +222,7 @@ impl HyperionRouter {
     // make a user who just opened a trustline also work out how to call a contract.
     pub fn settle_claim(env: Env, settler: Address, id: u64) -> Result<(), HyperionError> {
         settler.require_auth();
+        storage::assert_liability_migration_not_running(&env)?;
         let mut claim = storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)?;
         if claim.settled {
             return Err(HyperionError::ClaimAlreadySettled);
@@ -456,7 +458,7 @@ impl HyperionRouter {
             .len()
             .saturating_add(routes.len())
             .saturating_add(tokens.len().saturating_mul(routes.len()).saturating_mul(2))
-            .saturating_add(claims.len())
+            .saturating_add(claims.len().saturating_mul(2))
             .saturating_add(transfers.len())
             > MAX_MAINTENANCE_BATCH
         {
@@ -477,6 +479,7 @@ impl HyperionRouter {
         }
         for id in claims.iter() {
             let _ = storage::claim(&env, id);
+            storage::touch_persistent_key(&env, &DataKey::ClaimProvenance(id));
         }
         for nonce in transfers.iter() {
             let _ = storage::transfer(&env, nonce);
@@ -500,14 +503,26 @@ impl HyperionRouter {
         if max_steps == 0 || max_steps > MAX_MAINTENANCE_BATCH {
             return Err(HyperionError::InvalidLimit);
         }
-        if target_version != CURRENT_SCHEMA_VERSION {
+        let state = storage::migration_state(&env);
+        // An already authorized v2 snapshot may be completed after upgrading to v3.
+        // Its earlier claim cursor did not count liabilities; v3 must scan all claims anew.
+        if target_version != CURRENT_SCHEMA_VERSION
+            && !(target_version == 2
+                && state
+                    .as_ref()
+                    .map(|s| s.target_version == 2)
+                    .unwrap_or(false))
+        {
             return Err(HyperionError::InvalidLimit);
         }
         let current = storage::schema_version(&env);
         if current == target_version {
             return Ok(Self::get_migration_status(env));
         }
-        let mut status = storage::migration_state(&env).ok_or(HyperionError::TimelockNotQueued)?;
+        let mut status = state.ok_or(HyperionError::TimelockNotQueued)?;
+        if status.target_version != target_version {
+            return Err(HyperionError::InvalidLimit);
+        }
         let mut remaining = max_steps;
         while remaining > 0 && status.migrated_transfers < status.total_transfers {
             let nonce = status.migrated_transfers + 1;
@@ -521,6 +536,15 @@ impl HyperionRouter {
         while remaining > 0 && status.migrated_claims < status.total_claims {
             let id = status.migrated_claims + 1;
             let record = storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)?;
+            if target_version == CURRENT_SCHEMA_VERSION
+                && !storage::liability_tracking(&env)
+                && !record.settled
+            {
+                if record.amount <= 0 {
+                    return Err(HyperionError::InvalidAmount);
+                }
+                storage::increase_claim_liability(&env, &record.token, record.amount)?;
+            }
             storage::set_claim(&env, &record);
             status.migrated_claims = id;
             remaining -= 1;
@@ -528,12 +552,28 @@ impl HyperionRouter {
         status.migration_pending = status.migrated_transfers < status.total_transfers
             || status.migrated_claims < status.total_claims;
         if !status.migration_pending {
+            if target_version == CURRENT_SCHEMA_VERSION {
+                storage::set_liability_tracking(&env);
+            }
             storage::set_schema_version(&env, target_version);
             status.current_version = target_version;
         }
         storage::set_migration_state(&env, &status);
         events::storage_migrated(&env, &caller, &status);
         Ok(status)
+    }
+
+    /// Extend the long retention policy for at most 32 exact, route-scoped replay keys.
+    pub fn keep_alive_replays(env: Env, replays: Vec<(RouteKind, BytesN<32>)>) {
+        if replays.len() > MAX_MAINTENANCE_BATCH {
+            soroban_sdk::panic_with_error!(&env, HyperionError::InvalidLimit);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
+        for (route, message_id) in replays.iter() {
+            storage::touch_replay(&env, route, &message_id);
+        }
     }
 
     // ---------------------------------------------------------------------------------------

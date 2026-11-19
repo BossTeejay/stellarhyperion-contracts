@@ -10,7 +10,7 @@ pub const MAX_REASON_LEN: u32 = 128;
 pub const LEGACY_SCHEMA_VERSION: u32 = 1;
 
 /// Current Soroban storage schema version for `HyperionRouter`.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Everything the router needs to know about itself.
 // Everything the router needs to know about itself.
