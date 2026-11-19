@@ -53,6 +53,7 @@ enum MessengerKey {
     MinFee,
     Last,
     Count,
+    ShouldRevert,
 }
 
 /// Plays Circle's messenger and minter.
@@ -71,6 +72,12 @@ impl MockMessenger {
         env.storage()
             .instance()
             .set(&MessengerKey::MinFee, &min_fee);
+    }
+
+    pub fn set_should_revert(env: Env, should_revert: bool) {
+        env.storage()
+            .instance()
+            .set(&MessengerKey::ShouldRevert, &should_revert);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -154,6 +161,14 @@ impl MockMessenger {
         had_hook: bool,
     ) -> Result<(), CircleError> {
         caller.require_auth();
+        let should_revert: bool = env
+            .storage()
+            .instance()
+            .get(&MessengerKey::ShouldRevert)
+            .unwrap_or(false);
+        if should_revert {
+            panic!("MockMessenger: deposit_for_burn configured to revert");
+        }
         if amount <= 0 {
             return Err(CircleError::AmountMustBeNonzero);
         }

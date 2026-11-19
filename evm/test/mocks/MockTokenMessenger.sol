@@ -25,6 +25,11 @@ contract MockTokenMessenger is ITokenMessengerV2 {
 
     Burn private _lastBurn;
     uint256 public burnCount;
+    bool public shouldRevert;
+
+    function setShouldRevert(bool _shouldRevert) external {
+        shouldRevert = _shouldRevert;
+    }
 
     function depositForBurnWithHook(
         uint256 amount,
@@ -36,6 +41,9 @@ contract MockTokenMessenger is ITokenMessengerV2 {
         uint32 minFinalityThreshold,
         bytes calldata hookData
     ) external override {
+        if (shouldRevert) {
+            revert("MockTokenMessenger: burn failed");
+        }
         // Pulled rather than assumed. If the adapter forgot to approve, this reverts and the
         // test fails here, instead of passing on a burn that could never have happened. That is
         // also why the boolean goes unchecked: the token reverts, so it is always true.
@@ -63,6 +71,9 @@ contract MockTokenMessenger is ITokenMessengerV2 {
         uint256 maxFee,
         uint32 minFinalityThreshold
     ) external override {
+        if (shouldRevert) {
+            revert("MockTokenMessenger: burn failed");
+        }
         // forge-lint: disable-next-line(erc20-unchecked-transfer)
         IERC20(burnToken).transferFrom(msg.sender, address(this), amount);
         _lastBurn = Burn({

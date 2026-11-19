@@ -261,3 +261,57 @@ fn a_sweep_follows_the_treasury_the_router_names_today() {
     assert_eq!(w.token().balance(&new_treasury), 500);
     assert_eq!(w.token().balance(&w.treasury), 0);
 }
+
+#[test]
+fn the_allowance_auditor_reports_clean_state_after_dispatch() {
+    let w = World::new();
+    w.router().bridge_out(&w.user, &request(&w, HUNDRED));
+
+    let diag = w.adapter().audit_allowance(&w.token_id);
+    assert_eq!(
+        diag.version,
+        hyperion_core::cctp::APPROVAL_DIAGNOSTICS_VERSION
+    );
+    assert_eq!(diag.allowance, 0);
+    assert_eq!(diag.expected_allowance, 0);
+    assert!(diag.is_clean);
+    assert_eq!(diag.finding, hyperion_core::cctp::ApprovalFinding::Clean);
+}
+
+#[test]
+fn the_allowance_auditor_reports_residual_approvals_without_mutating_state() {
+    let w = World::new();
+    let residual = 500_000i128;
+    // Simulate an unexpected residual approval granted to the token messenger
+    w.token()
+        .approve(&w.adapter_id, &w.messenger_id, &residual, &200_000);
+
+    let diag = w.adapter().audit_allowance(&w.token_id);
+    assert_eq!(
+        diag.version,
+        hyperion_core::cctp::APPROVAL_DIAGNOSTICS_VERSION
+    );
+    assert_eq!(diag.allowance, residual);
+    assert_eq!(diag.expected_allowance, 0);
+    assert!(!diag.is_clean);
+    assert_eq!(
+        diag.finding,
+        hyperion_core::cctp::ApprovalFinding::UnexpectedResidual
+    );
+
+    // Verify read-only property: the auditor never mutates the allowance
+    assert_eq!(
+        w.token().allowance(&w.adapter_id, &w.messenger_id),
+        residual
+    );
+}
+
+#[test]
+#[should_panic]
+fn a_reverting_messenger_fixture_preserves_source_atomicity() {
+    let w = World::new();
+    w.messenger().set_should_revert(&true);
+
+    // When the messenger fails/reverts, the invocation aborts cleanly.
+    w.router().bridge_out(&w.user, &request(&w, HUNDRED));
+}

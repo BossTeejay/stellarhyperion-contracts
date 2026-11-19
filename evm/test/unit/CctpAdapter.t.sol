@@ -445,6 +445,64 @@ contract CctpAdapterTest is Fixture {
     }
 
     // -------------------------------------------------------------------------------------
+    // Approval lifecycle, observability and atomicity
+    // -------------------------------------------------------------------------------------
+
+    function test_dispatch_leaves_only_documented_allowance_state() public {
+        _fund(AMOUNT);
+        vm.prank(address(router));
+        adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
+
+        assertEq(usdc.allowance(address(adapter), address(messenger)), 0);
+    }
+
+    function test_audit_allowance_reports_clean_state_after_dispatch() public {
+        _fund(AMOUNT);
+        vm.prank(address(router));
+        adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
+
+        CctpAdapter.ApprovalDiagnostics memory diag = adapter.auditAllowance();
+        assertEq(diag.version, 1);
+        assertEq(diag.token, address(usdc));
+        assertEq(diag.spender, address(messenger));
+        assertEq(diag.allowance, 0);
+        assertEq(diag.expectedAllowance, 0);
+        assertTrue(diag.isClean);
+        assertEq(uint256(diag.finding), uint256(CctpAdapter.ApprovalFinding.Clean));
+    }
+
+    function test_audit_allowance_detects_residual_approval_without_mutation() public {
+        // Create an unexpected residual approval directly on the token
+        vm.prank(address(adapter));
+        usdc.approve(address(messenger), 500);
+
+        CctpAdapter.ApprovalDiagnostics memory diag = adapter.auditAllowance();
+        assertEq(diag.version, 1);
+        assertEq(diag.token, address(usdc));
+        assertEq(diag.spender, address(messenger));
+        assertEq(diag.allowance, 500);
+        assertEq(diag.expectedAllowance, 0);
+        assertFalse(diag.isClean);
+        assertEq(uint256(diag.finding), uint256(CctpAdapter.ApprovalFinding.UnexpectedResidual));
+
+        // Ensure read-only: allowance remains untouched
+        assertEq(usdc.allowance(address(adapter), address(messenger)), 500);
+    }
+
+    function test_reverting_messenger_fixture_preserves_source_atomicity() public {
+        _fund(AMOUNT);
+        messenger.setShouldRevert(true);
+
+        vm.prank(address(router));
+        vm.expectRevert("MockTokenMessenger: burn failed");
+        adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
+
+        // Source atomicity: tokens remained in adapter balance and were not transferred to messenger
+        assertEq(usdc.balanceOf(address(adapter)), AMOUNT);
+        assertEq(usdc.balanceOf(address(messenger)), 0);
+    }
+
+    // -------------------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------------------
 

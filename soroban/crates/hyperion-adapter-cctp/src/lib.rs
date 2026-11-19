@@ -30,6 +30,15 @@
 //! happens inside `message-transmitter-v2`, which is Circle's contract, audited by Circle's
 //! auditors, and Hyperion's security depends on that being true rather than on anything written
 //! here.
+//!
+//! # Approval lifecycle observability and reconciliation
+//!
+//! Circle's `deposit_and_burn` pulls with `transfer_from`, requiring an allowance before the call.
+//! Successful dispatch leaves only the documented allowance state (zero residual allowance).
+//! The contract provides a read-only allowance auditor (`audit_allowance`) producing versioned
+//! diagnostics (`ApprovalDiagnostics`). Unexpected residual approvals produce findings
+//! (`ApprovalFinding::UnexpectedResidual`) without automatic mutation, ensuring observational
+//! integrity. Reverting messenger fixtures preserve source atomicity by unwinding the transaction.
 
 #![no_std]
 
@@ -144,8 +153,11 @@ impl CctpAdapter {
             .ok_or(HyperionError::DecimalOverflow)?
             / BPS_DENOMINATOR;
 
+        cctp::validate_burn_boundary(amount, &destination, max_fee, cfg.min_finality_threshold)?;
+
         let this = env.current_contract_address();
         let asset = token::Client::new(&env, &token);
+        let allowance_before = asset.allowance(&this, &cfg.token_messenger);
 
         // Circle's `deposit_and_burn` pulls with `transfer_from`, so an allowance has to exist
         // before the call and should not exist after it. The expiration is this ledger and no
@@ -169,6 +181,16 @@ impl CctpAdapter {
         // leaves the remainder where it found it, so the allowance can come back unspent in part.
         // Closing it is one storage write and removes the question entirely.
         asset.approve(&this, &cfg.token_messenger, &0i128, &this_ledger);
+
+        let allowance_after = asset.allowance(&this, &cfg.token_messenger);
+        events::ApprovalAudited {
+            token: token.clone(),
+            spender: cfg.token_messenger.clone(),
+            allowance_before,
+            allowance_after,
+            is_clean: allowance_after == cctp::DOCUMENTED_RESIDUAL_ALLOWANCE,
+        }
+        .publish(&env);
 
         events::Dispatched {
             token,
@@ -497,6 +519,22 @@ impl CctpAdapter {
             .checked_mul(i128::from(cfg.max_fee_bps))
             .ok_or(HyperionError::DecimalOverflow)?
             / BPS_DENOMINATOR)
+    }
+
+    /// Read-only allowance auditor for the adapter and token messenger.
+    ///
+    /// Produces a versioned diagnostics snapshot (`ApprovalDiagnostics`).
+    /// Unexpected residual approvals produce findings without automatic mutation:
+    /// this function is strictly read-only and never modifies allowances or balances.
+    pub fn audit_allowance(
+        env: Env,
+        token: Address,
+    ) -> Result<cctp::ApprovalDiagnostics, HyperionError> {
+        let cfg = storage::config(&env)?;
+        let this = env.current_contract_address();
+        let asset = token::Client::new(&env, &token);
+        let allowance = asset.allowance(&this, &cfg.token_messenger);
+        Ok(cctp::ApprovalDiagnostics::audit(allowance))
     }
 }
 

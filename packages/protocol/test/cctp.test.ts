@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  APPROVAL_DIAGNOSTICS_VERSION,
+  ApprovalFinding,
   BURN_HOOK_DATA,
   BURN_MESSAGE_VERSION,
+  DOCUMENTED_RESIDUAL_ALLOWANCE,
   FINALITY_THRESHOLD_FINALIZED,
   HOOK_VERSION,
   MESSAGE_VERSION,
@@ -230,5 +233,17 @@ describe("the hook", () => {
 
   it("shares its version with the Axelar note", () => {
     expect(HOOK_VERSION).toBe(1);
+  });
+});
+
+describe("the approval diagnostics", () => {
+  it("has the expected version and documented allowance baseline", () => {
+    expect(APPROVAL_DIAGNOSTICS_VERSION).toBe(1);
+    expect(DOCUMENTED_RESIDUAL_ALLOWANCE).toBe(0n);
+  });
+
+  it("exports approval finding variants", () => {
+    expect(ApprovalFinding.Clean).toBe(0);
+    expect(ApprovalFinding.UnexpectedResidual).toBe(1);
   });
 });

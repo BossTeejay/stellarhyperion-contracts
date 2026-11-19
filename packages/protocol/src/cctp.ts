@@ -31,6 +31,27 @@ export const FINALITY_THRESHOLD_FINALIZED = 2000;
 /** Version byte on Hyperion's own hook payload. */
 export const HOOK_VERSION = 1;
 
+/** Diagnostic format version for CCTP approval lifecycle audits. */
+export const APPROVAL_DIAGNOSTICS_VERSION = 1;
+
+/** Documented residual allowance expected between adapter and token messenger. */
+export const DOCUMENTED_RESIDUAL_ALLOWANCE = 0n;
+
+/** Findings produced by the allowance auditor. */
+export enum ApprovalFinding {
+  Clean = 0,
+  UnexpectedResidual = 1,
+}
+
+/** Versioned diagnostics snapshot of the CCTP allowance and approval lifecycle. */
+export interface ApprovalDiagnostics {
+  readonly version: number;
+  readonly allowance: bigint;
+  readonly expectedAllowance: bigint;
+  readonly isClean: boolean;
+  readonly finding: ApprovalFinding;
+}
+
 /** Header field offsets. */
 const MSG_VERSION = 0;
 const MSG_SOURCE_DOMAIN = 4;

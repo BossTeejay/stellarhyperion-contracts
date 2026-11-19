@@ -9,7 +9,7 @@
 //! field for field, which is the definition the on-chain contracts read from. Everything here is
 //! a pure function over bytes so the whole parser can be tested without a rail in sight.
 
-use soroban_sdk::{Bytes, BytesN, Env};
+use soroban_sdk::{contracttype, Bytes, BytesN, Env};
 
 use crate::address::{AddressKind, StellarDestination};
 use crate::error::HyperionError;
@@ -274,6 +274,84 @@ impl HyperionHook {
     }
 }
 
+// ------------------------------------------------------------------------------------------
+// Approval lifecycle & diagnostics
+// ------------------------------------------------------------------------------------------
+
+/// Diagnostic format version for CCTP approval lifecycle audits.
+pub const APPROVAL_DIAGNOSTICS_VERSION: u32 = 1;
+
+/// Documented residual allowance expected between adapter and token messenger.
+/// Hyperion leaves no standing allowance on any rail messenger; expected residual is always zero.
+pub const DOCUMENTED_RESIDUAL_ALLOWANCE: i128 = 0;
+
+/// Findings produced by the allowance auditor.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ApprovalFinding {
+    /// Allowance matches the documented state (clean zero allowance).
+    Clean = 0,
+    /// Unexpected residual allowance detected without caller authorization.
+    UnexpectedResidual = 1,
+}
+
+/// Versioned diagnostics snapshot of the CCTP allowance and approval lifecycle.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalDiagnostics {
+    pub version: u32,
+    pub allowance: i128,
+    pub expected_allowance: i128,
+    pub is_clean: bool,
+    pub finding: ApprovalFinding,
+}
+
+impl ApprovalDiagnostics {
+    /// Evaluate an allowance against the documented baseline without mutating state.
+    pub fn audit(allowance: i128) -> Self {
+        let is_clean = allowance == DOCUMENTED_RESIDUAL_ALLOWANCE;
+        let finding = if is_clean {
+            ApprovalFinding::Clean
+        } else {
+            ApprovalFinding::UnexpectedResidual
+        };
+        Self {
+            version: APPROVAL_DIAGNOSTICS_VERSION,
+            allowance,
+            expected_allowance: DOCUMENTED_RESIDUAL_ALLOWANCE,
+            is_clean,
+            finding,
+        }
+    }
+}
+
+/// Validate burn parameters at the message boundary before dispatching to TokenMessenger.
+///
+/// Preserves exact integer amounts, verifies non-zero mint recipient, and ensures
+/// fee policy and finality threshold match documented bounds.
+pub fn validate_burn_boundary(
+    amount: i128,
+    destination: &BytesN<32>,
+    max_fee: i128,
+    min_finality_threshold: u32,
+) -> Result<(), HyperionError> {
+    if amount <= 0 {
+        return Err(HyperionError::InvalidAmount);
+    }
+    let zero = [0u8; 32];
+    if destination.to_array() == zero {
+        return Err(HyperionError::InvalidDestination);
+    }
+    if max_fee < 0 || max_fee >= amount {
+        return Err(HyperionError::FeeTooHigh);
+    }
+    if min_finality_threshold == 0 || min_finality_threshold > FINALITY_THRESHOLD_FINALIZED {
+        return Err(HyperionError::InvalidLimit);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,5 +594,51 @@ mod tests {
         // Worth pinning: the whole CCTP integration is wrong in a quiet, funds-losing way if
         // this number drifts.
         assert_eq!(STELLAR_DOMAIN, 27);
+    }
+
+    #[test]
+    fn allowance_auditor_reports_clean_when_zero() {
+        let diag = ApprovalDiagnostics::audit(0);
+        assert_eq!(diag.version, APPROVAL_DIAGNOSTICS_VERSION);
+        assert_eq!(diag.allowance, 0);
+        assert_eq!(diag.expected_allowance, DOCUMENTED_RESIDUAL_ALLOWANCE);
+        assert!(diag.is_clean);
+        assert_eq!(diag.finding, ApprovalFinding::Clean);
+    }
+
+    #[test]
+    fn allowance_auditor_reports_residual_finding_without_mutation() {
+        let residual = 12345i128;
+        let diag = ApprovalDiagnostics::audit(residual);
+        assert_eq!(diag.version, APPROVAL_DIAGNOSTICS_VERSION);
+        assert_eq!(diag.allowance, residual);
+        assert_eq!(diag.expected_allowance, DOCUMENTED_RESIDUAL_ALLOWANCE);
+        assert!(!diag.is_clean);
+        assert_eq!(diag.finding, ApprovalFinding::UnexpectedResidual);
+    }
+
+    #[test]
+    fn burn_boundary_validation_guards_parameters() {
+        let env = Env::default();
+        let dest = BytesN::from_array(&env, &[0x42u8; 32]);
+        let zero_dest = BytesN::from_array(&env, &[0u8; 32]);
+
+        assert!(validate_burn_boundary(1000, &dest, 10, FINALITY_THRESHOLD_FINALIZED).is_ok());
+        assert_eq!(
+            validate_burn_boundary(0, &dest, 10, FINALITY_THRESHOLD_FINALIZED),
+            Err(HyperionError::InvalidAmount)
+        );
+        assert_eq!(
+            validate_burn_boundary(1000, &zero_dest, 10, FINALITY_THRESHOLD_FINALIZED),
+            Err(HyperionError::InvalidDestination)
+        );
+        assert_eq!(
+            validate_burn_boundary(1000, &dest, 1000, FINALITY_THRESHOLD_FINALIZED),
+            Err(HyperionError::FeeTooHigh)
+        );
+        assert_eq!(
+            validate_burn_boundary(1000, &dest, 10, 0),
+            Err(HyperionError::InvalidLimit)
+        );
     }
 }
