@@ -1,11 +1,11 @@
 # Native Soroban host security patch
 
-`soroban-env-host/` is the complete published `soroban-env-host` 28.0.2 crate,
+`soroban-env-host/` is the complete published `soroban-env-host` 29.0.1 crate,
 with a local RustCrypto compatibility patch for RUSTSEC-2026-0387. Upstream:
-https://github.com/stellar/rs-soroban-env/tree/5061e9c40ce6fc74ade9b9b3b49465b0cf7fdccb/soroban-env-host
+https://github.com/stellar/rs-soroban-env/tree/ff6ae01b3465ac44185d2824876491e62c9a4cc4/soroban-env-host
 
 The crates.io archive SHA-256 is
-`36d7e5920c200939164cc58038224e2d90d7e2fabbfa505d6e2129d648dce7e2`,
+`e545c3ba835e63894f23dae1e5f1e0221b0b15ae2f119ddeb88c5eb2b4ae9751`,
 matching the original Cargo.lock checksum. `.cargo_vcs_info.json` is preserved.
 `LICENSE` is the Apache-2.0 license fetched from the same upstream commit.
 No upstream host source or cryptographic functionality is removed.
@@ -29,6 +29,9 @@ The vendored lockfile records the standalone test dependencies.
 and P-256 vectors with invalid sizes, recovery IDs, zero/corrupted signatures and
 explicit high-S rejection. These complement the upstream suites, which normalize
 S before verification.
+
+Upstream trailing whitespace in the hostile-WASM test table is removed separately
+from the cryptography patch.
 
 ## Verification and maintenance
 
