@@ -96,13 +96,14 @@ impl HyperionRouter {
     // ---------------------------------------------------------------------------------------
 
     /// Send `amount` of `token` to an EVM chain over `route`.
-    ///
-    /// `destination_decimals` is what the asset uses on the far side, six for USDC on every
-    /// EVM chain Hyperion targets against seven here. The router floors the transfer to
-    /// something that base can represent and never pulls the remainder from the sender at all,
-    /// which is cheaper for everyone than taking dust and then owing it back.
-    ///
-    /// Returns the outbound nonce, which is what the app and the indexer follow the transfer by.
+    // Send `amount` of `token` to an EVM chain over `route`.
+    //
+    // `destination_decimals` is what the asset uses on the far side, six for USDC on every
+    // EVM chain Hyperion targets against seven here. The router floors the transfer to
+    // something that base can represent and never pulls the remainder from the sender at all,
+    // which is cheaper for everyone than taking dust and then owing it back.
+    //
+    // Returns the outbound nonce, which is what the app and the indexer follow the transfer by.
     pub fn bridge_out(
         env: Env,
         sender: Address,
@@ -213,10 +214,11 @@ impl HyperionRouter {
     }
 
     /// Hand a parked claim to the recipient it was always going to.
-    ///
-    /// Permissionless on purpose. The funds can only move to the address recorded at delivery
-    /// time, so there is nothing to gain by calling this for somebody else and no reason to
-    /// make a user who just opened a trustline also work out how to call a contract.
+    // Hand a parked claim to the recipient it was always going to.
+    //
+    // Permissionless on purpose. The funds can only move to the address recorded at delivery
+    // time, so there is nothing to gain by calling this for somebody else and no reason to
+    // make a user who just opened a trustline also work out how to call a contract.
     pub fn settle_claim(env: Env, settler: Address, id: u64) -> Result<(), HyperionError> {
         settler.require_auth();
         let mut claim = storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)?;
@@ -242,11 +244,12 @@ impl HyperionRouter {
     // ---------------------------------------------------------------------------------------
 
     /// Price `amount` across every rail at once, losers included.
-    ///
-    /// The app draws all four and says why the three it did not pick lost, so this returns a
-    /// quote per route with a reason code rather than filtering down to the winner. Reason is
-    /// zero when the route is available and otherwise the same error code the router would have
-    /// thrown had you tried it.
+    // Price `amount` across every rail at once, losers included.
+    //
+    // The app draws all four and says why the three it did not pick lost, so this returns a
+    // quote per route with a reason code rather than filtering down to the winner. Reason is
+    // zero when the route is available and otherwise the same error code the router would have
+    // thrown had you tried it.
     pub fn quote_routes(
         env: Env,
         token: Address,
@@ -323,12 +326,13 @@ impl HyperionRouter {
         Ok(())
     }
 
-    /// Stop a token dead without touching any other token. No timelock, same reasoning as
-    /// pausing: if an asset turns out to be doing something it should not, waiting out a delay
-    /// to stop routing it is not a policy, it is a countdown.
-    ///
-    /// Re registering it through the timelock is what turns it back on, so this cannot be used
-    /// to quietly flip a token's decimals or limit on the way past.
+    /// Stop a token dead without touching any other token.
+    // Stop a token dead without touching any other token. No timelock, same reasoning as
+    // pausing: if an asset turns out to be doing something it should not, waiting out a delay
+    // to stop routing it is not a policy, it is a countdown.
+    //
+    // Re registering it through the timelock is what turns it back on, so this cannot be used
+    // to quietly flip a token's decimals or limit on the way past.
     pub fn disable_token(env: Env, caller: Address, token: Address) -> Result<(), HyperionError> {
         caller.require_auth();
         let cfg = storage::config(&env)?;
@@ -342,8 +346,9 @@ impl HyperionRouter {
         Ok(())
     }
 
-    /// Tighten a flow limit immediately. Raising one goes through the timelock; lowering one
-    /// does not, for the same reason pausing does not.
+    /// Tighten a flow limit immediately.
+    // Tighten a flow limit immediately. Raising one goes through the timelock; lowering one
+    // does not, for the same reason pausing does not.
     pub fn lower_token_flow_limit(
         env: Env,
         caller: Address,
@@ -399,8 +404,9 @@ impl HyperionRouter {
         Ok(())
     }
 
-    /// Throw away a queued change. The guardian can do this too, which is the point: noticing
-    /// something wrong in the queue should not require the key that put it there.
+    /// Throw away a queued change.
+    // Throw away a queued change. The guardian can do this too, which is the point: noticing
+    // something wrong in the queue should not require the key that put it there.
     pub fn cancel_action(env: Env, caller: Address, id: u64) -> Result<(), HyperionError> {
         Self::cancel_action_with_reason(
             env.clone(),
@@ -433,11 +439,12 @@ impl HyperionRouter {
     // ---------------------------------------------------------------------------------------
 
     /// Push archival dates back on entries nobody has touched lately.
-    ///
-    /// Soroban storage expires, which is a genuine difference from every EVM chain on the other
-    /// end of this bridge. A flow counter that archives quietly resets a limit, and a parked
-    /// claim that archives is somebody's money gone. Anyone can call this, it costs them a fee
-    /// and gains them nothing, and the backend runs it on a schedule so nobody has to.
+    // Push archival dates back on entries nobody has touched lately.
+    //
+    // Soroban storage expires, which is a genuine difference from every EVM chain on the other
+    // end of this bridge. A flow counter that archives quietly resets a limit, and a parked
+    // claim that archives is somebody's money gone. Anyone can call this, it costs them a fee
+    // and gains them nothing, and the backend runs it on a schedule so nobody has to.
     pub fn keep_alive(
         env: Env,
         tokens: Vec<Address>,
@@ -476,8 +483,9 @@ impl HyperionRouter {
         }
     }
 
-    /// Bounded storage schema migration entrypoint, callable only by the reviewed upgrade
-    /// authority (`cfg.admin`) (#46).
+    /// Bounded storage schema migration entrypoint, callable only by the reviewed upgrade authority (`cfg.admin`) (#46).
+    // Bounded storage schema migration entrypoint, callable only by the reviewed upgrade
+    // authority (`cfg.admin`) (#46).
     pub fn migrate_storage(
         env: Env,
         caller: Address,
@@ -533,10 +541,11 @@ impl HyperionRouter {
     // ---------------------------------------------------------------------------------------
 
     /// Where the protocol's cut goes.
-    ///
-    /// Broken out of `get_config` because the rail adapters read it on their sweep path and
-    /// deserialising the whole config to pull one address out of it is wasted work on a call
-    /// anybody is allowed to make.
+    // Where the protocol's cut goes.
+    //
+    // Broken out of `get_config` because the rail adapters read it on their sweep path and
+    // deserialising the whole config to pull one address out of it is wasted work on a call
+    // anybody is allowed to make.
     pub fn treasury(env: Env) -> Result<Address, HyperionError> {
         Ok(storage::config(&env)?.treasury)
     }
@@ -553,14 +562,16 @@ impl HyperionRouter {
         storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)
     }
 
-    /// Full source provenance for claims created after this view was introduced. `None` means
-    /// the claim predates the provenance sidecar; its legacy nonce and route remain available.
+    /// Full source provenance for claims created after this view was introduced.
+    // Full source provenance for claims created after this view was introduced. `None` means
+    // the claim predates the provenance sidecar; its legacy nonce and route remain available.
     pub fn get_claim_provenance(env: Env, id: u64) -> Option<ClaimProvenance> {
         storage::claim_provenance(&env, id)
     }
 
-    /// Sum unsettled liabilities for a token and compare them with router custody. A missing
-    /// record or failed balance read makes the result explicitly unknown.
+    /// Sum unsettled liabilities for a token and compare them with router custody.
+    // Sum unsettled liabilities for a token and compare them with router custody. A missing
+    // record or failed balance read makes the result explicitly unknown.
     pub fn claim_liability(env: Env, token: Address) -> ClaimLiability {
         let outstanding = storage::claim_liability(&env, &token);
         // An upgraded instance without this marker may contain pre-counter claims. Keep the
@@ -684,10 +695,11 @@ impl HyperionRouter {
     }
 
     /// Check token metadata; success classifies transfer behavior as unverified.
-    /// Runtime balance invariants and operator token review are still required.
-    ///
-    /// Verifies that the token contract exists, correctly implements SEP-41 decimals matching
-    /// `expected_decimals`, does not exceed `MAX_DECIMALS`, and responds to standard balance checks.
+    // Check token metadata; success classifies transfer behavior as unverified.
+    // Runtime balance invariants and operator token review are still required.
+    //
+    // Verifies that the token contract exists, correctly implements SEP-41 decimals matching
+    // `expected_decimals`, does not exceed `MAX_DECIMALS`, and responds to standard balance checks.
     pub fn check_token_behavior(
         env: Env,
         token: Address,
@@ -968,7 +980,8 @@ fn transfer_exact(
 }
 
 /// A built-in SAC reports contract error 13 for an absent account trustline.
-/// Its balance is zero; arbitrary token balance errors are not trusted as zero.
+// A built-in SAC reports contract error 13 for an absent account trustline.
+// Its balance is zero; arbitrary token balance errors are not trusted as zero.
 fn payout_balance(client: &token::Client, to: &Address) -> Result<i128, HyperionError> {
     match client.try_balance(to) {
         Ok(Ok(balance)) if balance >= 0 => Ok(balance),

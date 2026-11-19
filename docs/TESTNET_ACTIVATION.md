@@ -191,6 +191,12 @@ mapping values or administration and requires no admin authorization.
 | Allbridge | Lane/Chain peers; Asset(token, chain); Processed(message)                                                                                                                               | Remote-token list unsupported; gated inbound support remains unchanged                                               |
 | Router    | Bounded `keep_alive`: route/token configuration, route limits/windows, claim/transfer payloads; existing `was_processed` and the new action view extend the supplied replay/action keys | Call each registered adapter directly for upkeep and `key_coverage`; verification reads the registered address first |
 
+The Soroban contract spec embeds public Rust documentation in the WASM. Public API documentation
+uses concise, complete summaries; full explanations remain in ordinary source comments and this
+runbook. Guest exports, parameter/result types, event layouts and runtime behavior are preserved.
+The same pinned Stellar CLI builds these artifacts locally and in CI under the unchanged 65,536-byte
+ledger gate.
+
 The EVM compiler uses 1,000 optimizer runs to retain EIP-170 deployment headroom; the same profile
 is used locally and by full CI, with exact gas reports. The deployment size gates are unchanged.
 
