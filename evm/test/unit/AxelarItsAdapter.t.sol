@@ -192,6 +192,32 @@ contract AxelarItsAdapterTest is Fixture {
         assertEq(its.sentCount(), 0);
     }
 
+    function test_dispatch_refuses_a_pair_if_its_manager_type_changed() public {
+        _fund(AMOUNT);
+        its.setManagerType(2);
+
+        vm.prank(address(router));
+        vm.expectRevert(RailNotConfigured.selector);
+        adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
+
+        assertEq(usdc.balanceOf(address(adapter)), AMOUNT);
+        assertEq(its.sentCount(), 0);
+    }
+
+    function test_capability_admission_checks_the_live_its_manager_type() public {
+        MockERC20 other = new MockERC20("Other", "OTH", 18);
+        bytes32 otherId = keccak256("hyperion.its.other");
+        its.setRegistered(otherId, address(other));
+        vm.prank(admin);
+        adapter.linkToken(address(other), otherId);
+
+        vm.prank(admin);
+        vm.expectRevert(RailNotConfigured.selector);
+        adapter.setDestinationCapability(
+            STELLAR, address(other), 2, AxelarItsAdapter.DestinationCapability.GmpPayload
+        );
+    }
+
     /// @dev Axelar calls BNB Chain "binance". Hyperion's names are its own, and the whole reason
     /// a translation table exists is so a rail renaming a chain is a configuration change rather
     /// than a code change.

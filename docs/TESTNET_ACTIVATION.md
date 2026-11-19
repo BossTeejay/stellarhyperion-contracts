@@ -22,7 +22,9 @@ record captures the current Axelar chain name, peer address, and locally reporte
 type. The capability is either `DirectItsTransfer` (recipient address, empty metadata) or
 `GmpPayload` (Hyperion peer address plus an authenticated note); a route instance cannot use the
 other shape. Dispatch and GMP callback acceptance fail closed if the record is missing, the manager
-type has changed, or the lane no longer matches the recorded peer. Exact integer amounts,
+type has changed, or the lane no longer matches the recorded peer. Soroban keeps these records in
+instance storage so the existing bounded instance-TTL maintenance keeps admission alive alongside
+the adapter configuration. Exact integer amounts,
 authenticated ITS calls, router replay protection and recipient-bound claims are unchanged.
 
 The active Sepolia source route is the bare `AxelarIts` shape. Its existing link and token mappings

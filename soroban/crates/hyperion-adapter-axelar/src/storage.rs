@@ -119,21 +119,18 @@ pub fn destination_capability(
     token_id: &BytesN<32>,
 ) -> Option<DestinationCapabilityRecord> {
     let key = DataKey::DestinationCapability(chain.clone(), token_id.clone());
-    let found: Option<DestinationCapabilityRecord> = env.storage().persistent().get(&key);
-    if found.is_some() {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
-    }
-    found
+    env.storage().instance().get(&key)
 }
 
 pub fn set_destination_capability(env: &Env, record: &DestinationCapabilityRecord) {
     let key = DataKey::DestinationCapability(record.chain.clone(), record.token_id.clone());
-    env.storage().persistent().set(&key, record);
+    // Instance storage shares the configuration's TTL, which is already extended by bounded
+    // maintenance. Keeping admission with the instance prevents it expiring independently and
+    // silently disabling a still-active chain/token pair.
+    env.storage().instance().set(&key, record);
     env.storage()
-        .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        .instance()
+        .extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
 /// Top a lane's lifetime back up without changing it.

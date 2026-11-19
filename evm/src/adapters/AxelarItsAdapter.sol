@@ -21,6 +21,7 @@ import {AddressKind, Destination, Origin, RouteKind} from "../HyperionTypes.sol"
 import {
     IAxelarGasService,
     IInterchainTokenExecutable,
+    IInterchainTokenManager,
     IInterchainTokenService
 } from "../interfaces/IAxelar.sol";
 import {IHyperionRouter} from "../interfaces/IHyperionRouter.sol";
@@ -48,7 +49,6 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
 
     /// @notice The delivery surface admitted for a chain/token-manager pair.
     enum DestinationCapability {
-        Unsupported,
         DirectItsTransfer,
         GmpPayload
     }
@@ -334,13 +334,14 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         DestinationCapability capability
     ) external onlyOwner {
         if (capability != DestinationCapability.GmpPayload) revert RailNotConfigured();
-        if (tokenManagerType > 4 || tokenManagerType == 3) revert RailNotConfigured();
+        if (tokenManagerType > 4) revert RailNotConfigured();
         Peer storage peer = _peers[chain];
         if (!peer.configured) revert RailNotConfigured();
         bytes32 tokenId = tokenIdOf[token];
         if (tokenId == bytes32(0) || ITS.registeredTokenAddress(tokenId) != token) {
             revert TokenNotMapped();
         }
+        if (_currentTokenManagerType(tokenId) != tokenManagerType) revert RailNotConfigured();
 
         bytes32 key = _capabilityKey(chain, tokenId);
         _capabilities[key] = CapabilityRecord({
@@ -398,7 +399,16 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         if (
             !record.configured || record.capability != DestinationCapability.GmpPayload
                 || record.peerHash != keccak256(peer.peer)
+                || record.tokenManagerType != _currentTokenManagerType(tokenId)
         ) revert RailNotConfigured();
+    }
+
+    function _currentTokenManagerType(bytes32 tokenId) private view returns (uint8) {
+        address manager = ITS.tokenManagerAddress(tokenId);
+        if (manager == address(0)) revert TokenNotMapped();
+        uint256 managerType = IInterchainTokenManager(manager).implementationType();
+        if (managerType > type(uint8).max) revert RailNotConfigured();
+        return uint8(managerType);
     }
 
     function _capabilityKey(string memory chain, bytes32 tokenId) private pure returns (bytes32) {
