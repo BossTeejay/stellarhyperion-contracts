@@ -25,8 +25,9 @@ pub use adapter::{PaidRailAdapter, PaidRailAdapterClient, RailAdapter, RailAdapt
 pub use storage::DataKey;
 pub use timelock::{GRACE_PERIOD, MAX_TIMELOCK_DELAY, MIN_TIMELOCK_DELAY};
 pub use types::{
-    AdminAction, Config, Destination, InboundRecord, Origin, OutboundRequest, PendingClaim,
-    QueuedAction, Recipient, RouteConfig, RouteQuote, TokenConfig, TransferRecord,
+    AdminAction, ClaimLiability, ClaimProvenance, Config, Destination, InboundRecord, Origin,
+    OutboundRequest, PendingClaim, QueuedAction, Recipient, RecipientEligibility, RouteConfig,
+    RouteQuote, TokenConfig, TransferRecord,
 };
 
 use hyperion_core::{
@@ -82,6 +83,7 @@ impl HyperionRouter {
             paused: false,
         };
         storage::set_config(&env, &cfg);
+        storage::set_liability_tracking(&env);
         events::config_changed(&env, &cfg);
         Ok(())
     }
@@ -176,6 +178,18 @@ impl HyperionRouter {
                 settled: false,
             };
             storage::set_claim(&env, &claim);
+            if storage::liability_tracking(&env) {
+                storage::increase_claim_liability(&env, &token, amount)?;
+            }
+            storage::set_claim_provenance(
+                &env,
+                id,
+                &ClaimProvenance {
+                    route,
+                    source_chain: origin.chain.clone(),
+                    message_id: origin.message_id.clone(),
+                },
+            );
             events::claim_parked(&env, &claim);
             id
         };
@@ -210,6 +224,9 @@ impl HyperionRouter {
         let client = token::Client::new(&env, &claim.token);
         if !transfer_exact(&client, &this, &claim.recipient, claim.amount, true)? {
             return Err(HyperionError::RecipientNotReady);
+        }
+        if storage::liability_tracking(&env) {
+            storage::decrease_claim_liability(&env, &claim.token, claim.amount)?;
         }
         claim.settled = true;
         storage::set_claim(&env, &claim);
@@ -453,6 +470,64 @@ impl HyperionRouter {
 
     pub fn get_claim(env: Env, id: u64) -> Result<PendingClaim, HyperionError> {
         storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)
+    }
+
+    /// Full source provenance for claims created after this view was introduced. `None` means
+    /// the claim predates the provenance sidecar; its legacy nonce and route remain available.
+    pub fn get_claim_provenance(env: Env, id: u64) -> Option<ClaimProvenance> {
+        storage::claim_provenance(&env, id)
+    }
+
+    /// Sum unsettled liabilities for a token and compare them with router custody. A missing
+    /// record or failed balance read makes the result explicitly unknown.
+    pub fn claim_liability(env: Env, token: Address) -> ClaimLiability {
+        let outstanding = storage::claim_liability(&env, &token);
+        // An upgraded instance without this marker may contain pre-counter claims. Keep the
+        // result explicitly unknown until a reviewed migration has accounted for them.
+        let mut known = storage::liability_tracking(&env);
+        let client = token::Client::new(&env, &token);
+        let custody = match client.try_balance(&env.current_contract_address()) {
+            Ok(Ok(balance)) if balance >= 0 => balance,
+            _ => {
+                known = false;
+                0
+            }
+        };
+        ClaimLiability {
+            token,
+            outstanding,
+            custody,
+            known,
+            solvent: known && custody >= outstanding,
+        }
+    }
+
+    /// Best-effort payout preview. This is diagnostic only and never affects settlement.
+    pub fn preview_claim_recipient(
+        env: Env,
+        id: u64,
+    ) -> Result<RecipientEligibility, HyperionError> {
+        let claim = storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)?;
+        let client = token::Client::new(&env, &claim.token);
+        match client.try_balance(&claim.recipient) {
+            Ok(Ok(_))
+                if client.address.executable() == Some(soroban_sdk::Executable::StellarAsset) =>
+            {
+                if token::StellarAssetClient::new(&env, &claim.token).authorized(&claim.recipient) {
+                    Ok(RecipientEligibility::Eligible)
+                } else {
+                    Ok(RecipientEligibility::Unauthorized)
+                }
+            }
+            Err(Ok(error))
+                if error == soroban_sdk::Error::from_contract_error(13)
+                    && client.address.executable()
+                        == Some(soroban_sdk::Executable::StellarAsset) =>
+            {
+                Ok(RecipientEligibility::MissingTrustline)
+            }
+            _ => Ok(RecipientEligibility::Unknown),
+        }
     }
 
     pub fn get_queued(env: Env, id: u64) -> Result<QueuedAction, HyperionError> {

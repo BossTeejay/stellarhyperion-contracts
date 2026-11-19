@@ -9,3 +9,5 @@ Where the implementation diverged from it, the code says so in a comment at the 
 divergence.
 
 `TESTNET_ACTIVATION.md` records the current supported ITS lane, reviewed paid-transfer artifacts, operator commands and the required acceptance test.
+
+`claim-operations.md` documents claim provenance compatibility, liability and recipient preview views, and paused-departure behavior.
