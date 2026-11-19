@@ -728,8 +728,12 @@ fn bridge_out_inner(
         return Err(HyperionError::TokenNotRegistered);
     }
 
-    let breakdown =
-        compute_quote_breakdown(amount, cfg.fee_bps, token_cfg.decimals, destination_decimals)?;
+    let breakdown = compute_quote_breakdown(
+        amount,
+        cfg.fee_bps,
+        token_cfg.decimals,
+        destination_decimals,
+    )?;
     let fee = breakdown.fee;
     let net = breakdown.net_amount;
     // Circle's forwarding fee is paid from the burned USDC. Protect the user's minimum

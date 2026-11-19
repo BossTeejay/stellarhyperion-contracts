@@ -481,23 +481,22 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         uint256 net = AmountMath.floorToRepresentable(netRaw, cfg.decimals, destinationDecimals);
         if (net == 0) return _blocked(q, QuoteBlocker.NotRepresentable);
 
+        uint256 headroom = flowAvailable(token, route);
+        q.flowAvailable = headroom;
+        if (net > headroom) return _blocked(q, QuoteBlocker.FlowLimitExceeded);
+
         uint256 retainedDust = netRaw - net;
         uint256 actualDebit = fee + net;
         (uint256 landing,) = AmountMath.convertDecimals(net, cfg.decimals, destinationDecimals);
 
+        q.available = true;
+        q.reason = QuoteBlocker.None;
         q.fee = fee;
         q.netAmount = net;
         q.retainedDust = retainedDust;
         q.actualDebit = actualDebit;
         q.grossAmount = actualDebit;
         q.destinationAmount = landing;
-
-        uint256 headroom = flowAvailable(token, route);
-        q.flowAvailable = headroom;
-        if (net > headroom) return _blocked(q, QuoteBlocker.FlowLimitExceeded);
-
-        q.available = true;
-        q.reason = QuoteBlocker.None;
         return q;
     }
 

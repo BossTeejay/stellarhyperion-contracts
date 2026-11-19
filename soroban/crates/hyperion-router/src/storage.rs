@@ -340,9 +340,7 @@ pub fn inc_archived_claim_count(env: &Env, delta: u64) {
     env.storage()
         .instance()
         .set(&DataKey::ArchivedClaimCount, &next);
-    env.storage()
-        .instance()
-        .extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn next_queue_id(env: &Env) -> u64 {

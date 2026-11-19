@@ -809,6 +809,11 @@ export const hyperionRouterAbi = [
             "internalType": "enum QuoteBlocker"
           },
           {
+            "name": "requestedAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
             "name": "grossAmount",
             "type": "uint256",
             "internalType": "uint256"
@@ -820,6 +825,16 @@ export const hyperionRouterAbi = [
           },
           {
             "name": "netAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "retainedDust",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "actualDebit",
             "type": "uint256",
             "internalType": "uint256"
           },
@@ -907,6 +922,11 @@ export const hyperionRouterAbi = [
             "internalType": "enum QuoteBlocker"
           },
           {
+            "name": "requestedAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
             "name": "grossAmount",
             "type": "uint256",
             "internalType": "uint256"
@@ -918,6 +938,16 @@ export const hyperionRouterAbi = [
           },
           {
             "name": "netAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "retainedDust",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "actualDebit",
             "type": "uint256",
             "internalType": "uint256"
           },

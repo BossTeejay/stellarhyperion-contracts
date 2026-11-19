@@ -269,6 +269,10 @@ contract RouterQuoteTest is Fixture {
         router.bridgeOut(_tokenRequest(address(dai), handed, 6));
 
         assertEq(before - dai.balanceOf(alice), q.grossAmount);
+        assertEq(before - dai.balanceOf(alice), q.actualDebit);
+        assertEq(q.requestedAmount, handed);
+        assertEq(q.actualDebit + q.retainedDust, q.requestedAmount);
+        assertGt(q.retainedDust, 0);
         assertEq(dai.balanceOf(treasury), q.fee);
         assertEq(cctpRail.lastCall().amount, q.netAmount);
         assertLt(q.grossAmount, handed, "and the dust never left the sender");
