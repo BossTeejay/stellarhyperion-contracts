@@ -154,15 +154,8 @@ impl HyperionRouter {
         // Pull rather than trust. The receiver pre-authorises this transfer before calling in,
         // so if the funds are not actually there the whole delivery reverts here instead of
         // writing down a claim against money nobody holds.
-        let before = client.balance(&this);
-        client.transfer(&caller, &this, &amount);
-        let after = client.balance(&this);
-        assert_exact_transfer(before, after, amount)?;
-
-        let delivered = matches!(
-            client.try_transfer(&this, &recipient.address, &amount),
-            Ok(Ok(()))
-        );
+        transfer_exact(&client, &caller, &this, amount, false)?;
+        let delivered = transfer_exact(&client, &this, &recipient.address, amount, true)?;
 
         let claim_id = if delivered {
             0u64
@@ -215,10 +208,7 @@ impl HyperionRouter {
         }
         let this = env.current_contract_address();
         let client = token::Client::new(&env, &claim.token);
-        if !matches!(
-            client.try_transfer(&this, &claim.recipient, &claim.amount),
-            Ok(Ok(()))
-        ) {
+        if !transfer_exact(&client, &this, &claim.recipient, claim.amount, true)? {
             return Err(HyperionError::RecipientNotReady);
         }
         claim.settled = true;
@@ -521,7 +511,8 @@ impl HyperionRouter {
         storage::queue_count(&env)
     }
 
-    /// Check and diagnose whether a token meets router accounting and admission assumptions.
+    /// Check token metadata; success classifies transfer behavior as unverified.
+    /// Runtime balance invariants and operator token review are still required.
     ///
     /// Verifies that the token contract exists, correctly implements SEP-41 decimals matching
     /// `expected_decimals`, does not exceed `MAX_DECIMALS`, and responds to standard balance checks.
@@ -711,12 +702,18 @@ fn bridge_out_inner(
     let client = token::Client::new(&env, &token);
 
     let nonce = storage::next_out_nonce(&env);
+    let sender_before = client.balance(&sender);
+    let mut expected_debit = gross;
     if let Some(gas) = gas_amount {
+        if route == RouteKind::AxelarIts
+            && adapter::PaidRailAdapterClient::new(&env, &adapter_addr).gas_token() == token
+        {
+            expected_debit = gross
+                .checked_add(gas)
+                .ok_or(HyperionError::DecimalOverflow)?;
+        }
         if fee > 0 {
-            let before_treasury = client.balance(&cfg.treasury);
-            client.transfer(&sender, &cfg.treasury, &fee);
-            let after_treasury = client.balance(&cfg.treasury);
-            assert_exact_transfer(before_treasury, after_treasury, fee)?;
+            transfer_exact(&client, &sender, &cfg.treasury, fee, false)?;
         }
         adapter::PaidRailAdapterClient::new(&env, &adapter_addr).dispatch_from(
             &this,
@@ -730,21 +727,16 @@ fn bridge_out_inner(
         );
     } else {
         let before_this = client.balance(&this);
-        client.transfer(&sender, &this, &gross);
-        let after_this = client.balance(&this);
-        assert_exact_transfer(before_this, after_this, gross)?;
+        transfer_exact(&client, &sender, &this, gross, false)?;
 
         if fee > 0 {
-            let before_treasury = client.balance(&cfg.treasury);
-            client.transfer(&this, &cfg.treasury, &fee);
-            let after_treasury = client.balance(&cfg.treasury);
-            assert_exact_transfer(before_treasury, after_treasury, fee)?;
+            transfer_exact(&client, &this, &cfg.treasury, fee, false)?;
         }
 
-        let before_adapter = client.balance(&adapter_addr);
-        client.transfer(&this, &adapter_addr, &net);
-        let after_adapter = client.balance(&adapter_addr);
-        assert_exact_transfer(before_adapter, after_adapter, net)?;
+        transfer_exact(&client, &this, &adapter_addr, net, false)?;
+        if client.balance(&this) != before_this {
+            return Err(HyperionError::InvalidAmount);
+        }
 
         RailAdapterClient::new(&env, &adapter_addr).dispatch(
             &this,
@@ -755,6 +747,8 @@ fn bridge_out_inner(
             &nonce,
         );
     }
+
+    assert_exact_transfer(client.balance(&sender), sender_before, expected_debit)?;
 
     let record = TransferRecord {
         nonce,
@@ -772,4 +766,46 @@ fn bridge_out_inner(
     storage::set_transfer(&env, &record);
     events::bridge_out(&env, &record);
     Ok(nonce)
+}
+
+/// Recipient refusals are safe to park only when no token balance moved.
+fn transfer_exact(
+    client: &token::Client,
+    from: &Address,
+    to: &Address,
+    amount: i128,
+    allow_refusal: bool,
+) -> Result<bool, HyperionError> {
+    let from_before = client.balance(from);
+    let to_before = payout_balance(client, to)?;
+    let delivered = if allow_refusal {
+        matches!(client.try_transfer(from, to, &amount), Ok(Ok(())))
+    } else {
+        client.transfer(from, to, &amount);
+        true
+    };
+    let from_after = client.balance(from);
+    let to_after = payout_balance(client, to)?;
+    if delivered {
+        assert_exact_transfer(from_after, from_before, amount)?;
+        assert_exact_transfer(to_before, to_after, amount)?;
+    } else if from_before != from_after || to_before != to_after {
+        return Err(HyperionError::InvalidAmount);
+    }
+    Ok(delivered)
+}
+
+/// A built-in SAC reports contract error 13 for an absent account trustline.
+/// Its balance is zero; arbitrary token balance errors are not trusted as zero.
+fn payout_balance(client: &token::Client, to: &Address) -> Result<i128, HyperionError> {
+    match client.try_balance(to) {
+        Ok(Ok(balance)) if balance >= 0 => Ok(balance),
+        Err(Ok(error))
+            if error == soroban_sdk::Error::from_contract_error(13)
+                && client.address.executable() == Some(soroban_sdk::Executable::StellarAsset) =>
+        {
+            Ok(0)
+        }
+        _ => Err(HyperionError::InvalidAmount),
+    }
 }

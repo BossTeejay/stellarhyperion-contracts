@@ -151,7 +151,7 @@ pub fn assert_exact_transfer(
     balance_after: i128,
     expected_amount: i128,
 ) -> Result<(), HyperionError> {
-    if expected_amount < 0 {
+    if expected_amount < 0 || balance_before < 0 || balance_after < 0 {
         return Err(HyperionError::InvalidAmount);
     }
     let diff = balance_after
@@ -313,6 +313,21 @@ mod tests {
     fn zero_and_negative_amounts_cannot_be_charged_a_fee() {
         assert_eq!(apply_fee(0, 10), Err(HyperionError::InvalidAmount));
         assert_eq!(apply_fee(-5, 10), Err(HyperionError::InvalidAmount));
+    }
+
+    #[test]
+    fn exact_transfer_rejects_negative_balances_and_amounts() {
+        for (before, after, amount) in [(-1, 0, 1), (0, -1, 1), (0, 0, -1)] {
+            assert_eq!(
+                assert_exact_transfer(before, after, amount),
+                Err(HyperionError::InvalidAmount)
+            );
+        }
+        assert_eq!(assert_exact_transfer(i128::MAX - 1, i128::MAX, 1), Ok(()));
+        assert_eq!(
+            assert_exact_transfer(i128::MAX, 0, 1),
+            Err(HyperionError::InvalidAmount)
+        );
     }
 
     proptest! {

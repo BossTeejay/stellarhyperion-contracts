@@ -466,6 +466,34 @@ contract RouterOutboundTest is Fixture {
         assertEq(router.outboundNonce(), 0);
     }
 
+    function test_hostile_fee_or_adapter_credit_rolls_back_the_whole_source_transaction() public {
+        FeeOnTransferToken fot = new FeeOnTransferToken();
+        _registerToken(address(fot), 6, FLOW_LIMIT);
+        fot.mint(alice, 10_000e6);
+        vm.prank(alice);
+        fot.approve(address(router), type(uint256).max);
+        OutboundRequest memory request = _usdcRequest(1000e6);
+        request.token = address(fot);
+        address[2] memory targets = [treasury, address(cctpRail)];
+        for (uint256 i = 0; i < targets.length; i++) {
+            fot.configure(targets[i], 500, false, false);
+            vm.prank(alice);
+            vm.expectRevert(InvalidAmount.selector);
+            router.bridgeOut(request);
+            assertEq(fot.balanceOf(alice), 10_000e6);
+            assertEq(fot.balanceOf(address(router)), 0);
+            assertEq(fot.balanceOf(treasury), 0);
+            assertEq(fot.balanceOf(address(cctpRail)), 0);
+            assertEq(router.outboundNonce(), 0);
+        }
+        fot.configure(treasury, 0, true, false);
+        vm.prank(alice);
+        vm.expectRevert(InvalidAmount.selector);
+        router.bridgeOut(request);
+        assertEq(fot.balanceOf(alice), 10_000e6);
+        assertEq(router.outboundNonce(), 0);
+    }
+
     function _itsRequest(uint256 amount) private view returns (OutboundRequest memory request) {
         request = _usdcRequest(amount);
         request.route = RouteKind.AxelarIts;

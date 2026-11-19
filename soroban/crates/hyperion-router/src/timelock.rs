@@ -21,6 +21,9 @@ pub const GRACE_PERIOD: u64 = 604_800;
 
 pub fn queue(env: &Env, cfg: &Config, action: AdminAction) -> Result<QueuedAction, HyperionError> {
     validate(&action)?;
+    if let AdminAction::RegisterToken(token, decimals, _) = &action {
+        validate_token_behavior(env, token, *decimals)?;
+    }
     let now = env.ledger().timestamp();
     let id = storage::next_queue_id(env);
     let queued = QueuedAction {
@@ -113,7 +116,7 @@ pub fn validate_token_behavior(
         return Err(HyperionError::InvalidDecimals);
     }
     let this = env.current_contract_address();
-    if client.try_balance(&this).is_err() {
+    if !matches!(client.try_balance(&this), Ok(Ok(balance)) if balance >= 0) {
         return Err(HyperionError::InvalidAmount);
     }
     Ok(())

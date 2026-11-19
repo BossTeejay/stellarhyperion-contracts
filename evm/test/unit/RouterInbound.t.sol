@@ -14,6 +14,7 @@ import {
 import {Origin, PendingClaim, RouteKind} from "../../src/HyperionTypes.sol";
 import {IHyperionRouter} from "../../src/interfaces/IHyperionRouter.sol";
 import {Fixture} from "../Fixture.sol";
+import {FeeOnTransferToken} from "../mocks/HostileCallers.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {VoidReturnToken} from "../mocks/VoidReturnToken.sol";
 
@@ -97,6 +98,59 @@ contract RouterInboundTest is Fixture {
 
         assertEq(claimId, 0, "no claim, because the transfer worked");
         assertEq(quiet.balanceOf(bob), DELIVERY);
+    }
+
+    function test_hostile_recipient_credit_rolls_back_replay_and_all_balances() public {
+        FeeOnTransferToken fot = _hostileInbound();
+        fot.configure(bob, 500, false, false);
+        vm.prank(railReceiver);
+        vm.expectRevert(InvalidAmount.selector);
+        router.bridgeIn(RouteKind.Cctp, address(fot), DELIVERY, bob, _origin(MESSAGE_ID));
+        assertEq(fot.balanceOf(railReceiver), 1000e6);
+        assertEq(fot.balanceOf(address(router)), 0);
+        assertEq(fot.balanceOf(bob), 0);
+        assertEq(router.claimCount(), 0);
+        fot.configure(bob, 0, false, false);
+        vm.prank(railReceiver);
+        router.bridgeIn(RouteKind.Cctp, address(fot), DELIVERY, bob, _origin(MESSAGE_ID));
+        assertEq(fot.balanceOf(bob), DELIVERY);
+    }
+
+    function test_a_false_return_after_moving_funds_cannot_create_an_unfunded_claim() public {
+        FeeOnTransferToken fot = _hostileInbound();
+        fot.configure(bob, 0, false, true);
+        vm.prank(railReceiver);
+        vm.expectRevert(InvalidAmount.selector);
+        router.bridgeIn(RouteKind.Cctp, address(fot), DELIVERY, bob, _origin(MESSAGE_ID));
+        assertEq(fot.balanceOf(railReceiver), 1000e6);
+        assertEq(fot.balanceOf(bob), 0);
+        assertEq(router.claimCount(), 0);
+    }
+
+    function test_a_hostile_claim_payout_stays_funded_and_unsettled() public {
+        FeeOnTransferToken fot = _hostileInbound();
+        fot.setBlocked(bob, true);
+        vm.prank(railReceiver);
+        uint64 id = router.bridgeIn(RouteKind.Cctp, address(fot), DELIVERY, bob, _origin(MESSAGE_ID));
+        fot.setBlocked(bob, false);
+        fot.configure(bob, 500, false, false);
+        vm.expectRevert(InvalidAmount.selector);
+        router.settleClaim(id);
+        assertFalse(router.pendingClaim(id).settled);
+        assertEq(fot.balanceOf(address(router)), DELIVERY);
+        assertEq(fot.balanceOf(bob), 0);
+        fot.configure(bob, 0, false, false);
+        router.settleClaim(id);
+        assertEq(fot.balanceOf(bob), DELIVERY);
+    }
+
+    function _hostileInbound() private returns (FeeOnTransferToken fot) {
+        fot = new FeeOnTransferToken();
+        _registerToken(address(fot), 6, FLOW_LIMIT);
+        fot.configure(bob, 0, false, false);
+        fot.mint(railReceiver, 1000e6);
+        vm.prank(railReceiver);
+        fot.approve(address(router), type(uint256).max);
     }
 
     // -------------------------------------------------------------------------------------

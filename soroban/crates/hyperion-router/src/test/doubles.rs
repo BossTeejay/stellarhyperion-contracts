@@ -278,6 +278,9 @@ enum FotKey {
     Balance(Address),
     Decimals,
     FeeBps,
+    FeeTo,
+    ExtraDebit,
+    Blocked(Address),
 }
 
 /// A token that charges a fee on transfer, delivering less than requested.
@@ -289,6 +292,18 @@ impl FeeOnTransferToken {
     pub fn init(env: Env, decimals: u32, fee_bps: u32) {
         env.storage().instance().set(&FotKey::Decimals, &decimals);
         env.storage().instance().set(&FotKey::FeeBps, &fee_bps);
+    }
+
+    pub fn configure(env: Env, fee_to: Address, fee_bps: u32, extra_debit: bool) {
+        env.storage().instance().set(&FotKey::FeeTo, &fee_to);
+        env.storage().instance().set(&FotKey::FeeBps, &fee_bps);
+        env.storage()
+            .instance()
+            .set(&FotKey::ExtraDebit, &extra_debit);
+    }
+
+    pub fn set_blocked(env: Env, to: Address, blocked: bool) {
+        env.storage().instance().set(&FotKey::Blocked(to), &blocked);
     }
 
     pub fn mint(env: Env, to: Address, amount: i128) {
@@ -319,12 +334,31 @@ impl FeeOnTransferToken {
             return Err(TokenError::InsufficientBalance);
         }
         let fee_bps: u32 = env.storage().instance().get(&FotKey::FeeBps).unwrap_or(500); // 5% fee
-        let fee = (amount * fee_bps as i128) / 10_000;
+        let blocked: bool = env
+            .storage()
+            .instance()
+            .get(&FotKey::Blocked(to.clone()))
+            .unwrap_or(false);
+        if blocked {
+            return Err(TokenError::RecipientCannotReceive);
+        }
+        let fee_to: Option<Address> = env.storage().instance().get(&FotKey::FeeTo);
+        let fee = if fee_to.is_none() || fee_to == Some(to.clone()) {
+            (amount * fee_bps as i128) / 10_000
+        } else {
+            0
+        };
+        let extra: bool = env
+            .storage()
+            .instance()
+            .get(&FotKey::ExtraDebit)
+            .unwrap_or(false);
         let net = amount - fee;
         let to_balance = Self::balance(env.clone(), to.clone());
-        env.storage()
-            .instance()
-            .set(&FotKey::Balance(from), &(from_balance - amount));
+        env.storage().instance().set(
+            &FotKey::Balance(from),
+            &(from_balance - amount - if extra { 1 } else { 0 }),
+        );
         env.storage()
             .instance()
             .set(&FotKey::Balance(to), &(to_balance + net));
@@ -370,4 +404,19 @@ pub fn evm_destination(env: &Env, last_byte: u8) -> BytesN<32> {
 /// like if somebody drops it into an EVM address field by mistake.
 pub fn not_an_evm_address(env: &Env) -> BytesN<32> {
     BytesN::from_array(env, &[0x5Au8; 32])
+}
+
+/// Metadata-compatible contract with an error-valued balance response.
+#[contract]
+pub struct UnreadableBalanceToken;
+
+#[contractimpl]
+impl UnreadableBalanceToken {
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
+
+    pub fn balance(_env: Env, _id: Address) -> Result<i128, TokenError> {
+        Err(TokenError::InsufficientBalance)
+    }
 }

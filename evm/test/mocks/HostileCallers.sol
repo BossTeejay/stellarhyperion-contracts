@@ -85,6 +85,21 @@ contract FeeOnTransferToken {
     string public symbol = "FOT";
     uint8 public decimals = 6;
     uint256 public feeBps = 500; // 5% fee
+    address public feeTo;
+    bool public extraDebit;
+    bool public falseAfterMove;
+    mapping(address holder => bool blocked) public blocked;
+
+    function configure(address to, uint256 bps, bool extra, bool returnFalse) external {
+        feeTo = to;
+        feeBps = bps;
+        extraDebit = extra;
+        falseAfterMove = returnFalse;
+    }
+
+    function setBlocked(address to, bool on) external {
+        blocked[to] = on;
+    }
 
     mapping(address holder => uint256 balance) public balanceOf;
     mapping(address holder => mapping(address spender => uint256 amount)) public allowance;
@@ -100,7 +115,7 @@ contract FeeOnTransferToken {
 
     function transfer(address to, uint256 amount) external returns (bool) {
         _move(msg.sender, to, amount);
-        return true;
+        return !falseAfterMove;
     }
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
@@ -114,9 +129,10 @@ contract FeeOnTransferToken {
 
     function _move(address from, address to, uint256 amount) private {
         require(balanceOf[from] >= amount, "balance");
-        uint256 fee = (amount * feeBps) / 10_000;
+        require(!blocked[to], "blocked");
+        uint256 fee = feeTo == address(0) || feeTo == to ? (amount * feeBps) / 10_000 : 0;
         uint256 net = amount - fee;
-        balanceOf[from] -= amount;
+        balanceOf[from] -= amount + (extraDebit ? 1 : 0);
         balanceOf[to] += net;
         balanceOf[address(0xdead)] += fee;
     }

@@ -656,3 +656,40 @@ fn a_fee_on_transfer_token_is_refused_on_outbound_and_leaves_no_false_accounting
     assert_eq!(w.rail().dispatch_count(), 0);
     assert_eq!(w.router().last_out_nonce(), 0);
 }
+
+#[test]
+fn hostile_fee_adapter_credit_and_extra_sender_debit_are_atomic_refusals() {
+    let w = World::new();
+    let id = w.env.register(super::doubles::FeeOnTransferToken, ());
+    let fot = super::doubles::FeeOnTransferTokenClient::new(&w.env, &id);
+    fot.init(&7, &0);
+    w.register_token(id.clone(), 7, FLOW_LIMIT);
+    fot.mint(&w.user, &HUNDRED);
+    let request = OutboundRequest {
+        token: id.clone(),
+        amount: HUNDRED,
+        route: RouteKind::Cctp,
+        destination: dest(&w),
+        destination_decimals: EVM_DECIMALS,
+        min_destination_amount: 0,
+    };
+    for target in [&w.treasury, &w.rail_id] {
+        fot.configure(target, &500, &false);
+        assert_eq!(
+            w.router().try_bridge_out(&w.user, &request),
+            Err(Ok(HyperionError::InvalidAmount))
+        );
+        assert_eq!(fot.balance(&w.user), HUNDRED);
+        assert_eq!(fot.balance(&w.router_id), 0);
+        assert_eq!(fot.balance(&w.rail_id), 0);
+        assert_eq!(fot.balance(&w.treasury), 0);
+        assert_eq!(w.router().last_out_nonce(), 0);
+        assert_eq!(w.rail().dispatch_count(), 0);
+    }
+    fot.configure(&w.treasury, &0, &true);
+    assert_eq!(
+        w.router().try_bridge_out(&w.user, &request),
+        Err(Ok(HyperionError::InvalidAmount))
+    );
+    assert_eq!(fot.balance(&w.user), HUNDRED);
+}
