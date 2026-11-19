@@ -111,6 +111,12 @@ pub struct InboundRecord {
 /// Anything that can move value or widen risk goes through here. Anything that only ever
 /// reduces risk does not, because a bridge that needs three days of notice to stop bleeding is
 /// not actually pausable.
+///
+/// These variant names and their integer widths are the proposal wire format. The read-only
+/// `script/stellar/propose.sh` command emits exactly these variants as JSON for an operator to
+/// review; it never signs or submits them. Adding or renaming a variant means updating that tool
+/// and the protocol parity tests in the same change, or a reviewer will be shown an action the
+/// router cannot accept.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdminAction {

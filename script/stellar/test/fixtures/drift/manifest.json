@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "networks": {
+    "stellar-testnet": {
+      "family": "stellar",
+      "networkPassphrase": "Test SDF Network ; September 2015",
+      "router": "CCXPCT3YFLVANSF3AQMYCCZVGCMLTURAYQ6O6DYGQJMTKVYQL6NTOC2V",
+      "adapters": {
+        "cctp": "CARH6IA4TA5QAJNQG4B4I7N4336JEBS3GYLPZSEBUCWSNYTDRC7L3AHT",
+        "axelar-its": "GDESIREDNAMEPLACEHOLDERXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+      },
+      "tokens": {
+        "USDC": {
+          "sacId": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+          "code": "USDC",
+          "decimals": 7,
+          "flowLimit": "20000000000000",
+          "routes": ["axelar-its", "cctp"]
+        }
+      },
+      "treasury": "GDXRQQETEZHGRJTE3U7DYGIWGGYGMM6EAS5NWGPGN2WXFXZYZ6QZIANA",
+      "admin": "GNEWADMINPLACEHOLDERXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      "guardian": "GDXRQQETEZHGRJTE3U7DYGIWGGYGMM6EAS5NWGPGN2WXFXZYZ6QZIANA",
+      "feeBps": 35,
+      "flowWindow": 900,
+      "timelockDelay": 3600,
+      "routeConfigs": {
+        "cctp": { "maxSingleTransfer": "500000000" }
+      },
+      "wasmHashes": {
+        "router": "281d946ea78b194c0ef44ad9488ed02b2aa6912fb4f6fbab523ad38f1e0803f1",
+        "adapter-axelar": "5f32139554d29edc3501a39ae3d05761101234523dd48b4d9e2d81ebf001f2c3",
+        "adapter-cctp": "80f109e7467ace6899f865a4f77079917a2bea8a5def593a4d87c08c09206af4"
+      }
+    }
+  }
+}

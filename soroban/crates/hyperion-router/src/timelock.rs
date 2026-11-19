@@ -12,6 +12,10 @@ use crate::types::{AdminAction, Config, QueuedAction, RouteConfig, TokenConfig};
 pub const MIN_TIMELOCK_DELAY: u64 = 3_600;
 pub const MAX_TIMELOCK_DELAY: u64 = 2_592_000;
 
+// The configuration-diff command reports these bounds (and GRACE_PERIOD below) with every
+// proposal it emits. It can only describe a change the admin still has to queue and execute after
+// the wait, so there is no tool-side shortcut around the floor or the ceiling.
+
 /// How long a matured action stays executable before it has to be requeued.
 ///
 /// Without this, an action queued and forgotten a year ago is still sitting there ready to fire
