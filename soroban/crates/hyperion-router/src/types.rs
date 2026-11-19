@@ -102,6 +102,38 @@ pub struct PendingClaim {
     pub settled: bool,
 }
 
+/// Read-only accounting for parked claims in one token. `known` is false whenever the
+/// token's balance cannot be read; callers must not treat that state as solvent.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimLiability {
+    pub token: Address,
+    pub outstanding: i128,
+    pub custody: i128,
+    pub known: bool,
+    pub solvent: bool,
+}
+
+/// Best-effort recipient diagnostic. This never changes the recipient stored in a claim.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecipientEligibility {
+    Eligible,
+    MissingTrustline,
+    Unauthorized,
+    Unknown,
+}
+
+/// Full inbound provenance attached to new claims. Older claims intentionally have no entry;
+/// their original claim record remains readable and settleable.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimProvenance {
+    pub route: RouteKind,
+    pub source_chain: String,
+    pub message_id: BytesN<32>,
+}
+
 /// A completed inbound delivery.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
