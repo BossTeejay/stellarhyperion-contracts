@@ -1,0 +1,10 @@
+{
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "routerCodeHash": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+  "adapterCodeHashes": {},
+  "config": {},
+  "tokens": {},
+  "routes": {},
+  "queue": [],
+  "ledgerTimestamp": "1700000000"
+}

@@ -64,3 +64,42 @@ npx vitest run test/live-transfer.test.ts
 Preserve the proof file across interrupted runs. Never delete a pending source hash and blindly send again. A confirmed Stellar transaction alone does not establish destination delivery. Require the indexer's matching confirmed bridge/token payment and the recipient's actual received-token balance. The additional opt-in `test/live-routes.test.ts` covers native XLM conversion and CCTP destination payouts; see the frontend README for its explicit route/proof settings.
 
 For future contract changes, use the router's existing queue/execute upgrade path with its current admin and timelock. Adapter upgrades require the adapter admin. Mapping/link setters can overwrite configuration; read current values and confirm the intended token/network before signing.
+
+## Configuration-diff proposals
+
+`script/stellar/propose.sh` compares a desired deployment manifest with the live router and prints unsigned proposals. It is the reviewable handover between reading the chain and queueing an action; it is not an admin client.
+
+```bash
+# Canonical active manifest; read-only against the testnet RPC.
+script/stellar/propose.sh
+
+# A proposed manifest, kept as a handover artifact.
+script/stellar/propose.sh path/to/desired-manifest.json --out /tmp/proposals.json
+
+# Offline rehearsal against a local snapshot (no `stellar` binary required).
+script/stellar/propose.sh deployments/stellar-testnet-phase1.json \
+  --fixture script/stellar/test/fixtures/drift
+```
+
+Every chain access is a simulated view call (`--is-view` / `--send no`). There is no signing flag, no `--send yes`, and no `queue_action` call in this path. The source account named by `STELLAR_IDENTITY` (default `hyperion-deploy`) is only the transaction source for simulation. Output on stdout is a JSON object with `differences`, `proposals`, `alreadyQueued`, `guardianActions`, `signed: false`, and `submitted: false`; a matching live state yields empty arrays and a non-zero exit is reserved for a refused generation.
+
+Generation aborts before diffing when the live passphrase is not `Test SDF Network ; September 2015`, when the manifest's passphrase disagrees with the chain, or when the deployed router WASM hash differs from `wasmHashes.router`. Adapter hashes are checked when present too. This is what stops a proposal built from this record being used against the archived October 1 router or a mainnet deployment. Manifests whose `family` is not `stellar` are also refused: EVM and other rail proposal generation stays explicitly gated until that side is independently validated.
+
+Only real differences become proposals: config fields (`admin`, `guardian`, `treasury`, `feeBps`, `flowWindow`, `timelockDelay`), token registration or a flow-limit increase, router-side adapter/receiver/enable wiring, and an optional `routeConfigs` entry with `maxSingleTransfer`. An i128 limit is carried as an exact decimal string throughout; no proposal is produced for a value that already matches, and an identical action already sitting in the queue is reported in `alreadyQueued` rather than emitted again. A flow-limit decrease or route disable is a guardian/immediate action, not a timelocked proposal, because it only narrows what the bridge can do. A changed token decimal count aborts generation instead of proposing a re-registration that would silently overwrite it.
+
+Each proposal carries its `delay` requirement: the desired `delaySeconds` plus the router's `minDelaySeconds`, `maxDelaySeconds` and `gracePeriodSeconds`. The operator still has to queue with `queue_action` under the current admin and execute only after the delay matures, as documented above. The tool never shortens that wait and never bypasses the timelock.
+
+**Compatibility and migration.** The command targets the action variants and integer widths of the deployed router hash recorded above; it does not upgrade or modify that contract. If the router is upgraded, update the manifest's `wasmHashes.router` in the same change that updates this runbook, regenerate proposals, and re-check the wire format against `hyperion-router/src/types.rs` and the protocol parity suite. Adapter `link` setters and adapter ownership remain a separate authority and are intentionally absent from router proposals; they are still performed by their own scripts after reading the live peer/domain settings. Keeping a proposal file is safe after execution: re-running the command against the settled state produces an empty diff and submits nothing.
+
+Offline fixtures for the guards and drift cases live in `script/stellar/test/fixtures`; run the suite with `node --test script/stellar/test/propose.test.mjs`.
+
+The proposal planner refuses unreadable state rather than treating an RPC failure as absent
+configuration. Only the router's explicit `TokenNotRegistered`, `AdapterNotSet`, and
+`TimelockNotQueued` errors represent missing entries. Reads use `--send=no`, a 30-second
+per-command deadline and a 4 MiB response limit. More than 10,000 historical queue IDs
+requires a separately reviewed bounded inventory instead of an unbounded scan. The ledger
+close timestamp excludes expired actions from deduplication; an expired action must be queued
+again. Proposal delays report the current live timelock delay, including when proposing a
+change to that delay. All desired router and adapter code hashes are mandatory; the canonical
+`adapter-axelar` record supplies the `axelar-its` hash. Numerical JSON amounts above JavaScript's
+safe range must be decimal strings, and contract-width limits are checked before output.

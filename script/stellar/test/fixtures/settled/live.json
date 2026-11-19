@@ -1,0 +1,40 @@
+{
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "routerCodeHash": "281d946ea78b194c0ef44ad9488ed02b2aa6912fb4f6fbab523ad38f1e0803f1",
+  "adapterCodeHashes": {
+    "cctp": "80f109e7467ace6899f865a4f77079917a2bea8a5def593a4d87c08c09206af4",
+    "axelar-its": "5f32139554d29edc3501a39ae3d05761101234523dd48b4d9e2d81ebf001f2c3"
+  },
+  "config": {
+    "admin": "GDXRQQETEZHGRJTE3U7DYGIWGGYGMM6EAS5NWGPGN2WXFXZYZ6QZIANA",
+    "guardian": "GDXRQQETEZHGRJTE3U7DYGIWGGYGMM6EAS5NWGPGN2WXFXZYZ6QZIANA",
+    "treasury": "GDXRQQETEZHGRJTE3U7DYGIWGGYGMM6EAS5NWGPGN2WXFXZYZ6QZIANA",
+    "fee_bps": 30,
+    "flow_window_ledgers": 720,
+    "timelock_delay": "3600",
+    "paused": false
+  },
+  "tokens": {
+    "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA": {
+      "decimals": 7,
+      "flow_limit": "10000000000000",
+      "enabled": true
+    }
+  },
+  "routes": {
+    "0": {
+      "adapter": "CARH6IA4TA5QAJNQG4B4I7N4336JEBS3GYLPZSEBUCWSNYTDRC7L3AHT",
+      "receiver": "CARH6IA4TA5QAJNQG4B4I7N4336JEBS3GYLPZSEBUCWSNYTDRC7L3AHT",
+      "enabled": true,
+      "config": null
+    },
+    "1": {
+      "adapter": "CDFYEPIXO676W6E6Z4GOOR33JMRUC6DGUBGO4OWYKTO7HOGRJ6ARNOSJ",
+      "receiver": "CDFYEPIXO676W6E6Z4GOOR33JMRUC6DGUBGO4OWYKTO7HOGRJ6ARNOSJ",
+      "enabled": true,
+      "config": null
+    }
+  },
+  "queue": [],
+  "ledgerTimestamp": "1700000000"
+}

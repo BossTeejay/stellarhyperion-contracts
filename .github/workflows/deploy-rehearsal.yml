@@ -95,6 +95,9 @@ jobs:
           cast --version
           node --version
 
+      - name: Test read-only Stellar configuration proposals
+        run: node --test script/stellar/test/propose.test.mjs
+
       - name: Build once, up front
         # So a compile failure reads as a compile failure rather than as a deployment failure forty
         # lines into the script's log. Remember that deny = "warnings" is set and the linter runs

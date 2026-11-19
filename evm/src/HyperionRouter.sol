@@ -579,6 +579,9 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     // Everything else, on a clock
     // -------------------------------------------------------------------------------------
 
+    // Proposal generation is deliberately Stellar-only for now: script/stellar/propose.sh refuses
+    // manifests whose family is not "stellar" and emits the Soroban variant names. Nothing here
+    // assumes an EVM counterpart has been validated, and no tool queues these actions on EVM.
     /// @inheritdoc IHyperionRouter
     function queueAction(AdminAction calldata action)
         external

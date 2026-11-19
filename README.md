@@ -145,6 +145,7 @@ HYPERION_PEER_CHAIN=arc-testnet script/stellar/deploy.sh
 script/stellar/execute.sh                     # once the hour is up
 script/stellar/link.sh                        # once the far side exists
 script/stellar/verify.sh
+script/stellar/propose.sh                     # unsigned config-diff proposals, read only
 ```
 
 `anvil-e2e.sh` is the highest value check in the repository, and it is in CI for that reason. The
@@ -213,6 +214,7 @@ fails past the limit, so this stops being a surprise.
 cd soroban && cargo test --workspace
 cd evm && forge build && FOUNDRY_PROFILE=ci forge test
 cd packages/protocol && npm install && npm run check
+node --test script/stellar/test/propose.test.mjs
 ```
 
 Three things a newcomer gets wrong, in the order they will hit them.
