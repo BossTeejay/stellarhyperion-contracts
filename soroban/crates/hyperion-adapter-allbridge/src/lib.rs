@@ -82,8 +82,9 @@ pub struct AllbridgeAdapter;
 impl AllbridgeAdapter {
     /// Wire the adapter up.
     ///
-    /// Starts with no lane and no asset, so a deploy script that stops halfway leaves something
-    /// that refuses every transfer rather than something that guesses.
+    /// The configured administrator must authorize this one-time transition. Starts with no lane
+    /// and no asset, so a deploy script that stops halfway leaves something that refuses every
+    /// transfer rather than something that guesses.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -94,6 +95,7 @@ impl AllbridgeAdapter {
         if storage::is_initialized(&env) {
             return Err(HyperionError::AlreadyInitialized);
         }
+        admin.require_auth();
         storage::set_config(
             &env,
             &Config {
