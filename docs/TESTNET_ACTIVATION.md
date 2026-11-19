@@ -92,3 +92,14 @@ Each proposal carries its `delay` requirement: the desired `delaySeconds` plus t
 **Compatibility and migration.** The command targets the action variants and integer widths of the deployed router hash recorded above; it does not upgrade or modify that contract. If the router is upgraded, update the manifest's `wasmHashes.router` in the same change that updates this runbook, regenerate proposals, and re-check the wire format against `hyperion-router/src/types.rs` and the protocol parity suite. Adapter `link` setters and adapter ownership remain a separate authority and are intentionally absent from router proposals; they are still performed by their own scripts after reading the live peer/domain settings. Keeping a proposal file is safe after execution: re-running the command against the settled state produces an empty diff and submits nothing.
 
 Offline fixtures for the guards and drift cases live in `script/stellar/test/fixtures`; run the suite with `node --test script/stellar/test/propose.test.mjs`.
+
+The proposal planner refuses unreadable state rather than treating an RPC failure as absent
+configuration. Only the router's explicit `TokenNotRegistered`, `AdapterNotSet`, and
+`TimelockNotQueued` errors represent missing entries. Reads use `--send=no`, a 30-second
+per-command deadline and a 4 MiB response limit. More than 10,000 historical queue IDs
+requires a separately reviewed bounded inventory instead of an unbounded scan. The ledger
+close timestamp excludes expired actions from deduplication; an expired action must be queued
+again. Proposal delays report the current live timelock delay, including when proposing a
+change to that delay. All desired router and adapter code hashes are mandatory; the canonical
+`adapter-axelar` record supplies the `axelar-its` hash. Numerical JSON amounts above JavaScript's
+safe range must be decimal strings, and contract-width limits are checked before output.
