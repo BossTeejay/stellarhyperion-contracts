@@ -7,12 +7,13 @@ use crate::types::{
 };
 
 /// Every state change the router makes is announced here.
-///
-/// The indexer reads these to answer "where is my transfer", and the monitoring job watches the
-/// privileged ones so a parameter change outside a known maintenance window gets somebody's
-/// attention. Each event carries a `hyperion` topic first so a subscriber can filter server side
-/// instead of pulling the whole ledger and sorting it out afterwards, and each is part of the
-/// contract spec so the TypeScript side reads these as real types rather than loose maps.
+// Every state change the router makes is announced here.
+//
+// The indexer reads these to answer "where is my transfer", and the monitoring job watches the
+// privileged ones so a parameter change outside a known maintenance window gets somebody's
+// attention. Each event carries a `hyperion` topic first so a subscriber can filter server side
+// instead of pulling the whole ledger and sorting it out afterwards, and each is part of the
+// contract spec so the TypeScript side reads these as real types rather than loose maps.
 
 #[contractevent(topics = ["hyperion", "out"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,8 +136,9 @@ pub struct RouteConfigured {
     pub enabled: bool,
 }
 
-/// Emitted when a limit is tightened without waiting out the timelock, which is allowed
-/// precisely because it only ever narrows what the bridge will do.
+/// Emitted when a limit is tightened without waiting out the timelock, which is allowed precisely because it only ever narrows what the bridge will do.
+// Emitted when a limit is tightened without waiting out the timelock, which is allowed
+// precisely because it only ever narrows what the bridge will do.
 #[contractevent(topics = ["hyperion", "flow"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FlowLimitLowered {
