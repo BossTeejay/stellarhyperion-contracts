@@ -315,12 +315,9 @@ export function parseDeploymentSet(value: unknown): DeploymentSet {
   const raw = asRecord(value, "$");
   const schemaVersion = asInteger(raw.schemaVersion, "$.schemaVersion", 1);
   if (schemaVersion !== DEPLOYMENT_SCHEMA_VERSION) {
-    fail(
-      "$.schemaVersion",
-      `expected ${String(DEPLOYMENT_SCHEMA_VERSION)}, found ${String(schemaVersion)}`,
-    );
+    fail("$.schemaVersion", `unsupported schema version ${String(schemaVersion)}`);
   }
-
+  const generatedAt = asTimestamp(raw.generatedAt, "$.generatedAt");
   const networksRaw = asRecord(raw.networks, "$.networks");
   const networks: Partial<Record<ChainKey, Deployment>> = {};
   for (const [key, entry] of Object.entries(networksRaw)) {
@@ -333,47 +330,8 @@ export function parseDeploymentSet(value: unknown): DeploymentSet {
     } else if (family === "stellar") {
       networks[key] = readStellarDeployment(record, key, path);
     } else {
-      fail(`${path}.family`, `expected "evm" or "stellar", found "${family}"`);
+      fail(`${path}.family`, `unknown family "${family}"`);
     }
   }
-
-  return {
-    schemaVersion,
-    generatedAt: asTimestamp(raw.generatedAt, "$.generatedAt"),
-    networks,
-  };
-}
-
-export function isEvmDeployment(deployment: Deployment): deployment is EvmDeployment {
-  return deployment.family === "evm";
-}
-
-export function isStellarDeployment(deployment: Deployment): deployment is StellarDeployment {
-  return deployment.family === "stellar";
-}
-
-export function deploymentFor(set: DeploymentSet, chain: ChainKey): Deployment | null {
-  return set.networks[chain] ?? null;
-}
-
-/** The adapter for a rail on a chain, or null when that rail is not wired up there. */
-export function adapterFor(set: DeploymentSet, chain: ChainKey, route: RouteKind): string | null {
-  const deployment = set.networks[chain];
-  if (deployment === undefined) return null;
-  return deployment.adapters[route] ?? null;
-}
-
-export function tokenFor(
-  set: DeploymentSet,
-  chain: ChainKey,
-  symbol: string,
-): EvmTokenDeployment | StellarTokenDeployment | null {
-  const deployment = set.networks[chain];
-  if (deployment === undefined) return null;
-  return deployment.tokens[symbol] ?? null;
-}
-
-/** Every chain in a set that has a router, which is the list a chain picker should offer. */
-export function deployedChains(set: DeploymentSet): readonly ChainKey[] {
-  return Object.keys(set.networks).filter(isChainKey);
+  return { schemaVersion, generatedAt, networks };
 }
