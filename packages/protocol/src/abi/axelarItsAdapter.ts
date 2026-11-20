@@ -98,6 +98,41 @@ export const axelarItsAdapterAbi = [
         "internalType": "address"
       },
       {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "destination",
+        "type": "tuple",
+        "internalType": "struct Destination",
+        "components": [
+          {
+            "name": "chain",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "strkey",
+            "type": "string",
+            "internalType": "string"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "checkTokenMapping",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
         "name": "tokenId",
         "type": "bytes32",
         "internalType": "bytes32"
@@ -114,7 +149,6 @@ export const axelarItsAdapterAbi = [
       },
       {
         "name": "expectedManagerType",
-        "name": "amount",
         "type": "uint256",
         "internalType": "uint256"
       },
@@ -188,24 +222,6 @@ export const axelarItsAdapterAbi = [
         ]
       }
     ],
-        "name": "destination",
-        "type": "tuple",
-        "internalType": "struct Destination",
-        "components": [
-          {
-            "name": "chain",
-            "type": "string",
-            "internalType": "string"
-          },
-          {
-            "name": "strkey",
-            "type": "string",
-            "internalType": "string"
-          }
-        ]
-      }
-    ],
-    "outputs": [],
     "stateMutability": "view"
   },
   {
@@ -375,6 +391,12 @@ export const axelarItsAdapterAbi = [
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MIN_ROTATION_DELAY",
     "inputs": [],
     "outputs": [

@@ -688,6 +688,8 @@ mod tests {
             report.conflicts,
             Vec::from_array(&env, [TokenMappingConflict::UnreadableMetadata])
         );
+    }
+
     #[test]
     fn minimum_peer_rotation_delay_is_at_least_one_hour() {
         assert_eq!(MIN_PEER_ROTATION_DELAY, 3_600);
