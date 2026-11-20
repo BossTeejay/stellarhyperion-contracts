@@ -2,7 +2,7 @@
 //! historical-message acceptance windows, and emergency-disable controls.
 
 use hyperion_core::{
-    cctp::{self, DEFAULT_ROTATION_OVERLAP_WINDOW, MIN_PEER_ROTATION_DELAY},
+    cctp::{DEFAULT_ROTATION_OVERLAP_WINDOW, MIN_PEER_ROTATION_DELAY},
     HyperionError,
 };
 use soroban_sdk::{
@@ -268,6 +268,15 @@ fn token_messenger_rotation_lifecycle_and_overlap() {
 
     assert_eq!(w.adapter().get_config().token_messenger, new_messenger);
     assert!(w.adapter().pending_messenger_rotation().is_none());
+    let hist = w
+        .adapter()
+        .old_token_messenger()
+        .expect("historical overlap window should exist");
+    assert_eq!(hist.old_messenger, old_messenger);
+    assert_eq!(
+        hist.valid_until,
+        w.env.ledger().timestamp() + DEFAULT_ROTATION_OVERLAP_WINDOW
+    );
 
     // In-flight message naming old messenger is accepted during overlap
     let msg_old = w.inbound(ARRIVING, 301);
