@@ -56,7 +56,10 @@ fn peer_messenger_rotation_lifecycle_and_timelock() {
         w.adapter().peer_messenger(&ETHEREUM_DOMAIN),
         Some(peer_b.clone())
     );
-    assert!(w.adapter().pending_peer_rotation(&ETHEREUM_DOMAIN).is_none());
+    assert!(w
+        .adapter()
+        .pending_peer_rotation(&ETHEREUM_DOMAIN)
+        .is_none());
 
     // Historical overlap window is recorded for old peer_a
     let hist = w
@@ -102,8 +105,11 @@ fn peer_messenger_rotation_validations() {
 
     // Delay below minimum
     assert_eq!(
-        w.adapter()
-            .try_propose_peer_rotation(&ETHEREUM_DOMAIN, &peer_b, &(MIN_PEER_ROTATION_DELAY - 1)),
+        w.adapter().try_propose_peer_rotation(
+            &ETHEREUM_DOMAIN,
+            &peer_b,
+            &(MIN_PEER_ROTATION_DELAY - 1)
+        ),
         Err(Ok(HyperionError::TimelockDelayOutOfRange))
     );
 
@@ -137,10 +143,16 @@ fn cancel_peer_messenger_rotation() {
     // Propose then cancel
     w.adapter()
         .propose_peer_rotation(&ETHEREUM_DOMAIN, &peer_b, &MIN_PEER_ROTATION_DELAY);
-    assert!(w.adapter().pending_peer_rotation(&ETHEREUM_DOMAIN).is_some());
+    assert!(w
+        .adapter()
+        .pending_peer_rotation(&ETHEREUM_DOMAIN)
+        .is_some());
 
     w.adapter().cancel_peer_rotation(&ETHEREUM_DOMAIN);
-    assert!(w.adapter().pending_peer_rotation(&ETHEREUM_DOMAIN).is_none());
+    assert!(w
+        .adapter()
+        .pending_peer_rotation(&ETHEREUM_DOMAIN)
+        .is_none());
     assert_eq!(w.adapter().peer_messenger(&ETHEREUM_DOMAIN), Some(peer_a));
 }
 
@@ -168,9 +180,7 @@ fn in_flight_messages_accepted_during_overlap_window_and_refused_after_expiratio
     spec_a.message_sender = peer_a;
     let msg_a = spec_a.encode(&w.env);
 
-    let claim_id = w
-        .adapter()
-        .receive(&w.relayer, &msg_a, &w.attestation());
+    let claim_id = w.adapter().receive(&w.relayer, &msg_a, &w.attestation());
     assert_eq!(claim_id, 0);
     assert_eq!(w.token().balance(&w.recipient), ARRIVING);
 
@@ -179,9 +189,7 @@ fn in_flight_messages_accepted_during_overlap_window_and_refused_after_expiratio
     spec_b.message_sender = peer_b;
     let msg_b = spec_b.encode(&w.env);
 
-    let claim_id_b = w
-        .adapter()
-        .receive(&w.relayer, &msg_b, &w.attestation());
+    let claim_id_b = w.adapter().receive(&w.relayer, &msg_b, &w.attestation());
     assert_eq!(claim_id_b, 0);
     assert_eq!(w.token().balance(&w.recipient), ARRIVING * 2);
 
@@ -222,8 +230,7 @@ fn messages_from_unauthorized_peers_never_acquire_inbound_custody() {
     let msg = spec.encode(&w.env);
 
     assert_eq!(
-        w.adapter()
-            .try_receive(&w.relayer, &msg, &w.attestation()),
+        w.adapter().try_receive(&w.relayer, &msg, &w.attestation()),
         Err(Ok(HyperionError::UnexpectedRailContract))
     );
     // Unauthorized peer never acquires custody; recipient and adapter balances remain zero
@@ -264,9 +271,7 @@ fn token_messenger_rotation_lifecycle_and_overlap() {
 
     // In-flight message naming old messenger is accepted during overlap
     let msg_old = w.inbound(ARRIVING, 301);
-    let claim_id = w
-        .adapter()
-        .receive(&w.relayer, &msg_old, &w.attestation());
+    let claim_id = w.adapter().receive(&w.relayer, &msg_old, &w.attestation());
     assert_eq!(claim_id, 0);
     assert_eq!(w.token().balance(&w.recipient), ARRIVING);
 
@@ -323,9 +328,9 @@ fn emergency_disable_controls_halt_custody_immediately() {
     w.adapter().set_domain_disabled(&ETHEREUM_DOMAIN, &false);
     assert!(!w.adapter().is_domain_disabled(&ETHEREUM_DOMAIN));
 
-    let claim_id_restored = w
-        .adapter()
-        .receive(&w.relayer, &w.inbound(ARRIVING, 403), &w.attestation());
+    let claim_id_restored =
+        w.adapter()
+            .receive(&w.relayer, &w.inbound(ARRIVING, 403), &w.attestation());
     assert_eq!(claim_id_restored, 0);
     assert_eq!(w.token().balance(&w.recipient), ARRIVING * 2);
 }

@@ -629,11 +629,7 @@ impl CctpAdapter {
     }
 
     /// Emergency disable or re-enable routing on a configured domain.
-    pub fn set_domain_disabled(
-        env: Env,
-        domain: u32,
-        disabled: bool,
-    ) -> Result<(), HyperionError> {
+    pub fn set_domain_disabled(env: Env, domain: u32, disabled: bool) -> Result<(), HyperionError> {
         require_admin(&env)?;
         if storage::chain_of(&env, domain).is_none() {
             return Err(HyperionError::UnknownChain);
@@ -699,7 +695,9 @@ impl CctpAdapter {
             return Err(HyperionError::TimelockDelayOutOfRange);
         }
         let now = env.ledger().timestamp();
-        let eta = now.checked_add(delay).ok_or(HyperionError::DecimalOverflow)?;
+        let eta = now
+            .checked_add(delay)
+            .ok_or(HyperionError::DecimalOverflow)?;
         storage::set_pending_peer_rotation(
             &env,
             domain,
@@ -781,7 +779,9 @@ impl CctpAdapter {
             return Err(HyperionError::TimelockDelayOutOfRange);
         }
         let now = env.ledger().timestamp();
-        let eta = now.checked_add(delay).ok_or(HyperionError::DecimalOverflow)?;
+        let eta = now
+            .checked_add(delay)
+            .ok_or(HyperionError::DecimalOverflow)?;
         storage::set_pending_messenger_rotation(
             &env,
             &MessengerRotation {
@@ -803,8 +803,8 @@ impl CctpAdapter {
     /// Apply a proposed local TokenMessenger rotation.
     pub fn apply_messenger_rotation(env: Env) -> Result<(), HyperionError> {
         let mut cfg = require_admin(&env)?;
-        let pending = storage::pending_messenger_rotation(&env)
-            .ok_or(HyperionError::RotationNotPending)?;
+        let pending =
+            storage::pending_messenger_rotation(&env).ok_or(HyperionError::RotationNotPending)?;
         let now = env.ledger().timestamp();
         if now < pending.eta {
             return Err(HyperionError::RotationNotReady);
@@ -827,8 +827,8 @@ impl CctpAdapter {
     /// Cancel a pending local TokenMessenger rotation.
     pub fn cancel_messenger_rotation(env: Env) -> Result<(), HyperionError> {
         let cfg = require_admin(&env)?;
-        let pending = storage::pending_messenger_rotation(&env)
-            .ok_or(HyperionError::RotationNotPending)?;
+        let pending =
+            storage::pending_messenger_rotation(&env).ok_or(HyperionError::RotationNotPending)?;
         storage::clear_pending_messenger_rotation(&env);
         events::MessengerRotationCancelled {
             current_messenger: cfg.token_messenger,
@@ -941,7 +941,9 @@ impl CctpAdapter {
         Ok(storage::old_peer_messenger(&env, domain))
     }
 
-    pub fn pending_messenger_rotation(env: Env) -> Result<Option<MessengerRotation>, HyperionError> {
+    pub fn pending_messenger_rotation(
+        env: Env,
+    ) -> Result<Option<MessengerRotation>, HyperionError> {
         let _ = storage::config(&env)?;
         Ok(storage::pending_messenger_rotation(&env))
     }

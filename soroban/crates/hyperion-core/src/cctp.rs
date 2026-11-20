@@ -36,7 +36,6 @@ pub const MIN_PEER_ROTATION_DELAY: u64 = 3_600;
 /// peer messenger remain acceptable after rotation (24 hours).
 pub const DEFAULT_ROTATION_OVERLAP_WINDOW: u64 = 86_400;
 
-
 // ------------------------------------------------------------------------------------------
 // Header offsets
 // ------------------------------------------------------------------------------------------

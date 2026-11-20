@@ -41,6 +41,19 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "applyPeerRotation",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "APPROVAL_DIAGNOSTICS_VERSION",
     "inputs": [],
     "outputs": [
@@ -160,6 +173,19 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "cancelPeerRotation",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "checkDispatch",
     "inputs": [
       {
@@ -191,6 +217,19 @@ export const cctpAdapterAbi = [
       }
     ],
     "outputs": [],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "DEFAULT_OVERLAP_WINDOW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
     "stateMutability": "view"
   },
   {
@@ -267,6 +306,37 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "historicalPeerOf",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct CctpAdapter.HistoricalPeer",
+        "components": [
+          {
+            "name": "oldMintRecipient",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "validUntil",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "laneOf",
     "inputs": [
       {
@@ -308,6 +378,19 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "MIN_ROTATION_DELAY",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "owner",
     "inputs": [],
     "outputs": [
@@ -331,6 +414,65 @@ export const cctpAdapterAbi = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pendingRotationOf",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct CctpAdapter.PeerRotation",
+        "components": [
+          {
+            "name": "newMintRecipient",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "eta",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "queuedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "proposePeerRotation",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "newPeer",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "delay",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -651,8 +793,94 @@ export const cctpAdapterAbi = [
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "PeerRotationApplied",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "indexed": true,
+        "internalType": "string"
+      },
+      {
+        "name": "oldPeer",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "newPeer",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "overlapDeadline",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PeerRotationCancelled",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "indexed": true,
+        "internalType": "string"
+      },
+      {
+        "name": "cancelledPeer",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PeerRotationQueued",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "indexed": true,
+        "internalType": "string"
+      },
+      {
+        "name": "currentPeer",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "newPeer",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "eta",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "AlreadyConfigured",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "DecimalOverflow",
     "inputs": []
   },
   {
@@ -705,6 +933,27 @@ export const cctpAdapterAbi = [
         "name": "token",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "TimelockDelayOutOfRange",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TimelockNotQueued",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TimelockNotReady",
+    "inputs": [
+      {
+        "name": "eta",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },
