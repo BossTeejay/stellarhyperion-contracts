@@ -128,6 +128,40 @@ describe("dated snapshot comparison", () => {
     for (const item of mismatches)
       expect(compare([item])[0]!.status).toBe(SnapshotStatus.Incompatible);
   });
+  it("refuses unsupported directions even when both snapshot identities agree", () => {
+    const directions = [
+      {
+        network: "sepolia",
+        tokenId: source,
+        representation: {
+          ...representation,
+          destinationNetwork: "base-sepolia",
+          destinationTokenId: source,
+        },
+      },
+      {
+        network: "stellar-testnet",
+        tokenId: C_ADDR,
+        representation: {
+          ...representation,
+          destinationNetwork: "sepolia",
+          destinationTokenId: source,
+        },
+      },
+      { network: "stellar-testnet", tokenId: C_ADDR, representation },
+    ];
+    for (const direction of directions) {
+      const row = compareSnapshots(
+        request,
+        [entry(direction)],
+        { ...reference, ...direction },
+        10,
+      )[0]!;
+      expect(row.status).toBe(SnapshotStatus.Incompatible);
+      expect(row.quote).toBeNull();
+      expect(row.quotes).toEqual([]);
+    }
+  });
   it("normalizes EVM address case while keeping chain and denomination bound", () => {
     const tokenId = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
     const a = entry({ tokenId: tokenId.toUpperCase().replace("0X", "0x") });

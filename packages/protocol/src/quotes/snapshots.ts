@@ -91,7 +91,13 @@ function identity(
     !isChainKey(representation.destinationNetwork)
   )
     return null;
-  if (chain(network).network !== chain(representation.destinationNetwork).network) return null;
+  // The existing planner accepts Stellar recipients and models EVM departure arithmetic.
+  if (
+    chain(network).family !== "evm" ||
+    chain(representation.destinationNetwork).family !== "stellar" ||
+    chain(network).network !== chain(representation.destinationNetwork).network
+  )
+    return null;
   return JSON.stringify([
     network,
     source,
