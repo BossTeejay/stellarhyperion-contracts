@@ -147,8 +147,10 @@ contract RouterModelDriver is Fixture {
         uint256 arg = uint256(word) >> 16;
         if (kind == 0) return _predictDispatch(small, arg);
         if (kind == 1) return _predictInbound(small, arg, (uint256(word) >> 10) % 16);
-        if (kind == 2) model.blocked[small % 2] = arg % 2 != 0;
-        return (true, 0);
+        if (kind == 2) {
+            model.blocked[small % 2] = arg % 2 != 0;
+            return (true, 0);
+        }
         if (kind == 3) {
             uint256 id = small % 20;
             if (id >= model.claimCount) return (false, 0);
@@ -175,10 +177,14 @@ contract RouterModelDriver is Fixture {
         uint256 kind = (uint256(word) & 255) % 10;
         uint256 small = uint256(word) >> 8;
         uint256 arg = uint256(word) >> 16;
-        if (kind == 2) usdc.setBlocked(_recipient(small % 2), arg % 2 != 0);
-        return (true, 0);
-        if (kind == 9) vm.warp(block.timestamp + arg % 800_000);
-        return (true, 0);
+        if (kind == 2) {
+            usdc.setBlocked(_recipient(small % 2), arg % 2 != 0);
+            return (true, 0);
+        }
+        if (kind == 9) {
+            vm.warp(block.timestamp + arg % 800_000);
+            return (true, 0);
+        }
         bytes memory payload;
         address caller = _actor(small % 3);
         if (kind == 0) {
