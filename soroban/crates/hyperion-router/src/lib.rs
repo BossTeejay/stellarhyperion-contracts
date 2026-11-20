@@ -1026,6 +1026,7 @@ struct OutboundPlan {
     adapter_addr: Address,
 }
 
+#[inline(never)]
 fn plan_outbound(
     env: &Env,
     request: &OutboundRequest,
@@ -1120,6 +1121,7 @@ fn plan_outbound(
     })
 }
 
+#[inline(never)]
 fn bounded_plan(
     env: &Env,
     request: &OutboundRequest,
@@ -1168,6 +1170,7 @@ fn bounded_plan(
     }
 }
 
+#[inline(never)]
 fn bridge_out_inner(
     env: Env,
     sender: Address,
@@ -1261,6 +1264,7 @@ fn bridge_out_inner(
     Ok(nonce)
 }
 
+#[inline(never)]
 fn settle_claim_inner(env: &Env, settler: &Address, id: u64) -> Result<(), HyperionError> {
     if storage::is_claim_archived(env, id) {
         return Err(HyperionError::ClaimAlreadySettled);
