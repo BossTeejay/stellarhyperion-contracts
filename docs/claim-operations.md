@@ -129,6 +129,14 @@ Each EVM Axelar ITS dispatch records a fixed-size intent keyed by the router non
 original sender, token/token id, original amount, and a hash of the Hyperion and Axelar destination
 bindings. The router uses an additive sender-aware adapter entry point for ITS; the adapter accepts
 that call only from its configured router.
+
+The updated router requires the configured ITS adapter to implement `dispatchWithSender`; it does
+not fall back to the legacy `dispatch` selector. An older adapter therefore causes ITS outbound
+dispatches through this router to revert. Before enabling this EVM development path, deploy the
+compatible adapter and update the router's adapter configuration through its timelock. This does
+not migrate intents from an older adapter; its already in-flight messages cannot use this top-up
+entry point.
+
 Destination chain names are limited to 64 bytes and Stellar strkeys to 69 bytes before they enter
 that intent. A top-up must echo the recorded destination binding, token id, token address, and
 original amount, and the original sender must make the top-up call; these fields are checked, not
