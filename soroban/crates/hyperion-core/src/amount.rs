@@ -143,6 +143,43 @@ pub fn apply_fee(amount: i128, fee_bps: u32) -> Result<FeeSplit, HyperionError> 
     Ok(FeeSplit { net, fee })
 }
 
+/// Complete source-debit and dust breakdown for an outbound transfer quote.
+///
+/// Preserves exact integer accounting across fee rounding and destination decimal flooring:
+/// `requested_amount == actual_debit + retained_dust` and `actual_debit == fee + net_amount`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QuoteBreakdown {
+    pub requested_amount: i128,
+    pub fee: i128,
+    pub net_amount: i128,
+    pub retained_dust: i128,
+    pub actual_debit: i128,
+    pub destination_amount: i128,
+}
+
+/// Compute the full source-debit and dust breakdown for `requested_amount`.
+pub fn compute_quote_breakdown(
+    requested_amount: i128,
+    fee_bps: u32,
+    source_decimals: u32,
+    destination_decimals: u32,
+) -> Result<QuoteBreakdown, HyperionError> {
+    let split = apply_fee(requested_amount, fee_bps)?;
+    let net_amount = floor_to_representable(split.net, source_decimals, destination_decimals)?;
+    let retained_dust = split.net - net_amount;
+    let actual_debit = split.fee + net_amount;
+    let destination_amount =
+        convert_decimals_exact(net_amount, source_decimals, destination_decimals)?;
+    Ok(QuoteBreakdown {
+        requested_amount,
+        fee: split.fee,
+        net_amount,
+        retained_dust,
+        actual_debit,
+        destination_amount,
+    })
+}
+
 /// Check that an actual transferred amount matches the expected exact amount,
 /// refusing fee-on-transfer, deflationary, or hostile balance mutations that
 /// violate router accounting assumptions.
@@ -393,6 +430,19 @@ mod tests {
                 assert_exact_transfer(before, before + transfer + fee, transfer),
                 Err(HyperionError::InvalidAmount)
             );
+        }
+
+        #[test]
+        fn quote_breakdown_conserves_requested_amount(
+            amount in 100i128..1_000_000_000_000_000i128,
+            bps in 0u32..=MAX_FEE_BPS,
+        ) {
+            let b = compute_quote_breakdown(amount, bps, STELLAR_DECIMALS, EVM_USDC_DECIMALS).unwrap();
+            prop_assert_eq!(b.requested_amount, amount);
+            prop_assert_eq!(b.actual_debit, b.fee + b.net_amount);
+            prop_assert_eq!(b.actual_debit + b.retained_dust, b.requested_amount);
+            prop_assert!(b.retained_dust >= 0 && b.retained_dust < 10);
+            prop_assert_eq!(b.destination_amount * 10, b.net_amount);
         }
     }
 }

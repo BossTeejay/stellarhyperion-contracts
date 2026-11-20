@@ -313,12 +313,32 @@ fn expired_replay_snapshot_never_reports_fresh_and_restoration_preserves_every_i
 fn measure_bounded_replay_upkeep_resources_and_exact_ttl() {
     use soroban_sdk::{xdr::WriteXdr, BytesN};
     for count in [1u32, 32] {
-        let w = World::new();
         let wasm = std::env::var("HYPERION_MEASURE_ROUTER_WASM").ok();
-        if let Some(path) = &wasm {
+        let w = if let Some(path) = &wasm {
+            // Registering WASM resets instance storage. Produce the configuration through
+            // that executable before measuring, so code and configured-instance bytes count.
+            let w = World::uninitialised();
             let bytes = std::fs::read(path).expect("measurement WASM must exist");
             w.env.register_at(&w.router_id, bytes.as_slice(), ());
-        }
+            w.router().initialize(
+                &w.admin,
+                &w.guardian,
+                &w.treasury,
+                &super::setup::FEE_BPS,
+                &hyperion_core::DEFAULT_FLOW_WINDOW_LEDGERS,
+                &crate::MIN_TIMELOCK_DELAY,
+            );
+            w.enable_every_route();
+            w.register_token(
+                w.token_id.clone(),
+                hyperion_core::STELLAR_DECIMALS,
+                super::setup::FLOW_LIMIT,
+            );
+            w.fund_user(super::setup::HUNDRED * 10);
+            w
+        } else {
+            World::new()
+        };
         let mut keys = vec![&w.env];
         for i in 0..count {
             let mut bytes = [0xa5u8; 32];

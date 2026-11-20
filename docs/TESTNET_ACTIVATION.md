@@ -248,7 +248,108 @@ The actual deployable router WASM was loaded into Soroban host29.0.1 and measure
 
 | Supplied replay keys | Metered WASM instructions | Metered memory bytes | Memory read entries | Persistent rent ledger-bytes | TTL bump entries |
 | -------------------- | ------------------------: | -------------------: | ------------------: | ---------------------------: | ---------------: |
-| 1                    |                   679,364 |            1,298,757 |                   3 |              639,231,515,761 |                3 |
-| 32                   |                 3,640,481 |            1,574,254 |                  34 |              653,098,061,281 |               34 |
+| 1                    |                   729,761 |            1,305,306 |                   3 |                  447,307,920 |                1 |
+| 32                   |                 3,786,158 |            1,576,587 |                  34 |               14,313,853,440 |               32 |
 
-These host measurements include the router's newly loaded code and instance TTL rent as well as the supplied tombstones; they are not a quoted network fee. The final artifact is 65,297 bytes. Reproduce with `HYPERION_MEASURE_ROUTER_WASM=$PWD/target/wasm32v1-none/release/hyperion_router.wasm cargo test -p hyperion-router discovery::measure_bounded_replay_upkeep_resources_and_exact_ttl -- --nocapture` from `soroban` after the strict repository build. CI runs this actual-WASM fixture and all 50 read-only host/CLI regressions, in addition to the complete unchanged application/security gates.
+The router is initialized through its loaded WASM before measurement, so these resources cover upkeep of the supplied cold tombstones without charging the newly loaded code and instance TTL rent to upkeep. They are not a quoted network fee. The final artifact is 64,670 bytes. Reproduce with `HYPERION_MEASURE_ROUTER_WASM=$PWD/target/wasm32v1-none/release/hyperion_router.wasm cargo test -p hyperion-router discovery::measure_bounded_replay_upkeep_resources_and_exact_ttl -- --nocapture` from `soroban` after the strict repository build. CI runs this actual-WASM fixture and all 57 read-only host/CLI regressions, in addition to the complete unchanged application/security gates.
+
+### Versioned debit quotes, archival cleanup and upgrade rehearsal
+
+`quote_routes` on Soroban, `quote`/`quoteAll` on EVM, and the protocol package's
+`planQuote`/`quoteBatch` keep their existing `RouteQuote` schemas. New consumers
+opt into `quote_routes_v2`, `quoteV2`, or `planQuoteV2`. Each wraps the unchanged
+legacy quote and adds the requested amount, fee, representable net, retained dust,
+and prospective source debit. For valid integer arithmetic,
+`requested = actual_debit + retained_dust` and `actual_debit = fee + net`.
+A refused route has no debit: these fields describe the amount that arithmetic
+would dispatch if the route were usable. Invalid or unknown arithmetic has an
+explicit unavailable breakdown. Near-zero representable net remains a refusal;
+its breakdown still conserves all input units. The breakdown excludes separately
+funded provider gas; an ITS/GMP adapter using the transfer asset for gas debits
+`actual_debit + gas_amount`. CCTP forwarding fees come from the burned net amount,
+so the gas-funded entrypoint's post-provider-fee destination minimum remains the
+final dispatch authority.
+
+`archive_settled_claims(after, limit)` examines ascending claim IDs, with
+`1 <= limit <= 32`, and returns the last examined ID. Save this cursor after each
+successful transaction. A failure rolls back the entire batch. Duplicate calls
+are harmless. Only settled claims with a recorded settlement timestamp at least
+30 days old qualify; creation time is never a substitute for settlement time.
+Pre-upgrade settled claims and expired timestamp sidecars are kept until a future
+reviewed migration supplies trustworthy settlement evidence. Unsettled claims,
+liability balances, token custody, and full-width replay keys are retained.
+
+`claim_history(id)` returns `Live(id)`, `Archived(id)`, or `Unavailable`.
+Read a live payload through the compatible `get_claim(id)` method.
+Intentional cleanup records a permanent instance bitmap (128 IDs per word) before
+removing the claim and settlement-time entries. The bitmap is retained with the
+instance and refuses another settlement even if an old claim entry is restored.
+`ClaimArchived` records the full settled claim and available source provenance;
+operators must journal this event before RPC event retention expires. The legacy
+`get_claim` view returns `ClaimNotFound` after cleanup. `Unavailable` requires RPC
+inspection/restoration and is never evidence of deliberate deletion. Missing
+records are skipped during cleanup; restore them and re-examine that range before
+claiming complete cleanup. Keep the cursor and skipped ranges in the operator's
+maintenance log. The original claim ID sequence never shrinks or reuses an ID.
+Intentional archive markers allow bounded schema backfill to skip only claims
+proven already paid; an unknown missing claim still aborts migration.
+
+A local executable rehearsal uses a released router artifact and builds the
+candidate from current source with the unchanged 65,536-byte deployment gate:
+
+```sh
+CARGO_BUILD_JOBS=1 script/stellar/rehearse-upgrade.sh \
+  --old-wasm /path/to/released-hyperion-router.wasm
+```
+
+The fixture registers and initializes the released WASM, then creates outbound
+transfers/flow windows, queued actions, settled and pending claims, provenance,
+liabilities and replay IDs through that executable. A nonexistent upload hash
+must leave the original executable and queued action intact. The reviewed
+successful upgrade changes only the executable, upgrade queue and lifecycle audit;
+all critical public records must match. New versioned views must execute through
+the new WASM. The report distinguishes these intentional changes from unexpected
+differences. Native re-registration is not evidence of an executable upgrade.
+The artifact-dependent executable fixture is explicitly ignored in the ordinary
+unit invocation; the runner supplies both artifacts and selects that fixture
+with `--ignored`. Its successful real-WASM execution is separate validation.
+Full explanatory prose remains in source comments and this runbook; embedded
+contract documentation was compacted to preserve deployment headroom without
+changing legacy argument/result layouts, executable exports, or size policy.
+
+### Exact recorded storage cost projections
+
+The cost projector accepts recorded ledger key XDR and RPC simulation responses.
+It reports instance, persistent, code, archived and unavailable categories, exact
+encoded key/data byte lengths for live entries, actual simulation resources and
+exact integer resource fees. Archived byte counts remain unknown until restored.
+It never multiplies guessed entry sizes by sequence high-watermarks or invents
+network rent rates. Instance storage uses persistent durability; its separate
+report category does not imply a separate network rent price.
+
+```sh
+# Request JSON: assumptions {cycleLedgers, ledgersPerYear}, and scenarios
+# [{name, keys: [LedgerKey base64...], transaction: unsigned-envelope-base64}].
+node script/stellar/storage-cost.mjs \
+  --rpc https://your-rpc.example --request recorded-keysets.json > costs.json
+# Replay a bounded record offline with the installed Stellar XDR codec:
+node script/stellar/storage-cost.mjs --record recorded-rpc.json
+# Deterministic real-XDR codec fixture with growing claim/transfer sets:
+node script/stellar/storage-cost.mjs \
+  --record script/stellar/fixtures/storage-cost-rpc-v2.json
+```
+
+Capture calls only `getNetwork`, `getLedgerEntries` and `simulateTransaction`;
+it never signs or broadcasts. Record all footprint keys, splitting operations
+into batches of at most 32 keys. Keep the captured network passphrase/protocol,
+ledger, operation and declared annual/cycle assumptions with the report. Annual
+projection repeats the recorded operation and prices; regenerate simulations as
+state grows or network settings change. Restoration preamble fees are reported
+separately; automatic restoration is flagged when included in the invocation.
+Inclusion bids are excluded. Local mock RPC prices in the checked-in codec fixture
+are explicitly labeled and do not describe live network pricing. Current live
+production pricing and funded broadcasts require separate operator evidence.
+
+The active deployment remains Stellar Testnet outbound ITS/CCTP. EVM and other
+rails remain gated until independently validated; these local fixtures do not
+activate them or publish a live deployment.

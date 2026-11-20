@@ -221,3 +221,14 @@ enum QuoteBlocker {
     InvalidDestination,
     ChainNotSupported
 }
+
+// Additive V2 result: the legacy RouteQuote tuple and its selectors remain unchanged.
+struct RouteQuoteV2 {
+    RouteQuote quote;
+    uint256 requestedAmount;
+    uint256 fee;
+    uint256 netAmount;
+    uint256 retainedDust;
+    uint256 actualDebit;
+    bool breakdownKnown;
+}

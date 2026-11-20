@@ -39,6 +39,11 @@ pub trait RailAdapter {
     );
 }
 
+/// Paid rail adapter interface for routes that collect destination relay gas upfront.
+///
+/// Router quotes report `actual_debit` for the bridge transfer itself (`fee + net_amount`).
+/// When `bridge_out_with_gas` is used and `gas_token() == token`, the atomic source transaction
+/// debits `actual_debit + gas_amount` from `sender`.
 #[soroban_sdk::contractclient(name = "PaidRailAdapterClient")]
 pub trait PaidRailAdapter {
     fn gas_token(env: Env) -> Address;

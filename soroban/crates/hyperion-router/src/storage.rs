@@ -57,6 +57,8 @@ pub enum DataKey {
     ClaimFailure(u64),
     ClaimProvenance(u64),
     ClaimLiability(Address),
+    ClaimSettledAt(u64),
+    ClaimArchiveWord(u64),
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -374,6 +376,7 @@ pub fn claim(env: &Env, id: u64) -> Option<PendingClaim> {
         env.storage()
             .persistent()
             .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        touch_persistent_key(env, &DataKey::ClaimSettledAt(id));
         let failure_key = DataKey::ClaimFailure(id);
         if env.storage().persistent().has(&failure_key) {
             env.storage()
@@ -530,4 +533,45 @@ pub fn action_payload(env: &Env, id: u64) -> Option<QueuedAction> {
     };
     touch_persistent_key(env, &key);
     env.storage().persistent().get(&key)
+}
+
+pub const MIN_CLAIM_RETENTION_SECONDS: u64 = 2_592_000;
+
+pub fn claim_settled_at(env: &Env, id: u64) -> Option<u64> {
+    env.storage().persistent().get(&DataKey::ClaimSettledAt(id))
+}
+
+pub fn set_claim_settled_at(env: &Env, id: u64, at: u64) {
+    let key = DataKey::ClaimSettledAt(id);
+    env.storage().persistent().set(&key, &at);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+// Compact, nonexpiring instance bitmap: 128 permanent nonpayment markers per word.
+// The archive event contains the exact historical values; bitmap never permits repayment.
+pub fn is_claim_archived(env: &Env, id: u64) -> bool {
+    let word: u128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ClaimArchiveWord(id / 128))
+        .unwrap_or(0);
+    word & (1u128 << (id % 128)) != 0
+}
+
+pub fn archive_claim(env: &Env, id: u64) {
+    let key = DataKey::ClaimArchiveWord(id / 128);
+    let word: u128 = env.storage().instance().get(&key).unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&key, &(word | (1u128 << (id % 128))));
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+    env.storage().persistent().remove(&DataKey::Claim(id));
+    env.storage()
+        .persistent()
+        .remove(&DataKey::ClaimFailure(id));
+    env.storage()
+        .persistent()
+        .remove(&DataKey::ClaimSettledAt(id));
 }
