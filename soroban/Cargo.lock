@@ -1081,6 +1081,7 @@ name = "hyperion-router"
 version = "0.1.0"
 dependencies = [
  "hyperion-core",
+ "proptest",
  "soroban-sdk",
 ]
 

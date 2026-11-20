@@ -4,6 +4,13 @@
 //! Stellar/EVM impedance mismatches. Decimal conversion, Stellar address encoding and
 //! flow-limit accounting all live in one place so that no contract is ever tempted to
 //! inline the arithmetic, which is exactly how the 10x decimal bug shows up in the wild.
+//!
+//! The `model` module is an independent, allocation-free reference model of the router's
+//! dispatch, pause, administration and claim semantics. It exists so that operation
+//! sequences can be replayed against both the Soroban router and the EVM router and
+//! compared step by step, and so that failing sequences can be reduced to a minimal
+//! reproducible trace. Chain-specific time semantics (Stellar ledger sequence versus EVM
+//! block timestamps) are modeled explicitly rather than assumed to be interchangeable.
 #![cfg_attr(not(test), no_std)]
 
 pub mod address;
@@ -15,6 +22,7 @@ pub mod error;
 pub mod flow;
 pub mod inbound;
 pub mod maintenance;
+pub mod model;
 pub mod route;
 pub mod strkey;
 
@@ -38,6 +46,9 @@ pub use inbound::{Origin, Recipient, Router, RouterClient};
 pub use maintenance::{
     AdapterKeyCoverage, AdapterMaintenance, AdapterMaintenanceClient, MaintenanceSummary,
     MAX_MAINTENANCE_BATCH,
+};
+pub use model::{
+    ChainClock, ModelError, ModelRouter, Operation, Rail, Trace, TraceStep, MODEL_MAX_CLAIMS,
 };
 pub use route::RouteKind;
 pub use strkey::StrkeyDestination;
