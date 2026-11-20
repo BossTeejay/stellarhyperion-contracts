@@ -592,7 +592,10 @@ fn disabled_chain_preview_and_both_dispatch_paths_agree_without_spending() {
     let treasury_before = w.token().balance(&w.treasury);
     for (adapter, paid) in [(w.adapter(), false), (w.bare(), true)] {
         adapter.set_chain_enabled(&w.ethereum(), &false);
-        for gas in [None, Some(1_000)].into_iter().take(if paid { 2 } else { 1 }) {
+        for gas in [None, Some(1_000)]
+            .into_iter()
+            .take(if paid { 2 } else { 1 })
+        {
             assert_eq!(
                 adapter.try_check_dispatch(
                     &w.router_id,
