@@ -21,7 +21,8 @@
 //! - Allowance lifecycle: TokenMessenger consumes approvals via `transfer_from`. Dispatch opens
 //!   the allowance for the exact amount and ledger sequence, then closes it to zero.
 //! - Residual approval reconciliation: the read-only allowance auditor inspects standing
-//!   approvals and produces findings (`ApprovalFinding::UnexpectedResidual`) without mutating state.
+//!   approvals and produces findings (`ApprovalFinding::UnexpectedResidual`) without mutating state. Unreadable amounts report
+//!   `ApprovalFinding::Unavailable` and are never presented as clean zero.
 //!
 //! # Active Deployment Gating
 //!

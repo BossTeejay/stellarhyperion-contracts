@@ -294,6 +294,8 @@ pub enum ApprovalFinding {
     Clean = 0,
     /// Unexpected residual allowance detected without caller authorization.
     UnexpectedResidual = 1,
+    /// Allowance could not be read or was outside the token amount domain.
+    Unavailable = 2,
 }
 
 /// Versioned diagnostics snapshot of the CCTP allowance and approval lifecycle.
@@ -301,6 +303,7 @@ pub enum ApprovalFinding {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalDiagnostics {
     pub version: u32,
+    /// Zero is a placeholder when finding is Unavailable, never proof of cleanliness.
     pub allowance: i128,
     pub expected_allowance: i128,
     pub is_clean: bool,
@@ -308,8 +311,22 @@ pub struct ApprovalDiagnostics {
 }
 
 impl ApprovalDiagnostics {
+    /// An unreadable value has no numeric allowance; callers must inspect the finding.
+    pub fn unavailable() -> Self {
+        Self {
+            version: APPROVAL_DIAGNOSTICS_VERSION,
+            allowance: 0,
+            expected_allowance: DOCUMENTED_RESIDUAL_ALLOWANCE,
+            is_clean: false,
+            finding: ApprovalFinding::Unavailable,
+        }
+    }
+
     /// Evaluate an allowance against the documented baseline without mutating state.
     pub fn audit(allowance: i128) -> Self {
+        if allowance < 0 {
+            return Self::unavailable();
+        }
         let is_clean = allowance == DOCUMENTED_RESIDUAL_ALLOWANCE;
         let finding = if is_clean {
             ApprovalFinding::Clean
@@ -594,6 +611,19 @@ mod tests {
         // Worth pinning: the whole CCTP integration is wrong in a quiet, funds-losing way if
         // this number drifts.
         assert_eq!(STELLAR_DOMAIN, 27);
+    }
+
+    #[test]
+    fn unavailable_allowance_cannot_be_mistaken_for_clean_zero() {
+        for value in [-1, i128::MIN] {
+            let diag = ApprovalDiagnostics::audit(value);
+            assert_eq!(diag, ApprovalDiagnostics::unavailable());
+            assert!(!diag.is_clean);
+            assert_eq!(diag.finding, ApprovalFinding::Unavailable);
+        }
+        let largest = ApprovalDiagnostics::audit(i128::MAX);
+        assert_eq!(largest.allowance, i128::MAX);
+        assert_eq!(largest.finding, ApprovalFinding::UnexpectedResidual);
     }
 
     #[test]

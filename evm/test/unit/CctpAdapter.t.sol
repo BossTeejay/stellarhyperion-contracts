@@ -23,6 +23,26 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockTokenMessenger} from "../mocks/MockTokenMessenger.sol";
 import {Vm} from "forge-std/Vm.sol";
 
+/// @notice Exercises successful approve responses with incorrect allowance accounting.
+contract InconsistentApprovalToken is MockERC20 {
+    uint8 public approvalMode;
+
+    constructor() MockERC20("Approval token", "APT", 6) {}
+
+    function setApprovalMode(uint8 mode) external {
+        approvalMode = mode;
+    }
+
+    function approve(address spender, uint256 value) public override returns (bool) {
+        if (value == 0 && approvalMode == 2) revert("approval clear failed");
+        if ((value == 0 && approvalMode == 1) || (value != 0 && approvalMode == 3)) {
+            _approve(msg.sender, spender, value + 1);
+            return true;
+        }
+        return super.approve(spender, value);
+    }
+}
+
 /// @title Handing USDC to Circle
 /// @notice What the adapter tells CCTP, and everything it refuses to tell it.
 /// @dev There is no attestation to assert on here and no burn to watch, because both of those
@@ -50,6 +70,9 @@ contract CctpAdapterTest is Fixture {
     CctpAdapter internal adapter;
     MockTokenMessenger internal messenger;
 
+    event ApprovalAudited(
+        address indexed token, address indexed spender, uint256 beforeValue, uint256 afterValue, bool clean
+    );
     event LaneConfigured(string chain, uint32 domain, bytes32 mintRecipient);
     event LaneEnabled(string chain, bool enabled);
     event BurnSubmitted(
@@ -504,16 +527,91 @@ contract CctpAdapterTest is Fixture {
     }
 
     function test_reverting_messenger_fixture_preserves_source_atomicity() public {
-        _fund(AMOUNT);
+        _fund(AMOUNT * 2);
+        vm.prank(address(router));
+        adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
+        vm.prank(address(adapter));
+        usdc.approve(address(messenger), 500);
         messenger.setShouldRevert(true);
 
         vm.prank(address(router));
         vm.expectRevert("MockTokenMessenger: burn failed");
-        adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
-
-        // Source atomicity: tokens remained in adapter balance and were not transferred to messenger
+        adapter.dispatch(address(usdc), AMOUNT, _dest(C_ADDR), NONCE + 1);
         assertEq(usdc.balanceOf(address(adapter)), AMOUNT);
-        assertEq(usdc.balanceOf(address(messenger)), 0);
+        assertEq(usdc.balanceOf(address(messenger)), AMOUNT);
+        assertEq(usdc.allowance(address(adapter), address(messenger)), 500);
+        assertEq(messenger.burnCount(), 1);
+        assertEq(messenger.lastBurn().hookData, _hook(AddressKind.Account, G_KEY, 0));
+
+        messenger.setShouldRevert(false);
+        vm.prank(address(router));
+        adapter.dispatch(address(usdc), AMOUNT, _dest(C_ADDR), NONCE + 1);
+        assertEq(messenger.burnCount(), 2);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+        assertEq(usdc.allowance(address(adapter), address(messenger)), 0);
+    }
+
+    function testFuzz_auditor_preserves_full_width_residual_values(uint256 value) public {
+        vm.prank(address(adapter));
+        usdc.approve(address(messenger), value);
+        CctpAdapter.ApprovalDiagnostics memory diag = adapter.auditAllowance();
+        assertEq(diag.allowance, value);
+        assertEq(diag.isClean, value == 0);
+        assertEq(usdc.allowance(address(adapter), address(messenger)), value);
+    }
+
+    function test_auditor_reports_unavailable_for_failed_or_malformed_reads() public {
+        bytes memory callData =
+            abi.encodeWithSignature("allowance(address,address)", address(adapter), address(messenger));
+        address[] memory targets = new address[](4);
+        targets[0] = address(0x1234);
+        targets[1] = address(new MockERC20("Short", "S", 6));
+        targets[2] = address(new MockERC20("Long", "L", 6));
+        targets[3] = address(new MockERC20("Revert", "R", 6));
+        vm.mockCall(targets[1], callData, new bytes(31));
+        vm.mockCall(targets[2], callData, new bytes(64));
+        vm.mockCallRevert(targets[3], callData, abi.encode("unreadable"));
+        for (uint256 i; i < targets.length; ++i) {
+            CctpAdapter.ApprovalDiagnostics memory diag = adapter.auditAllowance(targets[i]);
+            assertEq(diag.allowance, 0);
+            assertFalse(diag.isClean);
+            assertEq(uint256(diag.finding), uint256(CctpAdapter.ApprovalFinding.Unavailable));
+        }
+    }
+
+    function test_approval_event_records_residual_and_verified_cleanup() public {
+        _fund(AMOUNT);
+        vm.prank(address(adapter));
+        usdc.approve(address(messenger), 500);
+        vm.expectEmit(true, true, false, true, address(adapter));
+        emit ApprovalAudited(address(usdc), address(messenger), 500, 0, true);
+        vm.prank(address(router));
+        adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
+    }
+
+    function test_approval_cleanup_failure_rolls_back_burn_and_allows_retry() public {
+        for (uint8 mode = 1; mode <= 3; ++mode) {
+            InconsistentApprovalToken asset = new InconsistentApprovalToken();
+            CctpAdapter fresh = new CctpAdapter(address(router), address(messenger), address(asset), admin);
+            vm.prank(admin);
+            fresh.setLane(STELLAR, STELLAR_DOMAIN, MINT_RECIPIENT);
+            asset.mint(address(fresh), AMOUNT);
+            asset.setApprovalMode(mode);
+            uint256 count = messenger.burnCount();
+            vm.prank(address(router));
+            if (mode == 2) vm.expectRevert("approval clear failed");
+            else vm.expectRevert(InvalidAmount.selector);
+            fresh.dispatch(address(asset), AMOUNT, _dest(G_ADDR), NONCE);
+            assertEq(asset.balanceOf(address(fresh)), AMOUNT);
+            assertEq(asset.balanceOf(address(messenger)), 0);
+            assertEq(asset.allowance(address(fresh), address(messenger)), 0);
+            assertEq(messenger.burnCount(), count);
+            asset.setApprovalMode(0);
+            vm.prank(address(router));
+            fresh.dispatch(address(asset), AMOUNT, _dest(G_ADDR), NONCE);
+            assertEq(messenger.burnCount(), count + 1);
+            assertEq(asset.allowance(address(fresh), address(messenger)), 0);
+        }
     }
 
     // -------------------------------------------------------------------------------------

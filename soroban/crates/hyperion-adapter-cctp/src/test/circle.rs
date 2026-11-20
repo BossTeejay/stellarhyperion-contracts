@@ -177,9 +177,6 @@ impl MockMessenger {
             .instance()
             .get(&MessengerKey::ShouldRevert)
             .unwrap_or(false);
-        if should_revert {
-            panic!("MockMessenger: deposit_for_burn configured to revert");
-        }
         if amount <= 0 {
             return Err(CircleError::AmountMustBeNonzero);
         }
@@ -238,6 +235,9 @@ impl MockMessenger {
         env.storage()
             .instance()
             .set(&MessengerKey::Count, &(count + 1));
+        if should_revert {
+            panic!("MockMessenger: deposit_for_burn configured to revert");
+        }
         Ok(())
     }
 }

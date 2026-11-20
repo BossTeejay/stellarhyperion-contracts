@@ -37,7 +37,8 @@
 //! Successful dispatch leaves only the documented allowance state (zero residual allowance).
 //! The contract provides a read-only allowance auditor (`audit_allowance`) producing versioned
 //! diagnostics (`ApprovalDiagnostics`). Unexpected residual approvals produce findings
-//! (`ApprovalFinding::UnexpectedResidual`) without automatic mutation, ensuring observational
+//! (`ApprovalFinding::UnexpectedResidual`); unreadable amounts report `Unavailable`. Neither
+//! finding triggers automatic mutation, ensuring observational
 //! integrity. Reverting messenger fixtures preserve source atomicity by unwinding the transaction.
 
 #![no_std]
@@ -158,14 +159,7 @@ impl CctpAdapter {
 
         let this = env.current_contract_address();
         let asset = token::Client::new(&env, &token);
-        let allowance_before = asset.allowance(&this, &cfg.token_messenger);
-
-        // Circle's `deposit_and_burn` pulls with `transfer_from`, so an allowance has to exist
-        // before the call and should not exist after it. The expiration is this ledger and no
-        // further: the allowance is consumed inside this same transaction, so there is no reason
-        // to leave one lying around that a later ledger could still draw on.
-        let this_ledger = env.ledger().sequence();
-        asset.approve(&this, &cfg.token_messenger, &amount, &this_ledger);
+        let allowance_before = open_approval(&env, &asset, &this, &cfg.token_messenger, amount)?;
 
         TokenMessengerClient::new(&env, &cfg.token_messenger).deposit_for_burn(
             &this,
@@ -178,20 +172,14 @@ impl CctpAdapter {
             &cfg.min_finality_threshold,
         );
 
-        // Circle strips anything below its own smallest representable unit before burning and
-        // leaves the remainder where it found it, so the allowance can come back unspent in part.
-        // Closing it is one storage write and removes the question entirely.
-        asset.approve(&this, &cfg.token_messenger, &0i128, &this_ledger);
-
-        let allowance_after = asset.allowance(&this, &cfg.token_messenger);
-        events::ApprovalAudited {
-            token: token.clone(),
-            spender: cfg.token_messenger.clone(),
+        close_approval(
+            &env,
+            &asset,
+            &token,
+            &this,
+            &cfg.token_messenger,
             allowance_before,
-            allowance_after,
-            is_clean: allowance_after == cctp::DOCUMENTED_RESIDUAL_ALLOWANCE,
-        }
-        .publish(&env);
+        )?;
 
         events::Dispatched {
             token,
@@ -243,6 +231,7 @@ impl CctpAdapter {
         if destination_caller != BytesN::from_array(&env, &[0u8; 32]) {
             return Err(HyperionError::InvalidDestination);
         }
+        cctp::validate_burn_boundary(amount, &destination, gas_amount, cfg.min_finality_threshold)?;
         let this = env.current_contract_address();
         let asset = token::Client::new(&env, &token);
         let sender_before = asset.balance(&sender);
@@ -254,8 +243,7 @@ impl CctpAdapter {
             sender_before,
             amount,
         )?;
-        let ledger = env.ledger().sequence();
-        asset.approve(&this, &cfg.token_messenger, &amount, &ledger);
+        let allowance_before = open_approval(&env, &asset, &this, &cfg.token_messenger, amount)?;
         // Circle's version-zero forwarding hook: 24-byte magic, version 0, payload length 0.
         let mut hook = [0u8; 32];
         hook[..12].copy_from_slice(b"cctp-forward");
@@ -270,7 +258,14 @@ impl CctpAdapter {
             &cfg.min_finality_threshold,
             &Bytes::from_array(&env, &hook),
         );
-        asset.approve(&this, &cfg.token_messenger, &0i128, &ledger);
+        close_approval(
+            &env,
+            &asset,
+            &token,
+            &this,
+            &cfg.token_messenger,
+            allowance_before,
+        )?;
         events::Dispatched {
             token,
             destination_domain: domain,
@@ -678,9 +673,55 @@ impl CctpAdapter {
         let cfg = storage::config(&env)?;
         let this = env.current_contract_address();
         let asset = token::Client::new(&env, &token);
-        let allowance = asset.allowance(&this, &cfg.token_messenger);
-        Ok(cctp::ApprovalDiagnostics::audit(allowance))
+        Ok(match asset.try_allowance(&this, &cfg.token_messenger) {
+            Ok(Ok(allowance)) => cctp::ApprovalDiagnostics::audit(allowance),
+            _ => cctp::ApprovalDiagnostics::unavailable(),
+        })
     }
+}
+
+/// Approval is exact and expires in this ledger; inconsistent token accounting aborts the burn.
+fn open_approval(
+    env: &Env,
+    asset: &token::Client,
+    owner: &Address,
+    spender: &Address,
+    amount: i128,
+) -> Result<i128, HyperionError> {
+    let before = asset.allowance(owner, spender);
+    if before < 0 {
+        return Err(HyperionError::InvalidAmount);
+    }
+    asset.approve(owner, spender, &amount, &env.ledger().sequence());
+    if asset.allowance(owner, spender) != amount {
+        return Err(HyperionError::InvalidAmount);
+    }
+    Ok(before)
+}
+
+/// Circle may leave dust unspent. Successful cleanup must observe exactly zero, on both paths.
+fn close_approval(
+    env: &Env,
+    asset: &token::Client,
+    token: &Address,
+    owner: &Address,
+    spender: &Address,
+    allowance_before: i128,
+) -> Result<(), HyperionError> {
+    asset.approve(owner, spender, &0, &env.ledger().sequence());
+    let allowance_after = asset.allowance(owner, spender);
+    if allowance_after != cctp::DOCUMENTED_RESIDUAL_ALLOWANCE {
+        return Err(HyperionError::InvalidAmount);
+    }
+    events::ApprovalAudited {
+        token: token.clone(),
+        spender: spender.clone(),
+        allowance_before,
+        allowance_after,
+        is_clean: true,
+    }
+    .publish(env);
+    Ok(())
 }
 
 /// Read the config and insist the admin signed for whatever is about to happen.

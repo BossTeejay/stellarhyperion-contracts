@@ -56,7 +56,8 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
     /// @notice Findings produced by the allowance auditor.
     enum ApprovalFinding {
         Clean,
-        UnexpectedResidual
+        UnexpectedResidual,
+        Unavailable
     }
 
     /// @notice Versioned diagnostics snapshot of the allowance state.
@@ -64,6 +65,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         uint32 version;
         address token;
         address spender;
+        // Zero is a placeholder when finding is Unavailable.
         uint256 allowance;
         uint256 expectedAllowance;
         bool isClean;
@@ -165,6 +167,9 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         emit BurnSubmitted(destination.chain, lane.domain, amount, lane.mintRecipient, nonce, hookData);
         uint256 allowanceBefore = IERC20(USDC).allowance(address(this), address(TOKEN_MESSENGER));
         IERC20(USDC).forceApprove(address(TOKEN_MESSENGER), amount);
+        if (IERC20(USDC).allowance(address(this), address(TOKEN_MESSENGER)) != amount) {
+            revert InvalidAmount();
+        }
         TOKEN_MESSENGER.depositForBurnWithHook(
             amount,
             lane.domain,
@@ -183,10 +188,9 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         // Closing the allowance leaves only the documented allowance state (0).
         IERC20(USDC).forceApprove(address(TOKEN_MESSENGER), 0);
         uint256 allowanceAfter = IERC20(USDC).allowance(address(this), address(TOKEN_MESSENGER));
+        if (allowanceAfter != DOCUMENTED_RESIDUAL_ALLOWANCE) revert InvalidAmount();
 
-        emit ApprovalAudited(
-            USDC, address(TOKEN_MESSENGER), allowanceBefore, allowanceAfter, allowanceAfter == 0
-        );
+        emit ApprovalAudited(USDC, address(TOKEN_MESSENGER), allowanceBefore, allowanceAfter, true);
 
         // CCTP wanted no native currency, so none of it is this contract's to keep.
         _refund();
@@ -242,9 +246,14 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
     /// @param token The token address to audit.
     /// @return Diagnostics snapshot including allowance, expected allowance, and finding.
     function auditAllowance(address token) public view returns (ApprovalDiagnostics memory) {
-        uint256 currentAllowance = IERC20(token).allowance(address(this), address(TOKEN_MESSENGER));
-        bool isClean = (currentAllowance == DOCUMENTED_RESIDUAL_ALLOWANCE);
-        ApprovalFinding finding = isClean ? ApprovalFinding.Clean : ApprovalFinding.UnexpectedResidual;
+        (bool readable, bytes memory result) =
+            token.staticcall(abi.encodeCall(IERC20.allowance, (address(this), address(TOKEN_MESSENGER))));
+        readable = readable && result.length == 32;
+        uint256 currentAllowance = readable ? abi.decode(result, (uint256)) : 0;
+        bool isClean = readable && currentAllowance == DOCUMENTED_RESIDUAL_ALLOWANCE;
+        ApprovalFinding finding = !readable
+            ? ApprovalFinding.Unavailable
+            : (isClean ? ApprovalFinding.Clean : ApprovalFinding.UnexpectedResidual);
 
         return ApprovalDiagnostics({
             version: APPROVAL_DIAGNOSTICS_VERSION,
