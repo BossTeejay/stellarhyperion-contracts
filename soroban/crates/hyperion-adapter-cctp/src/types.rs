@@ -39,3 +39,47 @@ pub struct DomainLink {
     /// Who may broadcast the resulting message on the far side. All zeroes means anybody.
     pub destination_caller: BytesN<32>,
 }
+
+/// A proposed peer messenger rotation on a remote domain awaiting the timelock delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerMessengerRotation {
+    /// The new remote messenger address on the source domain.
+    pub new_messenger: BytesN<32>,
+    /// Timestamp at or after which `apply` may be called.
+    pub eta: u64,
+    /// Timestamp when the rotation was proposed.
+    pub queued_at: u64,
+}
+
+/// An active overlap acceptance window for historical messages from a retired peer messenger.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalMessengerWindow {
+    /// The retired remote messenger address.
+    pub old_messenger: BytesN<32>,
+    /// Timestamp until which historical messages from `old_messenger` are still accepted.
+    pub valid_until: u64,
+}
+
+/// A proposed local TokenMessenger rotation awaiting the timelock delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MessengerRotation {
+    /// The replacement TokenMessenger address proposed by the admin.
+    pub new_messenger: Address,
+    /// Timestamp at or after which `apply` may be called.
+    pub eta: u64,
+    /// Timestamp when the rotation was proposed.
+    pub queued_at: u64,
+}
+
+/// Historical window for retired local TokenMessenger.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalTokenMessengerWindow {
+    /// The retired local TokenMessenger address.
+    pub old_messenger: Address,
+    /// Timestamp until which messages naming `old_messenger` are still accepted.
+    pub valid_until: u64,
+}

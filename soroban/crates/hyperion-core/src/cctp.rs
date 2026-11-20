@@ -25,6 +25,18 @@ pub const BURN_MESSAGE_VERSION: u32 = 1;
 /// Finality threshold at or above which Circle considers a message finalised.
 pub const FINALITY_THRESHOLD_FINALIZED: u32 = 2000;
 
+/// Minimum delay required before a proposed CCTP peer messenger rotation can become active (1 hour).
+///
+/// 3600 seconds (1 hour) enforces an explicit review and timelock window so that
+/// unintended or unauthorized messenger migrations can be audited and cancelled before
+/// taking effect.
+pub const MIN_PEER_ROTATION_DELAY: u64 = 3_600;
+
+/// Default overlap window during which historical/in-flight messages from a retired
+/// peer messenger remain acceptable after rotation (24 hours).
+pub const DEFAULT_ROTATION_OVERLAP_WINDOW: u64 = 86_400;
+
+
 // ------------------------------------------------------------------------------------------
 // Header offsets
 // ------------------------------------------------------------------------------------------
@@ -670,5 +682,11 @@ mod tests {
             validate_burn_boundary(1000, &dest, 10, 0),
             Err(HyperionError::InvalidLimit)
         );
+    }
+
+    #[test]
+    fn minimum_peer_rotation_delay_is_at_least_one_hour() {
+        assert_eq!(MIN_PEER_ROTATION_DELAY, 3_600);
+        assert_eq!(DEFAULT_ROTATION_OVERLAP_WINDOW, 86_400);
     }
 }
