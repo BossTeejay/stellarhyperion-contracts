@@ -14,6 +14,15 @@ use soroban_sdk::{contractclient, Address, BytesN, Env, String};
 // received in this adapter's balance is guaranteed to equal `amount` exactly.
 #[contractclient(name = "RailAdapterClient")]
 pub trait RailAdapter {
+    fn check_dispatch(
+        env: Env,
+        caller: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        gas_amount: Option<i128>,
+    );
     /// Push `amount` of `token`, already sitting in this adapter's balance, onto the rail.
     // Push `amount` of `token`, already sitting in this adapter's balance, onto the rail.
     //

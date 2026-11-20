@@ -1,0 +1,19 @@
+# CCTP approval diagnostics
+
+Both Soroban burn entrypoints (`dispatch` and paid `dispatch_from`) and EVM `dispatch` approve exactly the requested token amount immediately before calling Circle. Soroban approvals expire in the current ledger. Each entrypoint reads back the opened allowance, clears it after the burn, and requires the observed residual allowance to be zero. A failed read, failed approval, inconsistent opened amount or nonzero cleanup aborts the transaction. Inconsistent allowance amounts use the existing `InvalidAmount` error. There is no standing approval between successful burns.
+
+The read-only `audit_allowance(token)` and EVM `auditAllowance()` / `auditAllowance(token)` inspect the adapter's allowance to its configured messenger. They require no administrator authorization and never approve, revoke, move tokens, change fee policy or reconcile state. The version-1 result reports expected allowance zero and these stable findings:
+
+| Finding            | Value | Interpretation                                                                      |
+| ------------------ | ----- | ----------------------------------------------------------------------------------- |
+| Clean              | 0     | A readable allowance equals zero.                                                   |
+| UnexpectedResidual | 1     | A readable allowance is positive.                                                   |
+| Unavailable        | 2     | The read failed, its return was malformed, or the token reported an invalid amount. |
+
+For `Unavailable`, allowance zero is a placeholder and `is_clean` / `isClean` is false. Consumers must inspect the finding before treating the numeric value as a measurement. EVM accepts only exactly 32 return bytes and preserves the entire uint256 value. Soroban preserves nonnegative i128 values. The protocol package's `auditCctpAllowance` accepts a bigint reading or null for a failed read, with the same findings and uint256 bounds. Negative values are unavailable, never residual or clean.
+
+`ApprovalAudited` records the preexisting and final allowance for successful burns, including paid forwarding. Its final allowance is always zero and cleanliness is true; failed transactions do not produce committed lifecycle events. A residual audit remains observational. Operators investigate the token/provider and choose a separately authorized recovery action; the auditor never clears a finding itself.
+
+All existing dispatch signatures, burn parameters, destination and fee/finality validation rules, storage keys, event schemas and error numbers remain unchanged. Diagnostics and their event are additive to the released adapter interfaces. Existing finality policy still permits thresholds 1 through 2000 on Soroban. EVM still uses finalized threshold 2000, fee zero and its pre-burn `BurnSubmitted` event.
+
+These checks do not authorize deployment or replace Circle's attestation verification. Activation and upgrade rehearsal remain subject to the existing testnet gates. The hostile fixtures test messenger failure after token movement and record mutation, inconsistent approvals, failed/nonzero cleanup, unchanged source balances and router fees/flow/nonce, and retry after the fault is removed. They do not claim production Circle integration.

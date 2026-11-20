@@ -45,8 +45,6 @@ pub enum DataKey {
     /// funds have already been burned on the far side, which is its own kind of loss.
     Processed(RouteKind, BytesN<32>),
     Claim(u64),
-    ClaimProvenance(u64),
-    ClaimLiability(Address),
     ClaimSeq,
     Queued(u64),
     QueueSeq,
@@ -55,6 +53,10 @@ pub enum DataKey {
     /// Action lifecycle audit metadata (#44).
     ResolvedAction(u64),
     MigrationState,
+    // Versioned payout diagnostics use a separate persistent sidecar.
+    ClaimFailure(u64),
+    ClaimProvenance(u64),
+    ClaimLiability(Address),
     ClaimSettledAt(u64),
     ClaimArchiveWord(u64),
 }
@@ -126,22 +128,25 @@ pub fn decrease_claim_liability(
     Ok(())
 }
 
-pub fn next_out_nonce(env: &Env) -> u64 {
-    let current: u64 = env
-        .storage()
-        .instance()
-        .get(&DataKey::OutNonce)
-        .unwrap_or(0u64);
-    let next = current + 1;
-    env.storage().instance().set(&DataKey::OutNonce, &next);
+// The three monotonic sequences retain their distinct keys and checked increment behavior.
+#[inline(never)]
+fn next_counter(env: &Env, key: &DataKey) -> u64 {
+    let next = read_counter(env, key) + 1;
+    env.storage().instance().set(key, &next);
     next
 }
 
+#[inline(never)]
+fn read_counter(env: &Env, key: &DataKey) -> u64 {
+    env.storage().instance().get(key).unwrap_or(0u64)
+}
+
+pub fn next_out_nonce(env: &Env) -> u64 {
+    next_counter(env, &DataKey::OutNonce)
+}
+
 pub fn out_nonce(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&DataKey::OutNonce)
-        .unwrap_or(0u64)
+    read_counter(env, &DataKey::OutNonce)
 }
 
 pub fn adapter(env: &Env, route: RouteKind) -> Result<Address, HyperionError> {
@@ -350,21 +355,11 @@ pub fn assert_liability_migration_not_running(env: &Env) -> Result<(), HyperionE
 }
 
 pub fn next_claim_id(env: &Env) -> u64 {
-    let current: u64 = env
-        .storage()
-        .instance()
-        .get(&DataKey::ClaimSeq)
-        .unwrap_or(0u64);
-    let next = current + 1;
-    env.storage().instance().set(&DataKey::ClaimSeq, &next);
-    next
+    next_counter(env, &DataKey::ClaimSeq)
 }
 
 pub fn claim_count(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&DataKey::ClaimSeq)
-        .unwrap_or(0u64)
+    read_counter(env, &DataKey::ClaimSeq)
 }
 
 pub fn claim(env: &Env, id: u64) -> Option<PendingClaim> {
@@ -374,6 +369,19 @@ pub fn claim(env: &Env, id: u64) -> Option<PendingClaim> {
         env.storage()
             .persistent()
             .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        touch_persistent_key(env, &DataKey::ClaimSettledAt(id));
+        let failure_key = DataKey::ClaimFailure(id);
+        if env.storage().persistent().has(&failure_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&failure_key, BUMP_THRESHOLD, BUMP_TO);
+        }
+        let provenance_key = DataKey::ClaimProvenance(id);
+        if env.storage().persistent().has(&provenance_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&provenance_key, BUMP_THRESHOLD, BUMP_TO);
+        }
     }
     record
 }
@@ -381,6 +389,21 @@ pub fn claim(env: &Env, id: u64) -> Option<PendingClaim> {
 pub fn set_claim(env: &Env, record: &PendingClaim) {
     let key = DataKey::Claim(record.id);
     env.storage().persistent().set(&key, record);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn claim_failure(env: &Env, id: u64) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ClaimFailure(id))
+        .unwrap_or(0)
+}
+
+pub fn set_claim_failure(env: &Env, id: u64, reason: u32) {
+    let key = DataKey::ClaimFailure(id);
+    env.storage().persistent().set(&key, &reason);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
@@ -412,33 +435,19 @@ pub fn set_claim_provenance(env: &Env, id: u64, value: &ClaimProvenance) {
 }
 
 pub fn next_queue_id(env: &Env) -> u64 {
-    let current: u64 = env
-        .storage()
-        .instance()
-        .get(&DataKey::QueueSeq)
-        .unwrap_or(0u64);
-    let next = current + 1;
-    env.storage().instance().set(&DataKey::QueueSeq, &next);
-    next
+    next_counter(env, &DataKey::QueueSeq)
 }
 
 pub fn queue_count(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&DataKey::QueueSeq)
-        .unwrap_or(0u64)
+    read_counter(env, &DataKey::QueueSeq)
 }
 
 pub fn queued(env: &Env, id: u64) -> Option<QueuedAction> {
-    env.storage().persistent().get(&DataKey::Queued(id))
+    read_queued_action(env, &DataKey::Queued(id))
 }
 
 pub fn set_queued(env: &Env, action: &QueuedAction) {
-    let key = DataKey::Queued(action.id);
-    env.storage().persistent().set(&key, action);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    store_queued_action(env, &DataKey::Queued(action.id), action);
 }
 
 pub fn clear_queued(env: &Env, id: u64) {
@@ -488,11 +497,7 @@ pub fn set_schema_version(env: &Env, version: u32) {
 }
 
 pub fn retain_action(env: &Env, action: &QueuedAction) {
-    let key = DataKey::ResolvedAction(action.id);
-    env.storage().persistent().set(&key, action);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    store_queued_action(env, &DataKey::ResolvedAction(action.id), action);
 }
 
 pub fn action_payload(env: &Env, id: u64) -> Option<QueuedAction> {
@@ -502,7 +507,21 @@ pub fn action_payload(env: &Env, id: u64) -> Option<QueuedAction> {
         DataKey::ResolvedAction(id)
     };
     touch_persistent_key(env, &key);
-    env.storage().persistent().get(&key)
+    read_queued_action(env, &key)
+}
+
+// Queued and resolved actions share the identical payload and retention policy.
+#[inline(never)]
+fn store_queued_action(env: &Env, key: &DataKey, action: &QueuedAction) {
+    env.storage().persistent().set(key, action);
+    env.storage()
+        .persistent()
+        .extend_ttl(key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+#[inline(never)]
+fn read_queued_action(env: &Env, key: &DataKey) -> Option<QueuedAction> {
+    env.storage().persistent().get(key)
 }
 
 pub const MIN_CLAIM_RETENTION_SECONDS: u64 = 2_592_000;
@@ -538,6 +557,9 @@ pub fn archive_claim(env: &Env, id: u64) {
         .set(&key, &(word | (1u128 << (id % 128))));
     env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
     env.storage().persistent().remove(&DataKey::Claim(id));
+    env.storage()
+        .persistent()
+        .remove(&DataKey::ClaimFailure(id));
     env.storage()
         .persistent()
         .remove(&DataKey::ClaimSettledAt(id));
