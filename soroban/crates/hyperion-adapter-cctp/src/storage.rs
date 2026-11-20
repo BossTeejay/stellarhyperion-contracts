@@ -200,12 +200,6 @@ pub fn set_old_peer_messenger(
     env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
-pub fn clear_old_peer_messenger(env: &Env, domain: u32) {
-    env.storage()
-        .instance()
-        .remove(&DataKey::OldPeerMessenger(domain));
-}
-
 // ------------------------------------------------------------------------------------------
 // Local TokenMessenger rotation
 // ------------------------------------------------------------------------------------------
@@ -242,10 +236,6 @@ pub fn set_old_token_messenger(env: &Env, addr: &Address, valid_until: u64) {
         },
     );
     env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
-}
-
-pub fn clear_old_token_messenger(env: &Env) {
-    env.storage().instance().remove(&DataKey::OldTokenMessenger);
 }
 
 // ------------------------------------------------------------------------------------------
