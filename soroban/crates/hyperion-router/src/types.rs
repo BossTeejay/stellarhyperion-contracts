@@ -106,16 +106,16 @@ pub struct PendingClaim {
     pub settled: bool,
 }
 
-/// Versioned outcome for one claim requested by `settle_claims`.
+// Versioned outcome for one claim requested by `settle_claims`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimSettlementResult {
     pub id: u64,
-    /// 0 settled, 1 missing, 2 already settled, 3 refused, 4 custody short, 5 unavailable.
+    // 0 settled, 1 missing, 2 already settled, 3 refused, 4 custody short, 5 unavailable.
     pub status: u32,
 }
 
-/// Read-only accounting for parked claims in one token.
+// Read-only accounting for parked claims in one token.
 // Read-only accounting for parked claims in one token. `known` is false whenever the
 // token's balance cannot be read; callers must not treat that state as solvent.
 #[contracttype]

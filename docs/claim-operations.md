@@ -90,3 +90,35 @@ work. The bounded call retains the sender's actual nested token and provider aut
 
 These changes do not activate a new route. Stellar Testnet outbound ITS/CCTP remain the active
 supported deployment; EVM and other rails retain their independent deployment and validation gates.
+
+## EVM bounded dispatch and independent batch outcomes
+
+`bridgeOutBounded(request, maxProviderBudget)` preserves the legacy request and caps the whole
+native provider payment (`msg.value`) in wei before fee movement. Equality passes; comparisons
+remain exact through uint256. Native gas units are separate from ERC20 transfer units. The EVM
+CCTP adapter uses finalized delivery with a fixed zero token forwarding fee; the cap does not
+pretend to price Stellar XLM or USDC budgets. The legacy `bridgeOut` remains compatible.
+
+`explainOutbound(request, providerPayment, maxProviderBudget)` returns zero or the earliest
+local error selector used by bounded dispatch: cap, pause, amount, route, destination, token,
+fee/minimum, flow, adapter and adapter-local validation. The public read-only `checkOutbound`
+helper lets this view normalize reverting local errors. It does not sign, move funds, consume
+flow, or predict changing wallet balances/provider execution. Auth-free `checkDispatch` on the
+real CCTP/ITS adapters shares their exact local dispatch validation. Missing methods are
+`AdapterMethodUnavailable`; no amount-only quote is accepted in their place. Older adapters
+need to upgrade for the additive bounded/explanation API; existing entrypoints retain their
+signatures.
+
+The EVM batch keeps an outer reentrancy guard and calls a router-only atomic item entrypoint.
+A reverted transfer, unreadable balance, false return after movement, or inexact balance
+mutation rolls back only that item. Other valid items can settle before or after it, and repeated
+IDs cannot pay twice. External callers and token callbacks cannot invoke the item entrypoint.
+Successful legacy `ClaimSettled` events retain the actual outer settler. Legacy single-claim
+settlement still reverts on failure and therefore cannot retain a new failure event.
+
+Version 1 EVM reason codes are 1 recipient/token refusal, 2 custody shortage, 3 unreadable token,
+and 4 inexact token payout. Existing batch status values remain fixed; `TokenUnavailable` and
+`InvalidTokenPayout` append two outcomes. Failed items preserve full custody, stored amount and
+recipient, and a later successful retry clears the reason. Soroban's documented whole-batch
+rollback for successful nonconforming token changes remains different because its host does not
+support the EVM item's invocation rollback mechanism. These local changes activate no deployment.

@@ -35,22 +35,24 @@ See [the exact activation runbook](docs/TESTNET_ACTIVATION.md) for reviewed arti
 
 ## Claim operations and API compatibility
 
-The EVM `settleClaims` and Soroban `settle_claims` calls process at most 50 claim IDs and return
-one status per input in the same order. Each attempt uses only the amount and recipient recorded
-in the claim. A recipient refusal leaves that claim funded and unsettled while later claims can
-still complete. Status codes are stable: 0 settled, 1 not found, 2 already settled, 3 recipient
-or token refused, and 4 router balance is short. Soroban emits `claim_failure_v1`; EVM emits
-`ClaimPayoutFailureV1` and exposes the latest reason through `claimFailureReason`. Reason codes
-are versioned: 1 recipient/token refusal, 2 router balance short. Successful settlement clears
-the stored diagnostic. Existing single-claim entry points and claim records remain compatible.
+The additive EVM `settleClaims` and Soroban `settle_claims` process 1–50 claim IDs and return
+one confirmed outcome per input, retaining the stored token, amount and recipient. Ordinary
+recipient refusals retain unrelated progress; the exact rollback limits differ by host and are
+explained in [claim operations](docs/claim-operations.md). Archived claim markers and repeated
+IDs cannot permit another payment. Version 1 failure sidecars/events distinguish refusal,
+custody shortage and unavailable token reads; EVM also records isolated inexact token payouts.
+Successful retries clear diagnostics. Legacy single-claim calls still revert on failure and
+therefore cannot persist a new failure event.
 
-The paid Stellar entry point's `gas_amount` is the request-side provider budget. For ITS it is
-denominated in XLM; for CCTP it is denominated in USDC and deducted before checking the receive
-minimum. These amounts are never added together or interpreted across rails. The read-only
-`quote_routes` / `quote` interfaces explain the route, token, amount and flow blockers before
-dispatch; adapter and destination-specific checks still run at dispatch. These APIs do not
-activate additional deployments: EVM and non-active rails remain development surfaces pending
-independent validation.
+`bridge_out_bounded` adds an explicit Soroban provider cap: ITS gas-token base units (XLM on the
+active deployment), or CCTP burned-token base units (USDC), with no cross-rail unit mixing.
+`bridgeOutBounded` caps EVM native provider payment in wei; EVM CCTP retains finalized delivery
+with a zero token forwarding fee. `explain_outbound` / `explainOutbound` check the same local
+budget, destination and adapter prerequisites as their bounded dispatch path without moving
+funds. Missing validation methods are explicitly unavailable; legacy quotes never substitute
+for them. Existing request and quote schemas remain compatible. The active deployment remains
+Stellar Testnet outbound ITS/CCTP; new entrypoints require reviewed router/adapter upgrades,
+and these source changes do not activate additional deployments.
 
 ## Organization overview
 

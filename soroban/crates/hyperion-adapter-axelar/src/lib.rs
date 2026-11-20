@@ -114,7 +114,6 @@ impl AxelarAdapter {
     // ---------------------------------------------------------------------------------------
 
     // Auth-free validation only. Dispatch keeps caller/sender authorization unchanged.
-    #[allow(clippy::too_many_arguments)]
     pub fn check_dispatch(
         env: Env,
         caller: Address,
@@ -738,7 +737,6 @@ fn replay_key(env: &Env, source_chain: &String, message_id: &String) -> BytesN<3
         .into()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn validate_dispatch(
     env: &Env,
     caller: &Address,

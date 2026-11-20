@@ -113,10 +113,10 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         view
         override
     {
-        _validateDispatch(token, amount, destination);
+        _dispatchPlan(token, amount, destination);
     }
 
-    function _validateDispatch(address token, uint256 amount, Destination calldata destination)
+    function _dispatchPlan(address token, uint256 amount, Destination calldata destination)
         private
         view
         returns (Lane memory lane, bytes memory hookData)
@@ -140,7 +140,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         returns (bytes32)
     {
         if (msg.sender != ROUTER) revert Unauthorized();
-        (Lane memory lane, bytes memory hookData) = _validateDispatch(token, amount, destination);
+        (Lane memory lane, bytes memory hookData) = _dispatchPlan(token, amount, destination);
         emit BurnSubmitted(destination.chain, lane.domain, amount, lane.mintRecipient, nonce, hookData);
 
         IERC20(USDC).forceApprove(address(TOKEN_MESSENGER), amount);

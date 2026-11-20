@@ -40,7 +40,7 @@ pub fn queue(
     let id = storage::next_queue_id(env);
     let queued = QueuedAction {
         id,
-        action: action.clone(),
+        action,
         queued_at: now,
         eta: now + cfg.timelock_delay,
         expires_at: now + cfg.timelock_delay + GRACE_PERIOD,
@@ -188,23 +188,19 @@ pub fn apply(env: &Env, action: &AdminAction) -> Result<(), HyperionError> {
                 return Err(HyperionError::FeeTooHigh);
             }
             cfg.fee_bps = *bps;
-            storage::set_config(env, &cfg);
-            crate::events::config_changed(env, &cfg);
+            write_config_event(env, &cfg);
         }
         AdminAction::SetTreasury(addr) => {
             cfg.treasury = addr.clone();
-            storage::set_config(env, &cfg);
-            crate::events::config_changed(env, &cfg);
+            write_config_event(env, &cfg);
         }
         AdminAction::SetAdmin(addr) => {
             cfg.admin = addr.clone();
-            storage::set_config(env, &cfg);
-            crate::events::config_changed(env, &cfg);
+            write_config_event(env, &cfg);
         }
         AdminAction::SetGuardian(addr) => {
             cfg.guardian = addr.clone();
-            storage::set_config(env, &cfg);
-            crate::events::config_changed(env, &cfg);
+            write_config_event(env, &cfg);
         }
         AdminAction::SetAdapter(route, addr) => {
             storage::set_adapter(env, *route, addr);
@@ -252,16 +248,14 @@ pub fn apply(env: &Env, action: &AdminAction) -> Result<(), HyperionError> {
                 return Err(HyperionError::TimelockDelayOutOfRange);
             }
             cfg.timelock_delay = *delay;
-            storage::set_config(env, &cfg);
-            crate::events::config_changed(env, &cfg);
+            write_config_event(env, &cfg);
         }
         AdminAction::SetFlowWindow(window) => {
             if *window == 0 {
                 return Err(HyperionError::InvalidWindow);
             }
             cfg.flow_window_ledgers = *window;
-            storage::set_config(env, &cfg);
-            crate::events::config_changed(env, &cfg);
+            write_config_event(env, &cfg);
         }
         AdminAction::Upgrade(wasm_hash) => {
             env.deployer()
@@ -306,4 +300,11 @@ pub fn apply(env: &Env, action: &AdminAction) -> Result<(), HyperionError> {
         }
     }
     Ok(())
+}
+
+// Keep the existing write-before-event order for all six configuration mutations.
+#[inline(never)]
+fn write_config_event(env: &Env, cfg: &Config) {
+    storage::set_config(env, cfg);
+    crate::events::config_changed(env, cfg);
 }

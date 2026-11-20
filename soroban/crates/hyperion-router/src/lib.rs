@@ -33,8 +33,8 @@ pub use types::{
 };
 
 use hyperion_core::{
-    address::{assert_route_supports, bytes32_to_evm},
-    amount::{apply_fee, assert_exact_transfer, convert_decimals_exact, floor_to_representable},
+    address::{assert_route_supports, validated_evm_word},
+    amount::{assert_exact_transfer, convert_decimals_exact, fee_and_floor},
     flow, HyperionError, RouteKind, MAX_FEE_BPS,
 };
 use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, String, Vec};
@@ -110,7 +110,9 @@ impl HyperionRouter {
         sender: Address,
         request: OutboundRequest,
     ) -> Result<u64, HyperionError> {
-        bridge_out_inner(env, sender, request, None, None)
+        sender.require_auth();
+        let plan = plan_outbound(&env, &request, None)?;
+        bridge_out_inner(env, sender, request, None, plan)
     }
 
     pub fn bridge_out_with_gas(
@@ -125,7 +127,9 @@ impl HyperionRouter {
         if gas_amount <= 0 {
             return Err(HyperionError::InvalidAmount);
         }
-        bridge_out_inner(env, sender, request, Some(gas_amount), None)
+        sender.require_auth();
+        let plan = plan_outbound(&env, &request, Some(gas_amount))?;
+        bridge_out_inner(env, sender, request, Some(gas_amount), plan)
     }
 
     // Rail-specific provider cap: ITS gas-token base units, or CCTP burned-token base units.
@@ -138,7 +142,8 @@ impl HyperionRouter {
         max_provider_budget: i128,
     ) -> Result<u64, HyperionError> {
         let plan = bounded_plan(&env, &request, Some(gas_amount), max_provider_budget)?;
-        bridge_out_inner(env, sender, request, Some(gas_amount), Some(plan))
+        sender.require_auth();
+        bridge_out_inner(env, sender, request, Some(gas_amount), plan)
     }
 
     // Returns the earliest bounded dispatch rejection, or zero, without moving funds.
@@ -257,8 +262,8 @@ impl HyperionRouter {
         settle_claim_inner(&env, &settler, id)
     }
 
-    /// Attempt a bounded list. Ordinary refusals preserve unrelated progress;
-    /// a nonconforming token mutation reverts the entire batch to preserve custody.
+    // Attempt a bounded list. Ordinary refusals preserve unrelated progress;
+    // a nonconforming token mutation reverts the entire batch to preserve custody.
     pub fn settle_claims(
         env: Env,
         settler: Address,
@@ -285,31 +290,14 @@ impl HyperionRouter {
                 continue;
             }
             let client = token::Client::new(&env, &claim.token);
-            let reason = match (
-                payout_balance(&client, &this),
-                payout_balance(&client, &claim.recipient),
-            ) {
-                (Ok(balance), Ok(_)) if balance < claim.amount => 2,
-                (Ok(_), Ok(_)) => {
-                    // A token-level refusal rolls back its sub-call. A successful but inexact
-                    // transfer cannot be independently unwound by Soroban: revert the batch.
-                    if transfer_exact(&client, &this, &claim.recipient, claim.amount, true)? {
-                        if storage::liability_tracking(&env) {
-                            storage::decrease_claim_liability(&env, &claim.token, claim.amount)?;
-                        }
-                        let mut claim = claim;
-                        claim.settled = true;
-                        storage::set_claim(&env, &claim);
-                        storage::set_claim_settled_at(&env, id, env.ledger().timestamp());
-                        storage::set_claim_failure(&env, id, 0);
-                        events::claim_settled(&env, &claim, &settler);
-                        results.push_back(ClaimSettlementResult { id, status: 0 });
-                        continue;
-                    }
-                    payout_failure_reason(&client, &this, claim.amount)
-                }
-                _ => 3,
-            };
+            let reason = attempt_payout(&client, &this, &claim.recipient, claim.amount)?;
+            if reason == 0 {
+                let mut claim = claim;
+                mark_claim_settled(&env, &mut claim)?;
+                record_claim_settlement(&env, &claim, &settler);
+                results.push_back(ClaimSettlementResult { id, status: 0 });
+                continue;
+            }
             storage::set_claim_failure(&env, id, reason);
             events::claim_payout_failure_v1(&env, &claim, reason);
             results.push_back(ClaimSettlementResult {
@@ -383,10 +371,16 @@ impl HyperionRouter {
         amount: i128,
         destination_decimals: u32,
     ) -> Vec<RouteQuoteV2> {
-        let breakdown = storage::config(&env)
+        let cfg = storage::config(&env);
+        let token_cfg = cfg
+            .as_ref()
+            .ok()
+            .and_then(|_| storage::token_config_opt(&env, &token));
+        let breakdown = cfg
+            .as_ref()
             .ok()
             .and_then(|cfg| {
-                storage::token_config_opt(&env, &token).and_then(|t| {
+                token_cfg.as_ref().and_then(|t| {
                     hyperion_core::amount::compute_quote_breakdown(
                         amount,
                         cfg.fee_bps,
@@ -408,7 +402,21 @@ impl HyperionRouter {
             })
             .unwrap_or(DebitBreakdown::Unavailable);
         let mut out = vec![&env];
-        for quote in Self::quote_routes(env.clone(), token, amount, destination_decimals) {
+        let ledger = env.ledger().sequence();
+        for route in ALL_ROUTES {
+            let quote = match &cfg {
+                Ok(cfg) => quote_one(
+                    &env,
+                    cfg,
+                    &token,
+                    token_cfg.as_ref(),
+                    route,
+                    amount,
+                    destination_decimals,
+                    ledger,
+                ),
+                Err(error) => unavailable(route, amount, *error),
+            };
             out.push_back(RouteQuoteV2 {
                 quote,
                 breakdown: breakdown.clone(),
@@ -423,11 +431,7 @@ impl HyperionRouter {
 
     // Stop new departures. Either key can do it, immediately, with no delay to sit through.
     pub fn pause(env: Env, caller: Address) -> Result<(), HyperionError> {
-        caller.require_auth();
-        let mut cfg = storage::config(&env)?;
-        if caller != cfg.admin && caller != cfg.guardian {
-            return Err(HyperionError::Unauthorized);
-        }
+        let mut cfg = require_authority(&env, &caller, true)?;
         cfg.paused = true;
         storage::set_config(&env, &cfg);
         events::paused(&env, &caller, true);
@@ -436,11 +440,7 @@ impl HyperionRouter {
 
     // Start again. Admin only, because deciding an incident is over is not a safety action.
     pub fn unpause(env: Env, caller: Address) -> Result<(), HyperionError> {
-        caller.require_auth();
-        let mut cfg = storage::config(&env)?;
-        if caller != cfg.admin {
-            return Err(HyperionError::Unauthorized);
-        }
+        let mut cfg = require_authority(&env, &caller, false)?;
         cfg.paused = false;
         storage::set_config(&env, &cfg);
         events::paused(&env, &caller, false);
@@ -449,11 +449,7 @@ impl HyperionRouter {
 
     // Turn a rail off. No timelock: closing a lane only ever narrows what the bridge will do.
     pub fn disable_route(env: Env, caller: Address, route: RouteKind) -> Result<(), HyperionError> {
-        caller.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.admin && caller != cfg.guardian {
-            return Err(HyperionError::Unauthorized);
-        }
+        require_authority(&env, &caller, true)?;
         storage::set_route_enabled(&env, route, false);
         events::route_configured(&env, route, false);
         Ok(())
@@ -467,11 +463,7 @@ impl HyperionRouter {
     // Re registering it through the timelock is what turns it back on, so this cannot be used
     // to quietly flip a token's decimals or limit on the way past.
     pub fn disable_token(env: Env, caller: Address, token: Address) -> Result<(), HyperionError> {
-        caller.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.admin && caller != cfg.guardian {
-            return Err(HyperionError::Unauthorized);
-        }
+        require_authority(&env, &caller, true)?;
         let mut token_cfg = storage::token_config(&env, &token)?;
         token_cfg.enabled = false;
         storage::set_token_config(&env, &token, &token_cfg);
@@ -488,11 +480,7 @@ impl HyperionRouter {
         token: Address,
         limit: i128,
     ) -> Result<(), HyperionError> {
-        caller.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.admin && caller != cfg.guardian {
-            return Err(HyperionError::Unauthorized);
-        }
+        require_authority(&env, &caller, true)?;
         if limit < 0 {
             return Err(HyperionError::InvalidLimit);
         }
@@ -515,25 +503,18 @@ impl HyperionRouter {
         caller: Address,
         action: AdminAction,
     ) -> Result<u64, HyperionError> {
-        caller.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.admin {
-            return Err(HyperionError::Unauthorized);
-        }
+        let cfg = require_authority(&env, &caller, false)?;
         let queued = timelock::queue(&env, &cfg, &caller, action)?;
-        events::action_queued(&env, &queued);
-        Ok(queued.id)
+        let id = queued.id;
+        events::action_queued(&env, queued);
+        Ok(id)
     }
 
     pub fn execute_action(env: Env, caller: Address, id: u64) -> Result<(), HyperionError> {
-        caller.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.admin {
-            return Err(HyperionError::Unauthorized);
-        }
+        require_authority(&env, &caller, false)?;
         let queued = timelock::take_matured(&env, &caller, id)?;
         timelock::apply(&env, &queued.action)?;
-        events::action_executed(&env, &queued);
+        events::action_executed(&env, queued);
         Ok(())
     }
 
@@ -558,11 +539,7 @@ impl HyperionRouter {
         reason: CancelReason,
         note: String,
     ) -> Result<(), HyperionError> {
-        caller.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.admin && caller != cfg.guardian {
-            return Err(HyperionError::Unauthorized);
-        }
+        require_authority(&env, &caller, true)?;
         timelock::cancel(&env, &caller, id, reason, note)?;
         Ok(())
     }
@@ -627,11 +604,7 @@ impl HyperionRouter {
         target_version: u32,
         max_steps: u32,
     ) -> Result<MigrationStatus, HyperionError> {
-        caller.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.admin {
-            return Err(HyperionError::Unauthorized);
-        }
+        require_authority(&env, &caller, false)?;
         if max_steps == 0 || max_steps > MAX_MAINTENANCE_BATCH {
             return Err(HyperionError::InvalidLimit);
         }
@@ -929,7 +902,23 @@ impl HyperionRouter {
     }
 }
 
+// Centralize the existing caller authentication and admin/guardian role checks.
+#[inline(never)]
+fn require_authority(
+    env: &Env,
+    caller: &Address,
+    guardian_allowed: bool,
+) -> Result<Config, HyperionError> {
+    caller.require_auth();
+    let cfg = storage::config(env)?;
+    if caller != &cfg.admin && (!guardian_allowed || caller != &cfg.guardian) {
+        return Err(HyperionError::Unauthorized);
+    }
+    Ok(cfg)
+}
+
 // A quote for a route that cannot be used, carrying the reason it cannot.
+#[inline(never)]
 fn unavailable(route: RouteKind, amount: i128, reason: HyperionError) -> RouteQuote {
     RouteQuote {
         route,
@@ -946,6 +935,7 @@ fn unavailable(route: RouteKind, amount: i128, reason: HyperionError) -> RouteQu
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(never)]
 fn quote_one(
     env: &Env,
     cfg: &Config,
@@ -978,15 +968,17 @@ fn quote_one(
         }
     }
 
-    let split = match apply_fee(amount, cfg.fee_bps) {
+    let split = match fee_and_floor(
+        amount,
+        cfg.fee_bps,
+        token_cfg.decimals,
+        destination_decimals,
+    ) {
         Ok(v) => v,
         Err(e) => return unavailable(route, amount, e),
     };
     let fee = split.fee;
-    let net = match floor_to_representable(split.net, token_cfg.decimals, destination_decimals) {
-        Ok(v) => v,
-        Err(e) => return unavailable(route, amount, e),
-    };
+    let net = split.net;
     if net <= 0 {
         return unavailable(route, amount, HyperionError::AmountNotRepresentable);
     }
@@ -1026,7 +1018,7 @@ fn quote_one(
 }
 
 struct OutboundPlan {
-    cfg: Config,
+    treasury: Address,
     fee: i128,
     net: i128,
     gross: i128,
@@ -1046,7 +1038,13 @@ fn plan_outbound(
         destination,
         destination_decimals,
         min_destination_amount,
-    } = request.clone();
+    } = request;
+    let (amount, route, destination_decimals, min_destination_amount) = (
+        *amount,
+        *route,
+        *destination_decimals,
+        *min_destination_amount,
+    );
     let cfg = storage::config(env)?;
     if cfg.paused {
         return Err(HyperionError::Paused);
@@ -1066,19 +1064,24 @@ fn plan_outbound(
     // A destination that is not a left-padded EVM word is refused rather than truncated.
     // Chopping the front off a Stellar key produces twenty bytes that look like a perfectly
     // ordinary address, and funds sent there are simply gone.
-    let _ = bytes32_to_evm(env, &destination.address)?;
+    validated_evm_word(&destination.address)?;
     if destination.chain.is_empty() {
         return Err(HyperionError::UnknownChain);
     }
 
-    let token_cfg = storage::token_config(env, &token)?;
+    let token_cfg = storage::token_config(env, token)?;
     if !token_cfg.enabled {
         return Err(HyperionError::TokenNotRegistered);
     }
 
-    let split = apply_fee(amount, cfg.fee_bps)?;
+    let split = fee_and_floor(
+        amount,
+        cfg.fee_bps,
+        token_cfg.decimals,
+        destination_decimals,
+    )?;
     let fee = split.fee;
-    let net = floor_to_representable(split.net, token_cfg.decimals, destination_decimals)?;
+    let net = split.net;
     if net <= 0 {
         return Err(HyperionError::AmountNotRepresentable);
     }
@@ -1102,13 +1105,13 @@ fn plan_outbound(
 
     // Charge the flow limit against what actually crosses, not against what the sender
     // handed over. The fee never leaves Stellar, so it is not cross-chain exposure.
-    let limit = storage::effective_flow_limit(env, &token, route)?;
-    let window = storage::flow_window(env, &token, route);
+    let limit = storage::effective_flow_limit(env, token, route)?;
+    let window = storage::flow_window(env, token, route);
     let ledger = env.ledger().sequence();
     let updated = flow::consume(&window, limit, net, ledger, cfg.flow_window_ledgers)?;
     let adapter_addr = storage::adapter(env, route)?;
     Ok(OutboundPlan {
-        cfg,
+        treasury: cfg.treasury,
         fee,
         net,
         gross,
@@ -1170,20 +1173,16 @@ fn bridge_out_inner(
     sender: Address,
     request: OutboundRequest,
     gas_amount: Option<i128>,
-    prepared: Option<OutboundPlan>,
+    plan: OutboundPlan,
 ) -> Result<u64, HyperionError> {
-    sender.require_auth();
     let OutboundPlan {
-        cfg,
+        treasury,
         fee,
         net,
         gross,
         updated,
         adapter_addr,
-    } = match prepared {
-        Some(plan) => plan,
-        None => plan_outbound(&env, &request, gas_amount)?,
-    };
+    } = plan;
     let OutboundRequest {
         token,
         route,
@@ -1207,7 +1206,7 @@ fn bridge_out_inner(
                 .ok_or(HyperionError::DecimalOverflow)?;
         }
         if fee > 0 {
-            transfer_exact(&client, &sender, &cfg.treasury, fee, false)?;
+            transfer_exact(&client, &sender, &treasury, fee, false)?;
         }
         adapter::PaidRailAdapterClient::new(&env, &adapter_addr).dispatch_from(
             &this,
@@ -1224,7 +1223,7 @@ fn bridge_out_inner(
         transfer_exact(&client, &sender, &this, gross, false)?;
 
         if fee > 0 {
-            transfer_exact(&client, &this, &cfg.treasury, fee, false)?;
+            transfer_exact(&client, &this, &treasury, fee, false)?;
         }
 
         transfer_exact(&client, &this, &adapter_addr, net, false)?;
@@ -1263,7 +1262,6 @@ fn bridge_out_inner(
 }
 
 fn settle_claim_inner(env: &Env, settler: &Address, id: u64) -> Result<(), HyperionError> {
-    storage::assert_liability_migration_not_running(env)?;
     if storage::is_claim_archived(env, id) {
         return Err(HyperionError::ClaimAlreadySettled);
     }
@@ -1272,11 +1270,7 @@ fn settle_claim_inner(env: &Env, settler: &Address, id: u64) -> Result<(), Hyper
         return Err(HyperionError::ClaimAlreadySettled);
     }
     // Effects precede external token calls; a failed payout reverts these within its invocation.
-    claim.settled = true;
-    storage::set_claim(env, &claim);
-    if storage::liability_tracking(env) {
-        storage::decrease_claim_liability(env, &claim.token, claim.amount)?;
-    }
+    mark_claim_settled(env, &mut claim)?;
     let this = env.current_contract_address();
     if !transfer_exact(
         &token::Client::new(env, &claim.token),
@@ -1287,13 +1281,26 @@ fn settle_claim_inner(env: &Env, settler: &Address, id: u64) -> Result<(), Hyper
     )? {
         return Err(HyperionError::RecipientNotReady);
     }
-    storage::set_claim_settled_at(env, id, env.ledger().timestamp());
-    storage::set_claim_failure(env, id, 0);
-    events::claim_settled(env, &claim, settler);
+    record_claim_settlement(env, &claim, settler);
     Ok(())
 }
 
-/// Recipient refusals are safe to park only when no token balance moved.
+fn mark_claim_settled(env: &Env, claim: &mut PendingClaim) -> Result<(), HyperionError> {
+    claim.settled = true;
+    storage::set_claim(env, claim);
+    if storage::liability_tracking(env) {
+        storage::decrease_claim_liability(env, &claim.token, claim.amount)?;
+    }
+    Ok(())
+}
+
+fn record_claim_settlement(env: &Env, claim: &PendingClaim, settler: &Address) {
+    storage::set_claim_settled_at(env, claim.id, env.ledger().timestamp());
+    storage::set_claim_failure(env, claim.id, 0);
+    events::claim_settled(env, claim, settler);
+}
+
+// Recipient refusals are safe to park only when no token balance moved.
 fn transfer_exact(
     client: &token::Client,
     from: &Address,
@@ -1303,6 +1310,27 @@ fn transfer_exact(
 ) -> Result<bool, HyperionError> {
     let from_before = payout_balance(client, from)?;
     let to_before = payout_balance(client, to)?;
+    transfer_from_snapshot(
+        client,
+        from,
+        to,
+        amount,
+        (from_before, to_before),
+        allow_refusal,
+    )
+}
+
+// Batch preflight and ordinary transfers share the same exact post-transfer checks.
+// A successful inexact transfer or unreadable post-transfer balance reverts the invocation.
+fn transfer_from_snapshot(
+    client: &token::Client,
+    from: &Address,
+    to: &Address,
+    amount: i128,
+    before: (i128, i128),
+    allow_refusal: bool,
+) -> Result<bool, HyperionError> {
+    let (from_before, to_before) = before;
     let delivered = if allow_refusal {
         matches!(client.try_transfer(from, to, &amount), Ok(Ok(())))
     } else {
@@ -1320,7 +1348,26 @@ fn transfer_exact(
     Ok(delivered)
 }
 
-/// V1 codes: 1 refused unchanged payout, 2 custody short, 3 token/accounting unavailable.
+// V1 codes: 0 delivered, 1 refused unchanged payout, 2 custody short, 3 unreadable.
+fn attempt_payout(
+    client: &token::Client,
+    from: &Address,
+    to: &Address,
+    amount: i128,
+) -> Result<u32, HyperionError> {
+    let before = match (payout_balance(client, from), payout_balance(client, to)) {
+        (Ok(balance), Ok(_)) if balance < amount => return Ok(2),
+        (Ok(from), Ok(to)) => (from, to),
+        _ => return Ok(3),
+    };
+    if transfer_from_snapshot(client, from, to, amount, before, true)? {
+        Ok(0)
+    } else {
+        Ok(1)
+    }
+}
+
+// V1 codes: 1 refused unchanged payout, 2 custody short, 3 token/accounting unavailable.
 fn payout_failure_reason(client: &token::Client, router: &Address, amount: i128) -> u32 {
     match client.try_balance(router) {
         Ok(Ok(balance)) if balance >= amount => 1,
@@ -1329,7 +1376,7 @@ fn payout_failure_reason(client: &token::Client, router: &Address, amount: i128)
     }
 }
 
-/// A built-in SAC reports contract error 13 for an absent account trustline.
+// A built-in SAC reports contract error 13 for an absent account trustline.
 // A built-in SAC reports contract error 13 for an absent account trustline.
 // Its balance is zero; arbitrary token balance errors are not trusted as zero.
 fn payout_balance(client: &token::Client, to: &Address) -> Result<i128, HyperionError> {

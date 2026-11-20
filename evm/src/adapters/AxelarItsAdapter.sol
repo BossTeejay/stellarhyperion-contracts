@@ -154,13 +154,13 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         view
         override
     {
-        _validateDispatch(token, amount, destination);
+        _dispatchPlan(token, amount, destination);
     }
 
-    function _validateDispatch(address token, uint256 amount, Destination calldata destination)
+    function _dispatchPlan(address token, uint256 amount, Destination calldata destination)
         private
         view
-        returns (Peer memory peer, bytes32 tokenId, bytes memory note)
+        returns (Peer memory peer, bytes32 tokenId, AddressKind kind)
     {
         if (amount == 0) revert InvalidAmount();
 
@@ -171,8 +171,7 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         if (!peer.configured) revert UnknownChain();
         if (!peer.enabled) revert RailNotConfigured();
 
-        (AddressKind kind,,) = StellarAddress.parse(destination.strkey);
-        note = HyperionNotes.encodeInboundNote(kind, destination.strkey, nonce);
+        (kind,,) = StellarAddress.parse(destination.strkey);
     }
 
     /// @inheritdoc IRailAdapter
@@ -183,7 +182,8 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         returns (bytes32)
     {
         if (msg.sender != ROUTER) revert Unauthorized();
-        (Peer memory peer, bytes32 tokenId, bytes memory note) = _validateDispatch(token, amount, destination);
+        (Peer memory peer, bytes32 tokenId, AddressKind kind) = _dispatchPlan(token, amount, destination);
+        bytes memory note = HyperionNotes.encodeInboundNote(kind, destination.strkey, nonce);
         emit TransferSubmitted(destination.chain, tokenId, amount, nonce, msg.value, note);
 
         IERC20(token).forceApprove(address(ITS), amount);

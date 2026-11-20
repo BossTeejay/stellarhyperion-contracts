@@ -17,12 +17,14 @@ import {
     FeeTooHigh,
     InvalidAmount,
     InvalidDecimals,
+    InvalidDestination,
     InvalidLimit,
     InvalidWindow,
     LimitNotRaised,
     MuxedNotSupported,
     NotRailReceiver,
     ProviderBudgetExceeded,
+    RailNotConfigured,
     RecipientNotReady,
     RefundFailed,
     ReplayedMessage,
@@ -35,10 +37,12 @@ import {
     TimelockNotQueued,
     TimelockNotReady,
     TokenDisabled,
+    TokenNotMapped,
     TokenNotRegistered,
     Unauthorized,
     UnknownChain,
-    ZeroAddress
+    ZeroAddress,
+    ZeroAddressKey
 } from "./HyperionErrors.sol";
 import {
     ActionAuditStatus,
@@ -85,6 +89,7 @@ import {StellarAddress} from "./libraries/StellarAddress.sol";
 /// bridge do less: pausing departures, and lowering a flow limit. Nobody should have to file a
 /// change request to slow an exploit down.
 contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyGuard {
+    /// @notice Maximum claim IDs attempted in one settlement batch.
     uint256 public constant MAX_CLAIMS_PER_BATCH = 50;
     using SafeERC20 for IERC20;
     using FlowGuard for FlowWindow;
@@ -165,6 +170,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     }
 
     mapping(uint64 claimId => PendingClaim claim) private _claims;
+    /// @notice Latest version 1 payout reason: zero cleared, 1 refusal, 2 shortage, 3 unreadable, 4 inexact.
     mapping(uint64 claimId => uint8 reason) public claimFailureReason;
     mapping(uint64 actionId => QueuedAction queued) private _actions;
     mapping(uint64 actionId => bool cancelled) private _cancelledActions;
@@ -228,7 +234,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         whenNotPaused
         returns (uint64 nonce)
     {
-        return _bridgeOut(request, false);
+        return _bridgeOut(request);
     }
 
     /// @inheritdoc IHyperionRouter
@@ -241,15 +247,14 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     {
         if (msg.value > maxProviderBudget) revert ProviderBudgetExceeded();
         _requireNotPaused();
-        return _bridgeOut(request, true);
+        return _bridgeOut(request);
     }
 
-    function _bridgeOut(OutboundRequest calldata request, bool validateAdapter)
-        private
-        returns (uint64 nonce)
-    {
+    function _bridgeOut(OutboundRequest calldata request) private returns (uint64 nonce) {
         OutboundPlan memory plan = _planOutbound(request);
-        if (validateAdapter) _checkAdapterDispatch(request, plan);
+        // Both public wrappers share this body; only the additive bounded wrapper requires
+        // the new adapter validator. Internal calls retain the original public selector.
+        if (msg.sig == this.bridgeOutBounded.selector) _checkAdapterDispatch(request, plan);
 
         IERC20 token = IERC20(request.token);
         uint256 senderBefore = token.balanceOf(msg.sender);
@@ -299,14 +304,15 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// of it. Charges the flow limit, because a check that does not write is a check two
     /// transactions in the same block both pass.
     function _planOutbound(OutboundRequest calldata request) private returns (OutboundPlan memory plan) {
-        plan = _previewOutbound(request);
-        _consumeFlow(request.token, request.route, plan.net);
+        FlowWindow memory flow;
+        (plan, flow) = _previewOutbound(request);
+        _flow[_flowKey(request.token, request.route)] = flow;
     }
 
     function _previewOutbound(OutboundRequest calldata request)
         private
         view
-        returns (OutboundPlan memory plan)
+        returns (OutboundPlan memory plan, FlowWindow memory flow)
     {
         if (request.amount == 0) revert InvalidAmount();
         if (routePaused[request.route]) revert RouteIsPaused(request.route);
@@ -334,7 +340,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         // The flow limit is charged against what crosses, not against what the sender handed
         // over. The fee never leaves this chain, so it is not cross-chain exposure and counting
         // it would tighten the limit by a number nobody picked.
-        _flow[_flowKey(
+        flow = _flow[_flowKey(
                 request.token, request.route
             )].consume(
             _effectiveFlowLimit(request.token, request.route), net, uint64(block.timestamp), flowWindow
@@ -434,14 +440,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
 
     /// @inheritdoc IHyperionRouter
     function settleClaim(uint64 claimId) external override nonReentrant {
-        PendingClaim storage claim = _claims[claimId];
-        if (claim.id == 0) revert ClaimNotFound();
-        if (claim.settled) revert ClaimAlreadySettled();
-
-        claim.settled = true;
-        if (!_tryPay(claim.token, claim.recipient, claim.amount)) revert RecipientNotReady();
-        delete claimFailureReason[claimId];
-        emit ClaimSettled(claimId, claim.recipient, claim.token, claim.amount, msg.sender);
+        this.settleClaimItem(claimId, msg.sender);
     }
 
     /// @inheritdoc IHyperionRouter
@@ -459,29 +458,30 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         for (uint256 i; i < count; ++i) {
             uint64 id = claimIds[i];
             PendingClaim storage claim = _claims[id];
+            ClaimSettlementStatus status;
             if (claim.id == 0) {
-                results[i] = ClaimSettlementResult(id, ClaimSettlementStatus.NotFound);
+                status = ClaimSettlementStatus.NotFound;
             } else if (claim.settled) {
-                results[i] = ClaimSettlementResult(id, ClaimSettlementStatus.AlreadySettled);
+                status = ClaimSettlementStatus.AlreadySettled;
             } else {
                 try this.settleClaimItem(id, msg.sender) {
-                    results[i] = ClaimSettlementResult(id, ClaimSettlementStatus.Settled);
+                    status = ClaimSettlementStatus.Settled;
                 } catch (bytes memory failure) {
-                    uint8 reason = bytes4(failure) == InvalidAmount.selector
+                    uint8 reason = _errorSelector(failure) == InvalidAmount.selector
                         ? 4
                         : _payoutFailureReason(claim.token, claim.amount);
                     claimFailureReason[id] = reason;
                     emit ClaimPayoutFailureV1(id, reason, claim.amount, claim.recipient);
-                    ClaimSettlementStatus status = reason == 2
+                    status = reason == 2
                         ? ClaimSettlementStatus.InsufficientRouterBalance
                         : reason == 3
                             ? ClaimSettlementStatus.TokenUnavailable
                             : reason == 4
                                 ? ClaimSettlementStatus.InvalidTokenPayout
                                 : ClaimSettlementStatus.RecipientRestricted;
-                    results[i] = ClaimSettlementResult(id, status);
                 }
             }
+            results[i] = ClaimSettlementResult({id: id, status: status});
         }
     }
 
@@ -517,7 +517,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         try this.checkOutbound(request, providerPayment, maxProviderBudget) {
             return bytes4(0);
         } catch (bytes memory failure) {
-            return failure.length >= 4 ? bytes4(failure) : AdapterMethodUnavailable.selector;
+            return _errorSelector(failure);
         }
     }
 
@@ -532,15 +532,30 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     ) external view {
         if (providerPayment > maxProviderBudget) revert ProviderBudgetExceeded();
         _requireNotPaused();
-        _checkAdapterDispatch(request, _previewOutbound(request));
+        (OutboundPlan memory plan,) = _previewOutbound(request);
+        _checkAdapterDispatch(request, plan);
     }
 
     function _checkAdapterDispatch(OutboundRequest calldata request, OutboundPlan memory plan) private view {
         try IRailAdapter(plan.adapterAddress).checkDispatch(request.token, plan.net, request.destination) {}
         catch (bytes memory failure) {
-            if (failure.length == 0) revert AdapterMethodUnavailable();
-            assembly ("memory-safe") { revert(add(failure, 32), mload(failure)) }
+            bytes4 code = _errorSelector(failure);
+            if (code == Unauthorized.selector) revert Unauthorized();
+            if (code == InvalidAmount.selector) revert InvalidAmount();
+            if (code == TokenNotMapped.selector) revert TokenNotMapped();
+            if (code == UnknownChain.selector) revert UnknownChain();
+            if (code == RailNotConfigured.selector) revert RailNotConfigured();
+            if (code == InvalidDestination.selector) revert InvalidDestination();
+            if (code == ZeroAddressKey.selector) revert ZeroAddressKey();
+            if (code == MuxedNotSupported.selector) revert MuxedNotSupported();
+            revert AdapterMethodUnavailable();
         }
+    }
+
+    function _errorSelector(bytes memory failure) private pure returns (bytes4) {
+        if (failure.length < 4) return AdapterMethodUnavailable.selector;
+        return bytes4(failure[0]) | (bytes4(failure[1]) >> 8) | (bytes4(failure[2]) >> 16)
+            | (bytes4(failure[3]) >> 24);
     }
 
     // -------------------------------------------------------------------------------------
@@ -701,9 +716,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @dev Guardian or admin. Arrivals keep working, because the money for those is already
     /// committed elsewhere.
     function pause() external {
-        if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
-            revert Unauthorized();
-        }
+        _requireGuardianOrAdmin();
         _pause();
     }
 
@@ -718,9 +731,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @inheritdoc IHyperionRouter
     /// @dev Guardian or admin. Other rails and arrivals keep working.
     function pauseRoute(RouteKind route) external {
-        if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
-            revert Unauthorized();
-        }
+        _requireGuardianOrAdmin();
         routePaused[route] = true;
         emit RoutePaused(route, msg.sender);
     }
@@ -728,9 +739,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @inheritdoc IHyperionRouter
     /// @dev Guardian or admin.
     function unpauseRoute(RouteKind route) external {
-        if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
-            revert Unauthorized();
-        }
+        _requireGuardianOrAdmin();
         routePaused[route] = false;
         emit RouteUnpaused(route, msg.sender);
     }
@@ -738,9 +747,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @inheritdoc IHyperionRouter
     /// @dev No timelock, because it only ever narrows. Raising one is a queued action.
     function lowerTokenFlowLimit(address token, uint256 limit) external override {
-        if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
-            revert Unauthorized();
-        }
+        _requireGuardianOrAdmin();
         TokenConfig storage cfg = _tokens[token];
         if (!cfg.registered) revert TokenNotRegistered();
         if (limit >= cfg.flowLimit) revert LimitNotRaised();
@@ -810,10 +817,14 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         _cancelAction(id, reason, note);
     }
 
-    function _cancelAction(uint64 id, CancelReason reason, string memory note) private {
+    function _requireGuardianOrAdmin() private view {
         if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
             revert Unauthorized();
         }
+    }
+
+    function _cancelAction(uint64 id, CancelReason reason, string memory note) private {
+        _requireGuardianOrAdmin();
         bytes memory raw = bytes(note);
         if (raw.length > MAX_REASON_LEN) revert InvalidLimit();
         for (uint256 i; i < raw.length; ++i) {
@@ -902,13 +913,6 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         bytes32 key = _flowKey(token, route);
         if (_routeFlowLimitSet[key]) return _routeFlowLimit[key];
         return _tokens[token].flowLimit;
-    }
-
-    function _consumeFlow(address token, RouteKind route, uint256 amount) private {
-        bytes32 key = _flowKey(token, route);
-        _flow[key] = _flow[key].consume(
-            _effectiveFlowLimit(token, route), amount, uint64(block.timestamp), flowWindow
-        );
     }
 
     /// @dev Pay out without letting a refusal take the whole delivery down with it.
@@ -1028,28 +1032,27 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             routeEnabled[action.route] = on;
             emit RouteConfigured(action.route, on);
             return;
-        } else if (kind == ActionKind.RegisterToken) {
+        } else if (
+            kind == ActionKind.RegisterToken || kind == ActionKind.RaiseTokenFlowLimit
+                || kind == ActionKind.SetTokenEnabled
+        ) {
             TokenConfig storage cfg = _tokens[action.subject];
-            cfg.registered = true;
-            cfg.enabled = true;
-            cfg.decimals = action.decimals;
-            cfg.flowLimit = action.amount;
-            emit TokenRegistered(action.subject, cfg);
-            return;
-        } else if (kind == ActionKind.RaiseTokenFlowLimit) {
-            TokenConfig storage cfg = _tokens[action.subject];
-            cfg.flowLimit = action.amount;
+            if (kind == ActionKind.RegisterToken) {
+                cfg.registered = true;
+                cfg.enabled = true;
+                cfg.decimals = action.decimals;
+                cfg.flowLimit = action.amount;
+            } else if (kind == ActionKind.RaiseTokenFlowLimit) {
+                cfg.flowLimit = action.amount;
+            } else {
+                cfg.enabled = action.amount == 1;
+            }
             emit TokenRegistered(action.subject, cfg);
             return;
         } else if (kind == ActionKind.SetRouteFlowLimit) {
             bytes32 key = _flowKey(action.subject, action.route);
             _routeFlowLimit[key] = action.amount;
             _routeFlowLimitSet[key] = true;
-            return;
-        } else if (kind == ActionKind.SetTokenEnabled) {
-            TokenConfig storage cfg = _tokens[action.subject];
-            cfg.enabled = action.amount == 1;
-            emit TokenRegistered(action.subject, cfg);
             return;
         } else if (kind == ActionKind.SetTimelockDelay) {
             timelockDelay = uint64(action.amount);

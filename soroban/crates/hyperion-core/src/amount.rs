@@ -23,6 +23,7 @@ impl Conversion {
 }
 
 /// 10 raised to `exp`, or `None` if it does not fit in an i128.
+#[inline(never)]
 pub fn pow10(exp: u32) -> Option<i128> {
     if exp > MAX_DECIMALS {
         return None;
@@ -41,6 +42,7 @@ pub fn pow10(exp: u32) -> Option<i128> {
 /// This is the only place in the codebase allowed to do that arithmetic. USDC is 6 decimals
 /// on every EVM chain and 7 on Stellar, so forwarding a raw integer between the two is off by
 /// exactly 10x. Every call site goes through here instead.
+#[inline(never)]
 pub fn convert_decimals(amount: i128, from: u32, to: u32) -> Result<Conversion, HyperionError> {
     if amount < 0 {
         return Err(HyperionError::InvalidAmount);
@@ -76,6 +78,7 @@ pub fn convert_decimals(amount: i128, from: u32, to: u32) -> Result<Conversion, 
 /// The router uses this on the outbound leg. If the caller asked to send an amount whose tail
 /// digits cannot cross the decimal boundary, that is a quoting bug upstream and the transfer
 /// should fail loudly here rather than quietly deliver less.
+#[inline(never)]
 pub fn convert_decimals_exact(amount: i128, from: u32, to: u32) -> Result<i128, HyperionError> {
     let converted = convert_decimals(amount, from, to)?;
     if !converted.is_exact() {
@@ -143,6 +146,22 @@ pub fn apply_fee(amount: i128, fee_bps: u32) -> Result<FeeSplit, HyperionError> 
     Ok(FeeSplit { net, fee })
 }
 
+/// Charge the protocol fee, then floor only the net amount to destination precision.
+/// Shares the same fee and retained-dust policy between execution and both quote versions.
+#[inline(never)]
+pub fn fee_and_floor(
+    amount: i128,
+    fee_bps: u32,
+    source_decimals: u32,
+    destination_decimals: u32,
+) -> Result<FeeSplit, HyperionError> {
+    let split = apply_fee(amount, fee_bps)?;
+    Ok(FeeSplit {
+        fee: split.fee,
+        net: floor_to_representable(split.net, source_decimals, destination_decimals)?,
+    })
+}
+
 /// Complete source-debit and dust breakdown for an outbound transfer quote.
 ///
 /// Preserves exact integer accounting across fee rounding and destination decimal flooring:
@@ -164,9 +183,14 @@ pub fn compute_quote_breakdown(
     source_decimals: u32,
     destination_decimals: u32,
 ) -> Result<QuoteBreakdown, HyperionError> {
-    let split = apply_fee(requested_amount, fee_bps)?;
-    let net_amount = floor_to_representable(split.net, source_decimals, destination_decimals)?;
-    let retained_dust = split.net - net_amount;
+    let split = fee_and_floor(
+        requested_amount,
+        fee_bps,
+        source_decimals,
+        destination_decimals,
+    )?;
+    let net_amount = split.net;
+    let retained_dust = requested_amount - split.fee - net_amount;
     let actual_debit = split.fee + net_amount;
     let destination_amount =
         convert_decimals_exact(net_amount, source_decimals, destination_decimals)?;
@@ -183,6 +207,7 @@ pub fn compute_quote_breakdown(
 /// Check that an actual transferred amount matches the expected exact amount,
 /// refusing fee-on-transfer, deflationary, or hostile balance mutations that
 /// violate router accounting assumptions.
+#[inline(never)]
 pub fn assert_exact_transfer(
     balance_before: i128,
     balance_after: i128,

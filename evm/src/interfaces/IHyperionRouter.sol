@@ -111,6 +111,10 @@ interface IHyperionRouter {
     /// @notice Version 1 diagnostic for a claim payout that remains outstanding.
     /// @dev The claim amount and fixed recipient remain in `pendingClaim`; this event adds only
     /// the bounded reason so existing claim/indexing records remain valid.
+    /// @param id The parked claim ID.
+    /// @param reason Version 1 refusal, shortage, unreadable-token or inexact-payout code.
+    /// @param outstandingAmount The full amount still owed to the recorded recipient.
+    /// @param recipient The recorded payout recipient.
     event ClaimPayoutFailureV1(uint64 indexed id, uint8 reason, uint256 outstandingAmount, address recipient);
 
     /// @notice A privileged change was proposed, and the clock started.
@@ -236,11 +240,13 @@ interface IHyperionRouter {
     function settleClaim(uint64 claimId) external;
 
     /// @notice Attempt a bounded set of claims independently, returning one outcome per input.
+    /// @param claimIds At most 50 stored claim IDs, including duplicates if desired.
+    /// @return results Confirmed outcome for each input ID, in input order.
     function settleClaims(uint64[] calldata claimIds)
         external
         returns (ClaimSettlementResult[] memory results);
 
-    /// @notice Dispatch with an explicit maximum native provider payment; legacy request fields remain compatible.
+    /// @notice Dispatch with a native provider cap while preserving legacy request fields.
     /// @param request The legacy outbound request.
     /// @param maxProviderBudget Maximum msg.value passed to the provider, in native-currency wei.
     /// @return nonce The outbound nonce.
@@ -253,7 +259,7 @@ interface IHyperionRouter {
     /// @param request The legacy outbound request.
     /// @param providerPayment Prospective native payment in wei.
     /// @param maxProviderBudget Maximum native payment in wei.
-    /// @return blocker Zero or the earliest error selector; balances and provider execution still need simulation.
+    /// @return blocker Zero or the earliest error selector; provider execution still needs simulation.
     function explainOutbound(
         OutboundRequest calldata request,
         uint256 providerPayment,

@@ -57,7 +57,7 @@ pub struct ClaimSettled {
     pub settled_by: Address,
 }
 
-/// V1 reasons: 1 refused unchanged payout, 2 custody short, 3 token/accounting unavailable.
+// V1 reasons: 1 refused unchanged payout, 2 custody short, 3 token/accounting unavailable.
 #[contractevent(topics = ["hyperion", "claim_failure_v1"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimPayoutFailureV1 {
@@ -247,20 +247,20 @@ pub fn paused(env: &Env, by: &Address, state: bool) {
     .publish(env);
 }
 
-pub fn action_queued(env: &Env, action: &QueuedAction) {
+pub fn action_queued(env: &Env, action: QueuedAction) {
     ActionQueued {
         id: action.id,
-        action: action.action.clone(),
+        action: action.action,
         eta: action.eta,
         expires_at: action.expires_at,
     }
     .publish(env);
 }
 
-pub fn action_executed(env: &Env, action: &QueuedAction) {
+pub fn action_executed(env: &Env, action: QueuedAction) {
     ActionExecuted {
         id: action.id,
-        action: action.action.clone(),
+        action: action.action,
         queued_at: action.queued_at,
     }
     .publish(env);

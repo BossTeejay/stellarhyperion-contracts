@@ -39,6 +39,7 @@ contract RouterOutboundTest is Fixture {
     function test_bounded_provider_payment_refuses_before_any_fee_or_flow_movement() public {
         OutboundRequest memory request = _itsRequest(1000e6);
         uint256 balance = usdc.balanceOf(alice);
+        vm.deal(alice, 3);
         vm.prank(alice);
         vm.expectRevert(ProviderBudgetExceeded.selector);
         router.bridgeOutBounded{value: 2}(request, 1);
@@ -46,11 +47,13 @@ contract RouterOutboundTest is Fixture {
         assertEq(usdc.balanceOf(treasury), 0);
         assertEq(router.outboundNonce(), 0);
         assertEq(itsRail.callCount(), 0);
+        assertEq(alice.balance, 3);
         assertEq(router.explainOutbound(request, 2, 1), ProviderBudgetExceeded.selector);
         assertEq(router.explainOutbound(request, type(uint256).max, type(uint256).max), bytes4(0));
         vm.prank(alice);
         router.bridgeOutBounded{value: 1}(request, 1);
         assertEq(itsRail.lastCall().value, 1);
+        assertEq(alice.balance, 2);
         assertEq(router.outboundNonce(), 1);
     }
 

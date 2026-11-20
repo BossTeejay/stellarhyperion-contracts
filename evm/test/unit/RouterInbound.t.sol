@@ -169,6 +169,7 @@ contract RouterInboundTest is Fixture {
     }
 
     function _assertIsolatedHostileBatch(bool falseAfterMove, bool hostileFirst) private {
+        uint256 aliceBefore = usdc.balanceOf(alice);
         FeeOnTransferToken fot = _hostileInbound();
         fot.setBlocked(bob, true);
         usdc.setBlocked(alice, true);
@@ -185,7 +186,8 @@ contract RouterInboundTest is Fixture {
         ids[1] = hostileFirst ? good : bad;
         ids[2] = good;
         ClaimSettlementResult[] memory results = router.settleClaims(ids);
-        assertEq(uint8(results[hostileFirst ? 0 : 1].status), uint8(ClaimSettlementStatus.InvalidTokenPayout));
+        uint8 failedStatus = uint8(results[hostileFirst ? 0 : 1].status);
+        assertEq(failedStatus, uint8(ClaimSettlementStatus.InvalidTokenPayout));
         assertEq(uint8(results[hostileFirst ? 1 : 0].status), uint8(ClaimSettlementStatus.Settled));
         assertEq(uint8(results[2].status), uint8(ClaimSettlementStatus.AlreadySettled));
         assertTrue(router.pendingClaim(good).settled);
@@ -194,7 +196,7 @@ contract RouterInboundTest is Fixture {
         assertEq(router.pendingClaim(bad).amount, DELIVERY);
         assertEq(fot.balanceOf(address(router)), DELIVERY);
         assertEq(fot.balanceOf(bob), 0);
-        assertEq(usdc.balanceOf(alice), DELIVERY);
+        assertEq(usdc.balanceOf(alice), aliceBefore + DELIVERY);
         assertEq(router.claimFailureReason(bad), 4);
         fot.configure(bob, 0, false, false);
         router.settleClaim(bad);
@@ -413,6 +415,7 @@ contract RouterInboundTest is Fixture {
     }
 
     function test_batch_settlement_keeps_claims_independent_and_reports_each_outcome() public {
+        uint256 aliceBefore = usdc.balanceOf(alice);
         usdc.setBlocked(bob, true);
         usdc.setBlocked(alice, true);
         vm.startPrank(railReceiver);
@@ -439,7 +442,7 @@ contract RouterInboundTest is Fixture {
         assertEq(router.claimFailureReason(first), 1);
         assertEq(router.claimFailureReason(second), 0);
         assertEq(usdc.balanceOf(address(router)), DELIVERY);
-        assertEq(usdc.balanceOf(alice), DELIVERY);
+        assertEq(usdc.balanceOf(alice), aliceBefore + DELIVERY);
     }
 
     function test_claims_are_numbered_in_order() public {

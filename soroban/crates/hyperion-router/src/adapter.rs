@@ -14,7 +14,6 @@ use soroban_sdk::{contractclient, Address, BytesN, Env, String};
 // received in this adapter's balance is guaranteed to equal `amount` exactly.
 #[contractclient(name = "RailAdapterClient")]
 pub trait RailAdapter {
-    #[allow(clippy::too_many_arguments)]
     fn check_dispatch(
         env: Env,
         caller: Address,
