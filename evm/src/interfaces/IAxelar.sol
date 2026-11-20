@@ -35,6 +35,27 @@ interface IInterchainTokenService {
     /// @param tokenId ITS's identifier for the token.
     /// @return The local ERC20, or the zero address when ITS has no record of that id here.
     function registeredTokenAddress(bytes32 tokenId) external view returns (address);
+
+    /// @notice The token manager ITS would move funds through for a token id.
+    /// @dev Reverts when no manager is deployed for the id, which is why the registration check
+    /// calls it through `try`. Declared here because a manager's existence is the fact that
+    /// separates "ITS knows this id" from "ITS can actually move it".
+    /// @param tokenId ITS's identifier for the token.
+    /// @return The token manager's address.
+    function tokenManagerAddress(bytes32 tokenId) external view returns (address);
+}
+
+/// @title The one thing a token manager is asked
+/// @notice How a manager takes funds decides what an outbound transfer has to authorise: a
+/// locking manager holds a balance and moves tokens into it, while the burning kinds destroy them
+/// out of the sender's account. An operator who believes the wrong one has a mental model of the
+/// rail that does not match the rail.
+interface ITokenManager {
+    /// @notice How this manager takes funds, as Axelar's own `TokenManagerType` discriminant.
+    /// @dev The numbers are the same ones `hyperion-adapter-axelar` reads from Stellar ITS:
+    /// `0` native interchain token, `1` mint-burn-from, `2` lock-unlock, `4` mint-burn. `3` is
+    /// `lock-unlock-fee`, which Stellar ITS does not support, and the gap is Axelar's own.
+    function implementationType() external view returns (uint256);
 }
 
 /// @title What ITS calls on the receiving contract

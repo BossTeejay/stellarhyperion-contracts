@@ -98,6 +98,24 @@ pub fn token_of(env: &Env, token_id: &BytesN<32>) -> Option<Address> {
     found
 }
 
+/// The same two reads without the TTL bump.
+///
+/// `token_id` and `token_of` extend a live entry's lifetime as a side effect, which is right on
+/// the transfer paths and wrong for a check whose contract is that validating a mapping changes
+/// nothing. A dry run that quietly renewed storage would make "no side effects" a claim nobody
+/// could test, so the diagnostic reads go through here instead.
+pub fn peek_token_id(env: &Env, token: &Address) -> Option<BytesN<32>> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::TokenId(token.clone()))
+}
+
+pub fn peek_token_of(env: &Env, token_id: &BytesN<32>) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Token(token_id.clone()))
+}
+
 pub fn set_token(env: &Env, token: &Address, token_id: &BytesN<32>) {
     let id_key = DataKey::TokenId(token.clone());
     let tok_key = DataKey::Token(token_id.clone());

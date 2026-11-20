@@ -59,7 +59,8 @@ use hyperion_core::{
     address::{assert_route_supports, bytes32_to_evm, evm_to_bytes32},
     axelar::{InboundNote, OutboundNote},
     inbound::{Origin, Recipient, RouterClient},
-    AdapterKeyCoverage, HyperionError, MaintenanceSummary, RouteKind, MAX_MAINTENANCE_BATCH,
+    AdapterKeyCoverage, HyperionError, MaintenanceSummary, RouteKind, TokenMappingConflict,
+    TokenMappingReport, MAX_MAINTENANCE_BATCH,
 };
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
@@ -615,18 +616,68 @@ impl AxelarAdapter {
     /// asset, or to nothing at all, is a configuration error, and catching it once here means
     /// it surfaces as a legible Hyperion refusal instead of a panic from two contracts away on
     /// somebody's transfer.
+    ///
+    /// A mapping that is already in place is never rewritten by this call. Where the stored
+    /// mapping disagrees with the arguments the call is refused with `AlreadyConfigured` rather
+    /// than quietly overwritten, because the reverse mapping is the inbound allowlist and
+    /// repointing it would change where arriving funds are paid. Repeating the same mapping is
+    /// accepted and writes nothing, so a deploy script that runs twice is boring. To see exactly
+    /// which fields disagree, call `check_token_mapping` first.
     pub fn map_token(env: Env, token: Address, token_id: BytesN<32>) -> Result<(), HyperionError> {
-        let cfg = require_admin(&env)?;
-        let registered = InterchainTokenServiceClient::new(&env, &cfg.its)
-            .try_registered_token_address(&token_id)
-            .map_err(|_| HyperionError::TokenNotMapped)?
-            .map_err(|_| HyperionError::TokenNotMapped)?;
-        if registered != token {
-            return Err(HyperionError::TokenNotMapped);
+        require_admin(&env)?;
+        let report = inspect_mapping(&env, &token, &token_id, None, None)?;
+
+        if let Some(conflict) = report.conflicts.first() {
+            return Err(match conflict {
+                // A second, different mapping over one that already exists. Refused rather than
+                // applied, because either direction repoints where money moves.
+                TokenMappingConflict::TokenId { .. } | TokenMappingConflict::LocalToken { .. } => {
+                    HyperionError::AlreadyConfigured
+                }
+                // Everything else is Axelar not knowing this asset, which the caller has to fix
+                // before the mapping means anything.
+                _ => HyperionError::TokenNotMapped,
+            });
         }
+
+        // The mapping already reads back exactly as proposed. Writing it again would only
+        // republish an event for a change that did not happen, so this is a successful no-op.
+        if report.mapped_token_id.as_ref() == Some(&token_id)
+            && report.mapped_token.as_ref() == Some(&token)
+        {
+            return Ok(());
+        }
+
         storage::set_token(&env, &token, &token_id);
         events::TokenMapped { token, token_id }.publish(&env);
         Ok(())
+    }
+
+    /// Report what registering `token` under `token_id` would do, without doing any of it.
+    ///
+    /// Answers the question an operator actually has before an activation: not "is this wrong"
+    /// but "which fields disagree, and what does Axelar say they should be". Every conflict is
+    /// reported at once, in a fixed order, so a rehearsal and a production run print the same
+    /// list. Read only: nothing here writes storage or extends a TTL, so calling it twice leaves
+    /// the contract exactly as it found it.
+    ///
+    /// `expected_decimals` and `expected_manager_type` are optional because an operator checking
+    /// only the ids should not have to guess at the other two. Passing them adds those checks;
+    /// leaving them out reports what was observed without judging it.
+    pub fn check_token_mapping(
+        env: Env,
+        token: Address,
+        token_id: BytesN<32>,
+        expected_decimals: Option<u32>,
+        expected_manager_type: Option<u32>,
+    ) -> Result<TokenMappingReport, HyperionError> {
+        inspect_mapping(
+            &env,
+            &token,
+            &token_id,
+            expected_decimals,
+            expected_manager_type,
+        )
     }
 
     /// Hand the admin role to somebody else.
@@ -706,6 +757,56 @@ fn require_admin(env: &Env) -> Result<Config, HyperionError> {
     let cfg = storage::config(env)?;
     cfg.admin.require_auth();
     Ok(cfg)
+}
+
+/// Observe everything a registration decision depends on, then classify the disagreements.
+///
+/// Two reads from this contract's own storage, three from ITS, and one from the asset. Every one
+/// of them is tolerant: a token id ITS has never heard of, an asset that does not answer
+/// `decimals`, and a manager that was never deployed are all facts worth reporting rather than
+/// reasons to stop, and turning any of them into an early return would hide the rest of the
+/// picture behind the first thing that was wrong.
+///
+/// Nothing here writes, and the storage reads deliberately skip the TTL bump the transfer paths
+/// apply, so a diagnostic run is a no-op on chain state.
+fn inspect_mapping(
+    env: &Env,
+    token: &Address,
+    token_id: &BytesN<32>,
+    expected_decimals: Option<u32>,
+    expected_manager_type: Option<u32>,
+) -> Result<TokenMappingReport, HyperionError> {
+    let cfg = storage::config(env)?;
+    let its = InterchainTokenServiceClient::new(env, &cfg.its);
+    let mut report = TokenMappingReport::new(env, token.clone(), token_id.clone());
+    report.expected_decimals = expected_decimals;
+    report.expected_manager_type = expected_manager_type;
+
+    report.mapped_token_id = storage::peek_token_id(env, token);
+    report.mapped_token = storage::peek_token_of(env, token_id);
+
+    // What Axelar itself says is behind the id. Both reads are allowed to fail: the first panics
+    // when no manager is deployed, the second when nothing is registered, and either outcome is
+    // a fact the report carries rather than an error it returns.
+    if let Ok(Ok(registered)) = its.try_registered_token_address(token_id) {
+        report.rail_token = Some(registered);
+    }
+    if let Ok(Ok(manager)) = its.try_deployed_token_manager(token_id) {
+        report.rail_manager = Some(manager);
+    }
+    if let Ok(Ok(kind)) = its.try_token_manager_type(token_id) {
+        report.rail_manager_type = Some(kind as u32);
+    }
+
+    // SEP-41 metadata, read the same way `check_token_behavior` reads it on the router. A token
+    // that cannot answer is not an error here, it is a token whose decimals are unknown.
+    let asset = token::Client::new(env, token);
+    if let Ok(Ok(decimals)) = asset.try_decimals() {
+        report.onchain_decimals = Some(decimals);
+    }
+
+    report.classify(env);
+    Ok(report)
 }
 
 /// The key the router keys replay protection on.

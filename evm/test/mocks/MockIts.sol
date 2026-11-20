@@ -26,6 +26,7 @@ contract MockIts is IInterchainTokenService {
     uint256 public sentCount;
 
     mapping(bytes32 tokenId => address token) private _registered;
+    mapping(bytes32 tokenId => address manager) private _managers;
 
     /// @dev Some of the value is handed back, the way a real destination gas market refunds what
     /// it did not spend. Set to zero for the case where the rail keeps all of it.
@@ -35,12 +36,25 @@ contract MockIts is IInterchainTokenService {
         _registered[tokenId] = token;
     }
 
+    /// @dev Axelar reverts here for an id it has no manager for, so this does too rather than
+    /// returning zero. The adapter's registration check has to handle a revert, and a mock that
+    /// answered politely would let it get away with not handling one.
+    function setTokenManager(bytes32 tokenId, address manager) external {
+        _managers[tokenId] = manager;
+    }
+
     function setRefundBps(uint256 bps) external {
         refundBps = bps;
     }
 
     function registeredTokenAddress(bytes32 tokenId) external view override returns (address) {
         return _registered[tokenId];
+    }
+
+    function tokenManagerAddress(bytes32 tokenId) external view override returns (address) {
+        address manager = _managers[tokenId];
+        require(manager != address(0), "no token manager");
+        return manager;
     }
 
     function interchainTransfer(

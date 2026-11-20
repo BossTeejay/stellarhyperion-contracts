@@ -24,6 +24,7 @@ import {
 } from "../src/abi/errors.js";
 import { ROUTE_KINDS, ROUTE_SLUGS, RouteKind } from "../src/routes.js";
 import { QuoteBlocker } from "../src/quotes.js";
+import { TokenMappingConflict } from "../src/tokenMapping.js";
 import { AddressKind } from "../src/addresses.js";
 import {
   BURN_MESSAGE_VERSION,
@@ -63,6 +64,54 @@ function rustEnumVariants(source: string, enumName: string): { name: string; val
 /** Pull `error Name(` out of Solidity, in declaration order. */
 function solidityErrors(source: string): string[] {
   return [...source.matchAll(/^error\s+([A-Za-z0-9_]+)\s*\(/gm)].map((match) => match[1]!);
+}
+
+/**
+ * Pull the variant names out of a Rust enum that carries data, in declaration order.
+ *
+ * `rustEnumVariants` above wants `Name = <n>,` because Soroban's error enum is numbered by hand.
+ * A `contracttype` enum with tuple variants has no numbers to read, and its order is the wire
+ * order, so this reads names only and leaves the numbering to the shape of the enum itself.
+ */
+function rustDataEnumVariants(source: string, enumName: string): string[] {
+  const start = source.indexOf(`pub enum ${enumName}`);
+  expect(start, `${enumName} not found in the Rust source`).toBeGreaterThan(-1);
+  const open = source.indexOf("{", start);
+  const close = source.indexOf("\n}", open);
+  const body = source.slice(open + 1, close);
+  const out: string[] = [];
+  for (const match of body.matchAll(/^\s{4}([A-Z][A-Za-z0-9]*)\s*[({,]/gm)) {
+    out.push(match[1]!);
+  }
+  expect(out.length, `no variants parsed out of ${enumName}`).toBeGreaterThan(0);
+  return out;
+}
+
+/** Pull a Solidity struct's member names, in declaration order. */
+function solidityStructFields(source: string, structName: string): string[] {
+  const start = source.indexOf(`struct ${structName} {`);
+  expect(start, `${structName} not found in the Solidity source`).toBeGreaterThan(-1);
+  const close = source.indexOf("\n}", start);
+  const body = source.slice(start, close);
+  const out: string[] = [];
+  for (const match of body.matchAll(/^\s{4}[A-Za-z0-9_\[\]]+\s+([A-Za-z0-9_]+)\s*;/gm)) {
+    out.push(match[1]!);
+  }
+  return out;
+}
+
+/** Pull a TypeScript interface's property names, in declaration order. */
+function tsInterfaceFields(source: string, interfaceName: string): string[] {
+  const start = source.indexOf(`export interface ${interfaceName} {`);
+  expect(start, `${interfaceName} not found in the TypeScript source`).toBeGreaterThan(-1);
+  const close = source.indexOf("\n}", start);
+  const body = source.slice(start, close);
+  const out: string[] = [];
+  for (const match of body.matchAll(/^\s{2}readonly\s+([A-Za-z0-9_]+)\??\s*:/gm)) {
+    out.push(match[1]!);
+  }
+  expect(out.length, `no fields parsed out of ${interfaceName}`).toBeGreaterThan(0);
+  return out;
 }
 
 /** Pull a Solidity enum's members, in declaration order. */
@@ -175,6 +224,45 @@ describe("the quote blockers", () => {
       .sort(([, a], [, b]) => a - b)
       .map(([name]) => name);
     expect(mine).toEqual(members);
+  });
+});
+
+describe("the token registration diagnostics", () => {
+  it("matches the Solidity enum, in order, with None first", () => {
+    // These travel in a struct an app reads over `eth_call`, so a reordering would relabel every
+    // finding on the screen while leaving the shape valid.
+    const members = solidityEnum(
+      read(join(evmRoot, "src", "HyperionTypes.sol")),
+      "TokenMappingConflict",
+    );
+    const mine = Object.entries(TokenMappingConflict)
+      .sort(([, a], [, b]) => a - b)
+      .map(([name]) => name);
+    expect(mine).toEqual(members);
+  });
+
+  it("has the same report fields, in the same order, as the Solidity struct", () => {
+    // The report is read over `eth_call` and decoded by position, so a field added on one side
+    // and not the other does not fail the call: it silently shifts every field after it, and an
+    // app then renders one field's value under another field's name.
+    const solidity = solidityStructFields(
+      read(join(evmRoot, "src", "HyperionTypes.sol")),
+      "TokenMappingReport",
+    );
+    const typescript = tsInterfaceFields(
+      read(join(packageRoot, "src", "tokenMapping.ts")),
+      "TokenMappingReport",
+    );
+    expect(typescript).toEqual(solidity);
+  });
+
+  it("matches the Soroban enum, minus the None the Rust side does not need", () => {
+    // Soroban's `contracttype` needs no zero value, so its list starts at `TokenId`. Everything
+    // after that has to line up, because an operator reads one diagnostic and a keeper reads the
+    // other and they are describing the same fault.
+    const variants = rustDataEnumVariants(read(join(coreSrc, "axelar.rs")), "TokenMappingConflict");
+    const mine = Object.keys(TokenMappingConflict).filter((name) => name !== "None");
+    expect(mine).toEqual(variants);
   });
 });
 

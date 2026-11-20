@@ -17,11 +17,20 @@ import {
     UnknownChain,
     ZeroAddress
 } from "../HyperionErrors.sol";
-import {AddressKind, Destination, Origin, RouteKind} from "../HyperionTypes.sol";
+import {
+    AddressKind,
+    Destination,
+    Origin,
+    RouteKind,
+    TokenMappingConflict,
+    TokenMappingReport,
+    TokenMappingRequest
+} from "../HyperionTypes.sol";
 import {
     IAxelarGasService,
     IInterchainTokenExecutable,
-    IInterchainTokenService
+    IInterchainTokenService,
+    ITokenManager
 } from "../interfaces/IAxelar.sol";
 import {IHyperionRouter} from "../interfaces/IHyperionRouter.sol";
 import {IRailAdapter} from "../interfaces/IRailAdapter.sol";
@@ -84,6 +93,17 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     /// @notice The ITS token id this chain's ERC20 is registered under, or zero if it is not
     /// linked. An unlinked token is a token this adapter will refuse to send.
     mapping(address token => bytes32 tokenId) public tokenIdOf;
+
+    /// @dev And back again, which is what makes the inbound allowlist and the reverse half of a
+    /// registration conflict answerable without an event scan. Kept in step with `tokenIdOf` by
+    /// `linkToken` and by nothing else.
+    mapping(bytes32 tokenId => address token) private _tokenOfId;
+
+    /// @notice The token manager kind Axelar uses for a token id, cached when it was linked.
+    /// @dev Not consulted by any transfer path: `dispatch` and `executeWithInterchainToken` read
+    /// nothing from here. It exists so a dry run can compare what an operator believes against
+    /// what Axelar said at registration time, and it is refreshed only by a successful link.
+    mapping(bytes32 tokenId => uint256 managerType) private _managerTypeOfId;
 
     /// @notice A chain became reachable.
     event PeerConfigured(string chain, string axelarChain, bytes peer);
@@ -288,15 +308,199 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     /// @dev Once only. An id is the same value on every chain ITS connects, so getting it right
     /// once is the whole job, and being able to change it later is only useful to somebody who
     /// wants a transfer to arrive as a different asset than it left as.
+    ///
+    /// A link that is already in place is never rewritten. Where the stored link disagrees with
+    /// the arguments the call is refused with `AlreadyConfigured` rather than quietly overwritten,
+    /// because the reverse mapping is the inbound allowlist and repointing it would change which
+    /// asset an arriving delivery is paid in. Repeating the same link is accepted and writes
+    /// nothing, so a deploy script that runs twice is boring. To see exactly which fields
+    /// disagree, call `checkTokenMapping` first.
     function linkToken(address token, bytes32 tokenId) external onlyOwner {
         if (token == address(0)) revert ZeroAddress();
         if (tokenId == bytes32(0)) revert TokenNotMapped();
-        if (tokenIdOf[token] != bytes32(0)) revert AlreadyConfigured();
-        // ITS knows which ERC20 an id belongs to on this chain. Asking rather than trusting the
-        // argument turns a typo into a failed transaction now instead of a failed delivery later.
-        if (ITS.registeredTokenAddress(tokenId) != token) revert TokenNotMapped();
+
+        TokenMappingReport memory report = _inspectTokenMapping(
+            TokenMappingRequest({
+                token: token,
+                tokenId: tokenId,
+                expectedDecimals: 0,
+                hasExpectedDecimals: false,
+                expectedManagerType: 0,
+                hasExpectedManagerType: false
+            })
+        );
+        if (report.conflicts.length != 0) {
+            // Two different mistakes with two different fixes. A link that would repoint an
+            // existing mapping is a configuration clash; anything else is Axelar not knowing the
+            // asset, which the caller has to resolve before the link means anything.
+            TokenMappingConflict first = report.conflicts[0];
+            if (first == TokenMappingConflict.TokenId || first == TokenMappingConflict.LocalToken) {
+                revert AlreadyConfigured();
+            }
+            revert TokenNotMapped();
+        }
+
+        // The link already reads back exactly as proposed. Writing it again would only republish
+        // an event for a change that did not happen, so this is a successful no-op.
+        if (report.mappedTokenId == tokenId && report.mappedToken == token) return;
+
         tokenIdOf[token] = tokenId;
+        _tokenOfId[tokenId] = token;
+        _managerTypeOfId[tokenId] = report.railManagerType;
         emit TokenLinked(token, tokenId);
+    }
+
+    /// @notice Report what linking `token` to `tokenId` would do, without doing any of it.
+    /// @dev The EVM half of the Stellar adapter's `check_token_mapping`, and it answers the same
+    /// question in the same order: every field that disagrees, named, rather than the first one
+    /// that would have caused a revert. A caller passes `expectedDecimals` and
+    /// `expectedManagerType` to have those judged; leaving them out reports what was observed
+    /// without judging it.
+    ///
+    /// Read only. Nothing here writes storage or emits an event, so calling it twice leaves the
+    /// adapter exactly as it found it, which is what makes it usable as a rehearsal step in a
+    /// deployment script.
+    /// @param token The local ERC20 the caller proposes to link.
+    /// @param tokenId The ITS token id the caller proposes to link it to.
+    /// @param expectedDecimals Decimals the caller expects the local asset to report.
+    /// @param hasExpectedDecimals Whether `expectedDecimals` should be judged at all.
+    /// @param expectedManagerType The `TokenManagerType` discriminant the caller expects.
+    /// @param hasExpectedManagerType Whether `expectedManagerType` should be judged at all.
+    function checkTokenMapping(
+        address token,
+        bytes32 tokenId,
+        uint8 expectedDecimals,
+        bool hasExpectedDecimals,
+        uint256 expectedManagerType,
+        bool hasExpectedManagerType
+    ) external view returns (TokenMappingReport memory) {
+        return _inspectTokenMapping(
+            TokenMappingRequest({
+                token: token,
+                tokenId: tokenId,
+                expectedDecimals: expectedDecimals,
+                hasExpectedDecimals: hasExpectedDecimals,
+                expectedManagerType: expectedManagerType,
+                hasExpectedManagerType: hasExpectedManagerType
+            })
+        );
+    }
+
+    /// @notice The local asset already linked to a token id, or the zero address.
+    /// @dev The reverse half of `tokenIdOf`, and the map the inbound path's allowlist check
+    /// effectively uses.
+    function tokenOfId(bytes32 tokenId) external view returns (address) {
+        return _tokenOfId[tokenId];
+    }
+
+    /// @notice The manager kind Axelar reported for a token id when it was linked.
+    /// @dev Zero is both "no manager recorded" and `NativeInterchainToken`, so this is only
+    /// meaningful for an id where `tokenIdOf` is non-zero.
+    function managerTypeOfId(bytes32 tokenId) external view returns (uint256) {
+        return _managerTypeOfId[tokenId];
+    }
+
+    /// @dev Build the report `checkTokenMapping` returns and `linkToken` acts on.
+    ///
+    /// Every read is allowed to fail. ITS reverts for an id it has no manager for, and a token
+    /// that is not a real ERC20 answers nothing; neither is an error here, it is a fact the
+    /// report carries so the caller can tell "Axelar has never heard of this id" apart from
+    /// "Axelar knows the id and it belongs to a different asset".
+    function _inspectTokenMapping(TokenMappingRequest memory request)
+        private
+        view
+        returns (TokenMappingReport memory report)
+    {
+        report.token = request.token;
+        report.tokenId = request.tokenId;
+        report.mappedTokenId = tokenIdOf[request.token];
+        report.mappedToken = _tokenOfId[request.tokenId];
+
+        // What Axelar itself says is behind this id.
+        try ITS.registeredTokenAddress(request.tokenId) returns (address registered) {
+            report.railToken = registered;
+        } catch {}
+        try ITS.tokenManagerAddress(request.tokenId) returns (address manager) {
+            report.railManager = manager;
+        } catch {}
+        if (report.railManager != address(0)) {
+            // A static call rather than a typed one: `try` catches a revert but not a decode
+            // failure, and an address with no code returns nothing at all. A manager that cannot
+            // be read is a fact this report carries, not a reason to fail the whole check.
+            (bool okKind, bytes memory kindRet) = report.railManager
+                .staticcall(abi.encodeWithSelector(ITokenManager.implementationType.selector));
+            if (okKind && kindRet.length == 32) {
+                report.railManagerType = abi.decode(kindRet, (uint256));
+                report.managerTypeKnown = true;
+            }
+        }
+
+        // A token that cannot answer `decimals()` is not an error, it is a token whose decimals
+        // are unknown, which is a different finding from a token whose decimals are wrong.
+        (bool ok, bytes memory ret) = request.token.staticcall(abi.encodeWithSignature("decimals()"));
+        if (ok && ret.length == 32) {
+            uint256 raw = abi.decode(ret, (uint256));
+            if (raw <= type(uint8).max) {
+                // Safe: the guard above is exactly the range check.
+                // forge-lint: disable-next-line(unsafe-typecast)
+                report.onchainDecimals = uint8(raw);
+                report.decimalsKnown = true;
+            }
+        }
+
+        report.conflicts = _classifyTokenMapping(request, report);
+    }
+
+    /// @dev Derive every disagreement from the observations, in the fixed order the Stellar side
+    /// uses. Pure and separated from the reads, because these are the rules both chains have to
+    /// agree on and the order is what makes two runs over the same facts print the same list.
+    ///
+    /// Two passes rather than a push: the length of the array has to be known before it is
+    /// allocated, and computing the findings twice in a pure function is cheaper than growing an
+    /// array across five branches.
+    function _classifyTokenMapping(TokenMappingRequest memory request, TokenMappingReport memory report)
+        private
+        pure
+        returns (TokenMappingConflict[] memory conflicts)
+    {
+        // A link that would move an asset already linked elsewhere silently changes where money
+        // goes. Both directions are checked because they fail differently: the forward one breaks
+        // outbound dispatch, the reverse one makes an inbound delivery pay a token nobody linked.
+        bool idConflict = report.mappedTokenId != bytes32(0) && report.mappedTokenId != request.tokenId;
+        bool tokenConflict = report.mappedToken != address(0) && report.mappedToken != request.token;
+        bool railTokenConflict = report.railToken != address(0) && report.railToken != request.token;
+        // A zero `railToken` is the rail not knowing the id, which is also the answer to "is there
+        // a manager": ITS registers the two together.
+        bool unregistered = report.railToken == address(0);
+        // Judged on whether a kind was read, not on its value: zero is a real kind, so a
+        // `NativeInterchainToken` manager reporting `0` is not the same as no manager at all.
+        bool managerMissing = request.hasExpectedManagerType && !report.managerTypeKnown;
+        bool decimalsConflict = request.hasExpectedDecimals && report.decimalsKnown
+            && report.onchainDecimals != request.expectedDecimals;
+        bool decimalsUnreadable = request.hasExpectedDecimals && !report.decimalsKnown;
+        bool managerConflict = request.hasExpectedManagerType && report.managerTypeKnown
+            && report.railManagerType != request.expectedManagerType;
+
+        uint256 size;
+        if (idConflict) ++size;
+        if (tokenConflict) ++size;
+        if (unregistered) ++size;
+        if (railTokenConflict) ++size;
+        if (decimalsUnreadable) ++size;
+        if (decimalsConflict) ++size;
+        if (managerMissing) ++size;
+        if (managerConflict) ++size;
+
+        conflicts = new TokenMappingConflict[](size);
+        uint256 cursor;
+        if (idConflict) conflicts[cursor++] = TokenMappingConflict.TokenId;
+        if (tokenConflict) conflicts[cursor++] = TokenMappingConflict.LocalToken;
+        if (unregistered) conflicts[cursor++] = TokenMappingConflict.UnregisteredTokenId;
+        if (railTokenConflict) conflicts[cursor++] = TokenMappingConflict.RailTokenMismatch;
+        if (decimalsUnreadable) conflicts[cursor++] = TokenMappingConflict.UnreadableMetadata;
+        if (decimalsConflict) conflicts[cursor++] = TokenMappingConflict.Decimals;
+        if (managerMissing) conflicts[cursor++] = TokenMappingConflict.UnregisteredTokenId;
+        if (managerConflict) conflicts[cursor++] = TokenMappingConflict.ManagerType;
     }
 
     /// @notice Read a configured chain.

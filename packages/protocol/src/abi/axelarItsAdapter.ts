@@ -64,6 +64,107 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "checkTokenMapping",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "tokenId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "expectedDecimals",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "hasExpectedDecimals",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "expectedManagerType",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "hasExpectedManagerType",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct TokenMappingReport",
+        "components": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "mappedTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "mappedToken",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "railToken",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "railManager",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "railManagerType",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "managerTypeKnown",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "onchainDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "decimalsKnown",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "conflicts",
+            "type": "uint8[]",
+            "internalType": "enum TokenMappingConflict[]"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "dispatch",
     "inputs": [
       {
@@ -213,6 +314,25 @@ export const axelarItsAdapterAbi = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "managerTypeOfId",
+    "inputs": [
+      {
+        "name": "tokenId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -413,6 +533,25 @@ export const axelarItsAdapterAbi = [
         "name": "tokenId",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "tokenOfId",
+    "inputs": [
+      {
+        "name": "tokenId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"

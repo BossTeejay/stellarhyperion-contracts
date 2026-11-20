@@ -19,7 +19,13 @@ import {
     ZeroAddress,
     ZeroAddressKey
 } from "../../src/HyperionErrors.sol";
-import {AddressKind, Destination, RouteKind} from "../../src/HyperionTypes.sol";
+import {
+    AddressKind,
+    Destination,
+    RouteKind,
+    TokenMappingConflict,
+    TokenMappingReport
+} from "../../src/HyperionTypes.sol";
 import {AxelarItsAdapter} from "../../src/adapters/AxelarItsAdapter.sol";
 import {IHyperionRouter} from "../../src/interfaces/IHyperionRouter.sol";
 import {Fixture} from "../Fixture.sol";
@@ -27,6 +33,7 @@ import {DeafRouter} from "../mocks/HostileCallers.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockGasService} from "../mocks/MockGasService.sol";
 import {MockIts} from "../mocks/MockIts.sol";
+import {MockTokenManager} from "../mocks/MockTokenManager.sol";
 import {Vm} from "forge-std/Vm.sol";
 
 /// @title The rail that goes both ways
@@ -294,10 +301,19 @@ contract AxelarItsAdapterTest is Fixture {
         adapter.linkToken(makeAddr("token"), bytes32(0));
     }
 
-    function test_link_token_refuses_a_second_link() public {
+    /// @dev A deploy script that runs twice should be boring. Repeating the link that is already
+    /// in place succeeds and changes nothing, rather than reverting on a config that is correct.
+    function test_link_token_repeating_the_same_link_is_a_no_op() public {
+        vm.recordLogs();
         vm.prank(admin);
-        vm.expectRevert(AlreadyConfigured.selector);
         adapter.linkToken(address(usdc), TOKEN_ID);
+
+        assertEq(adapter.tokenIdOf(address(usdc)), TOKEN_ID);
+        // No second `TokenLinked`: nothing changed, so there is nothing to announce.
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            assertTrue(logs[i].topics[0] != TokenLinked.selector, "republished TokenLinked");
+        }
     }
 
     /// @dev A token id is the same value on every chain, which makes it exactly the sort of
@@ -308,6 +324,15 @@ contract AxelarItsAdapterTest is Fixture {
         MockERC20 other = new MockERC20("Other", "OTH", 18);
         vm.prank(admin);
         vm.expectRevert(TokenNotMapped.selector);
+        adapter.linkToken(address(other), keccak256("hyperion.its.nobody.registered.this"));
+    }
+
+    /// @dev And the same mistake in the other direction: the id is real but belongs to somebody
+    /// else's asset, so linking it here would make an inbound delivery pay a token nobody linked.
+    function test_link_token_refuses_an_id_its_backs_with_another_asset() public {
+        MockERC20 other = new MockERC20("Other", "OTH", 18);
+        vm.prank(admin);
+        vm.expectRevert(AlreadyConfigured.selector);
         adapter.linkToken(address(other), TOKEN_ID);
     }
 
@@ -773,6 +798,203 @@ contract AxelarItsAdapterTest is Fixture {
         vm.prank(stranger);
         vm.expectRevert(ZeroAddress.selector);
         adapter.topUpGas{value: 0.1 ether}(keccak256("x"), 0, address(0));
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Registration diagnostics
+    // -------------------------------------------------------------------------------------
+
+    /// @dev An address with no code behind it, which is what an operator gets when they paste
+    /// something from the wrong column. It answers nothing, so its decimals are unknown rather
+    /// than wrong, and the two findings have different fixes.
+    function _muteToken() internal pure returns (address) {
+        return address(0xDEAF);
+    }
+
+    function test_check_token_mapping_reports_a_compatible_registration() public {
+        MockTokenManager manager = new MockTokenManager(4);
+        its.setTokenManager(TOKEN_ID, address(manager));
+
+        TokenMappingReport memory report =
+            adapter.checkTokenMapping(address(usdc), TOKEN_ID, 6, true, 4, true);
+
+        assertEq(report.conflicts.length, 0);
+        assertEq(report.token, address(usdc));
+        assertEq(report.tokenId, TOKEN_ID);
+        assertEq(report.mappedTokenId, TOKEN_ID);
+        assertEq(report.mappedToken, address(usdc));
+        assertEq(report.railToken, address(usdc));
+        assertEq(report.railManager, address(manager));
+        assertEq(report.railManagerType, 4);
+        assertEq(report.onchainDecimals, 6);
+        assertTrue(report.decimalsKnown);
+    }
+
+    /// @dev Observed but unjudged: an operator checking only the ids should not have to guess at
+    /// the other two fields to get a useful answer.
+    function test_check_token_mapping_only_judges_what_the_caller_states() public view {
+        TokenMappingReport memory report =
+            adapter.checkTokenMapping(address(usdc), TOKEN_ID, 0, false, 0, false);
+        assertEq(report.conflicts.length, 0);
+    }
+
+    function test_check_token_mapping_names_an_id_already_linked_to_another_token() public {
+        // `other` is already linked to `otherId`, and this proposes linking it to a second id.
+        // Nothing about the rail is wrong; the local map is, in one direction only.
+        MockERC20 other = new MockERC20("Other", "OTH", 18);
+        bytes32 otherId = keccak256("hyperion.its.other");
+        bytes32 secondId = keccak256("hyperion.its.other.second");
+        its.setRegistered(otherId, address(other));
+        its.setRegistered(secondId, address(other));
+        vm.prank(admin);
+        adapter.linkToken(address(other), otherId);
+
+        TokenMappingReport memory report =
+            adapter.checkTokenMapping(address(other), secondId, 0, false, 0, false);
+
+        assertEq(report.mappedTokenId, otherId);
+        assertEq(report.conflicts.length, 1);
+        assertEq(uint8(report.conflicts[0]), uint8(TokenMappingConflict.TokenId));
+    }
+
+    function test_check_token_mapping_names_a_token_already_linked_to_another_id() public {
+        // The reverse direction, and the one that matters for money arriving: the reverse map is
+        // what decides which asset an inbound delivery is paid in.
+        TokenMappingReport memory report =
+            adapter.checkTokenMapping(makeAddr("stranger-token"), TOKEN_ID, 0, false, 0, false);
+
+        assertEq(report.mappedToken, address(usdc));
+        assertEq(report.conflicts.length, 2);
+        assertEq(uint8(report.conflicts[0]), uint8(TokenMappingConflict.LocalToken));
+        assertEq(uint8(report.conflicts[1]), uint8(TokenMappingConflict.RailTokenMismatch));
+    }
+
+    function test_check_token_mapping_names_an_id_axelar_never_heard_of() public {
+        // A token nothing has linked, and an id ITS has no record of. One finding, and it is the
+        // rail's, not the local map's.
+        TokenMappingReport memory report = adapter.checkTokenMapping(
+            makeAddr("unlinked-token"), keccak256("hyperion.its.nobody"), 0, false, 0, false
+        );
+
+        assertEq(report.railToken, address(0));
+        assertEq(report.railManager, address(0));
+        assertEq(report.conflicts.length, 1);
+        assertEq(uint8(report.conflicts[0]), uint8(TokenMappingConflict.UnregisteredTokenId));
+    }
+
+    function test_check_token_mapping_names_an_id_its_backs_with_another_asset() public {
+        MockERC20 other = new MockERC20("Other", "OTH", 18);
+        its.setRegistered(TOKEN_ID, address(other));
+
+        TokenMappingReport memory report =
+            adapter.checkTokenMapping(address(usdc), TOKEN_ID, 0, false, 0, false);
+
+        assertEq(report.railToken, address(other));
+        assertEq(report.conflicts.length, 1);
+        assertEq(uint8(report.conflicts[0]), uint8(TokenMappingConflict.RailTokenMismatch));
+    }
+
+    function test_check_token_mapping_names_decimals_that_disagree() public view {
+        TokenMappingReport memory report =
+            adapter.checkTokenMapping(address(usdc), TOKEN_ID, 7, true, 0, false);
+
+        assertEq(report.onchainDecimals, 6);
+        assertEq(report.conflicts.length, 1);
+        assertEq(uint8(report.conflicts[0]), uint8(TokenMappingConflict.Decimals));
+    }
+
+    function test_check_token_mapping_names_a_manager_kind_that_disagrees() public {
+        MockTokenManager manager = new MockTokenManager(2);
+        its.setTokenManager(TOKEN_ID, address(manager));
+
+        TokenMappingReport memory report =
+            adapter.checkTokenMapping(address(usdc), TOKEN_ID, 0, false, 4, true);
+
+        assertEq(report.railManager, address(manager));
+        assertEq(report.railManagerType, 2);
+        assertEq(report.conflicts.length, 1);
+        assertEq(uint8(report.conflicts[0]), uint8(TokenMappingConflict.ManagerType));
+    }
+
+    /// @dev A manager that reports kind zero is a real manager of a real kind, not a missing one.
+    /// Reading absence from the type rather than from the address would call this unregistered.
+    function test_check_token_mapping_treats_kind_zero_as_a_real_manager() public {
+        MockTokenManager manager = new MockTokenManager(0);
+        its.setTokenManager(TOKEN_ID, address(manager));
+
+        TokenMappingReport memory report =
+            adapter.checkTokenMapping(address(usdc), TOKEN_ID, 0, false, 0, true);
+
+        assertEq(report.conflicts.length, 0);
+        assertEq(report.railManagerType, 0);
+        assertEq(report.railManager, address(manager));
+    }
+
+    /// @dev A manager address that answers nothing is a manager this build cannot judge, which is
+    /// the same finding as no manager at all: there is nothing to route through that can be
+    /// confirmed. The alternative, treating kind zero as "unknown", would silently accept it.
+    function test_check_token_mapping_names_a_manager_that_answers_nothing() public {
+        its.setTokenManager(TOKEN_ID, makeAddr("mute-manager"));
+
+        TokenMappingReport memory report =
+            adapter.checkTokenMapping(address(usdc), TOKEN_ID, 0, false, 4, true);
+
+        assertEq(report.railManager, makeAddr("mute-manager"));
+        assertFalse(report.managerTypeKnown);
+        assertEq(report.conflicts.length, 1);
+        assertEq(uint8(report.conflicts[0]), uint8(TokenMappingConflict.UnregisteredTokenId));
+    }
+
+    function test_check_token_mapping_names_unreadable_metadata() public {
+        address mute = _muteToken();
+        bytes32 muteId = keccak256("hyperion.its.mute");
+        its.setRegistered(muteId, mute);
+
+        TokenMappingReport memory report = adapter.checkTokenMapping(mute, muteId, 6, true, 0, false);
+
+        assertFalse(report.decimalsKnown);
+        assertEq(report.conflicts.length, 1);
+        assertEq(uint8(report.conflicts[0]), uint8(TokenMappingConflict.UnreadableMetadata));
+    }
+
+    /// @dev One call, every disagreement, in the order the Stellar side uses. A diagnostic that
+    /// stopped at the first would need as many round trips as there are fields.
+    function test_check_token_mapping_reports_every_disagreement_at_once() public {
+        // `other` is already linked to `otherId`, and ITS backs USDC's id with a third asset.
+        // Asking about `other` under USDC's id is therefore wrong in five separate ways: the local
+        // map disagrees in both directions, the rail disagrees, the decimals are not seven, and
+        // the manager is not a lock-unlock one.
+        MockERC20 other = new MockERC20("Other", "OTH", 18);
+        MockERC20 third = new MockERC20("Third", "THD", 18);
+        bytes32 otherId = keccak256("hyperion.its.other");
+        its.setRegistered(otherId, address(other));
+        its.setTokenManager(TOKEN_ID, address(new MockTokenManager(4)));
+        vm.prank(admin);
+        adapter.linkToken(address(other), otherId);
+        its.setRegistered(TOKEN_ID, address(third));
+
+        TokenMappingReport memory report =
+            adapter.checkTokenMapping(address(other), TOKEN_ID, 7, true, 2, true);
+
+        assertEq(report.conflicts.length, 5);
+        assertEq(uint8(report.conflicts[0]), uint8(TokenMappingConflict.TokenId));
+        assertEq(uint8(report.conflicts[1]), uint8(TokenMappingConflict.LocalToken));
+        assertEq(uint8(report.conflicts[2]), uint8(TokenMappingConflict.RailTokenMismatch));
+        assertEq(uint8(report.conflicts[3]), uint8(TokenMappingConflict.Decimals));
+        assertEq(uint8(report.conflicts[4]), uint8(TokenMappingConflict.ManagerType));
+    }
+
+    function test_check_token_mapping_writes_nothing() public {
+        its.setTokenManager(TOKEN_ID, address(new MockTokenManager(4)));
+        vm.recordLogs();
+
+        adapter.checkTokenMapping(address(usdc), TOKEN_ID, 6, true, 4, true);
+
+        // A dry run that emitted `TokenLinked` would have indexers recording a link that never
+        // happened, so the absence of an event is part of the promise.
+        assertEq(vm.getRecordedLogs().length, 0);
+        assertEq(adapter.tokenIdOf(address(usdc)), TOKEN_ID);
+        assertEq(adapter.tokenOfId(TOKEN_ID), address(usdc));
     }
 
     // -------------------------------------------------------------------------------------
