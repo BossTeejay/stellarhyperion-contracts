@@ -215,14 +215,14 @@ pub fn remove_link(env: &Env, chain: &String) {
     set_chain_disabled(env, chain, false);
 }
 
-pub fn required_note_version(env: &Env, chain: &String) -> u8 {
+pub fn required_note_version(env: &Env, chain: &String) -> u32 {
     env.storage()
         .instance()
         .get(&DataKey::RequiredNoteVersion(chain.clone()))
-        .unwrap_or(hyperion_core::axelar::NOTE_VERSION_V1)
+        .unwrap_or(u32::from(hyperion_core::axelar::NOTE_VERSION_V1))
 }
 
-pub fn set_required_note_version(env: &Env, chain: &String, version: u8) {
+pub fn set_required_note_version(env: &Env, chain: &String, version: u32) {
     env.storage()
         .instance()
         .set(&DataKey::RequiredNoteVersion(chain.clone()), &version);

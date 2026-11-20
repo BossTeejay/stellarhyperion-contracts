@@ -161,7 +161,8 @@ impl AxelarAdapter {
             None,
         )?;
         if cfg.route == RouteKind::AxelarGmp {
-            let required = storage::required_note_version(&env, &destination_chain);
+            let required = u8::try_from(storage::required_note_version(&env, &destination_chain))
+                .map_err(|_| HyperionError::UnsupportedHookVersion)?;
             negotiate_note_version(required, &SUPPORTED_NOTE_VERSIONS, &SUPPORTED_NOTE_VERSIONS)?;
         }
 
@@ -757,7 +758,6 @@ impl AxelarAdapter {
         if version == 0 || version > u8::MAX as u32 {
             return Err(HyperionError::InvalidLimit);
         }
-        let version = u8::try_from(version).map_err(|_| HyperionError::InvalidLimit)?;
         storage::set_required_note_version(&env, &chain, version);
         events::NoteVersionRequired { chain, version }.publish(&env);
         Ok(())
@@ -833,7 +833,7 @@ impl AxelarAdapter {
 
     pub fn get_required_note_version(env: Env, chain: String) -> Result<u32, HyperionError> {
         storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
-        Ok(u32::from(storage::required_note_version(&env, &chain)))
+        Ok(storage::required_note_version(&env, &chain))
     }
 
     pub fn get_pending_rotation(

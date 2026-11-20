@@ -82,6 +82,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         bool recoverySupported;
     }
 
+    /// @notice CCTP message transmitter used to attest provider lane readiness.
     address public messageTransmitter;
 
     /// @notice Expected residual allowance on the token messenger.
@@ -152,6 +153,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         bool isClean
     );
 
+    /// @notice Emitted when the configured CCTP message transmitter changes.
     event MessageTransmitterSet(address indexed transmitter);
 
     constructor(address router, address tokenMessenger, address usdc, address owner_) Ownable(owner_) {
