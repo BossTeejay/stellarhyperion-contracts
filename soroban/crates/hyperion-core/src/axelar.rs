@@ -163,14 +163,20 @@ pub enum ReconciliationDiscrepancy {
     TokenIdMismatch,
     /// The integer amount dispatched disagrees with the candidate payment amount.
     AmountMismatch,
-    /// Full command identity is missing or empty on the candidate receipt.
+    /// Full command identity is missing, empty or malformed on the source or candidate receipt.
     CommandIdentityMissing,
+    /// The complete source identity differs from the destination receipt identity.
+    CommandIdentityMismatch,
+    /// Amounts must be positive; matching invalid values do not establish a payment.
+    InvalidAmount,
+    /// An absent source token binding cannot establish agreement.
+    InvalidTokenIdentity,
 }
 
 /// Candidate ITS payment receipt for an outbound transfer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidatePayment {
-    /// Axelar command ID / message identifier proving delivery execution.
+    /// Candidate command identity; equality is development evidence, never proof of execution.
     pub command_id: BytesN<32>,
     /// Token ID delivered.
     pub token_id: BytesN<32>,
@@ -199,15 +205,28 @@ pub struct CandidateInboundPayment {
 /// - Recipient, token ID, amount and full command identity must all agree.
 /// - Returns Err with specific discrepancy if any field differs or command identity is missing.
 /// - Does not rely on the display nonce for verification correctness.
+///
+/// This compares supplied development evidence; it does not authenticate an event, verify finality,
+/// authorize a dispatch or establish that the destination executed a payment.
 pub fn verify_outbound_reconciliation(
     note: &OutboundNote,
     dispatched_token_id: &BytesN<32>,
     dispatched_amount: i128,
+    expected_command_id: &BytesN<32>,
     candidate: &CandidatePayment,
 ) -> Result<(), ReconciliationDiscrepancy> {
     let empty_id = BytesN::from_array(&candidate.token_id.env(), &[0u8; 32]);
-    if candidate.command_id == empty_id {
+    if expected_command_id == &empty_id || candidate.command_id == empty_id {
         return Err(ReconciliationDiscrepancy::CommandIdentityMissing);
+    }
+    if expected_command_id != &candidate.command_id {
+        return Err(ReconciliationDiscrepancy::CommandIdentityMismatch);
+    }
+    if dispatched_amount <= 0 || candidate.amount <= 0 {
+        return Err(ReconciliationDiscrepancy::InvalidAmount);
+    }
+    if dispatched_token_id == &empty_id {
+        return Err(ReconciliationDiscrepancy::InvalidTokenIdentity);
     }
     if note.recipient != candidate.recipient {
         return Err(ReconciliationDiscrepancy::RecipientMismatch);
@@ -226,10 +245,22 @@ pub fn verify_inbound_reconciliation(
     note: &InboundNote,
     dispatched_token_id: &BytesN<32>,
     dispatched_amount: i128,
+    expected_message_id: &String,
     candidate: &CandidateInboundPayment,
 ) -> Result<(), ReconciliationDiscrepancy> {
-    if candidate.message_id.is_empty() {
+    if !valid_message_identity(expected_message_id)
+        || !valid_message_identity(&candidate.message_id)
+    {
         return Err(ReconciliationDiscrepancy::CommandIdentityMissing);
+    }
+    if expected_message_id != &candidate.message_id {
+        return Err(ReconciliationDiscrepancy::CommandIdentityMismatch);
+    }
+    if dispatched_amount <= 0 || candidate.amount <= 0 {
+        return Err(ReconciliationDiscrepancy::InvalidAmount);
+    }
+    if dispatched_token_id == &BytesN::from_array(&dispatched_token_id.env(), &[0; 32]) {
+        return Err(ReconciliationDiscrepancy::InvalidTokenIdentity);
     }
     if note.destination != candidate.recipient {
         return Err(ReconciliationDiscrepancy::RecipientMismatch);
@@ -241,6 +272,15 @@ pub fn verify_inbound_reconciliation(
         return Err(ReconciliationDiscrepancy::AmountMismatch);
     }
     Ok(())
+}
+
+/// Bound opaque message identities consistently with the development CLI and SDK.
+fn valid_message_identity(identity: &String) -> bool {
+    if identity.is_empty() || identity.len() > 512 {
+        return false;
+    }
+    let bytes = identity.to_bytes();
+    (0..bytes.len()).all(|index| matches!(bytes.get(index), Some(0x21..=0x7e)))
 }
 
 /// Eight big-endian bytes starting at `offset`.
@@ -467,7 +507,7 @@ mod tests {
         };
 
         assert_eq!(
-            verify_outbound_reconciliation(&note, &token_id, amount, &candidate),
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
             Ok(())
         );
     }
@@ -488,7 +528,7 @@ mod tests {
             recipient: evm(&env, 0x02),
         };
         assert_eq!(
-            verify_outbound_reconciliation(&note, &token_id, amount, &candidate),
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
             Err(ReconciliationDiscrepancy::RecipientMismatch)
         );
 
@@ -496,7 +536,7 @@ mod tests {
         candidate.recipient = evm(&env, 0x01);
         candidate.token_id = BytesN::from_array(&env, &[0xBBu8; 32]);
         assert_eq!(
-            verify_outbound_reconciliation(&note, &token_id, amount, &candidate),
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
             Err(ReconciliationDiscrepancy::TokenIdMismatch)
         );
 
@@ -504,15 +544,29 @@ mod tests {
         candidate.token_id = token_id.clone();
         candidate.amount = 9_999_999i128;
         assert_eq!(
-            verify_outbound_reconciliation(&note, &token_id, amount, &candidate),
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
             Err(ReconciliationDiscrepancy::AmountMismatch)
+        );
+
+        // A nonempty destination identity still cannot establish the source command.
+        candidate.amount = amount;
+        candidate.command_id = BytesN::from_array(&env, &[0x66; 32]);
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
+            Err(ReconciliationDiscrepancy::CommandIdentityMismatch)
+        );
+        candidate.command_id = command_id.clone();
+        candidate.amount = -1;
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token_id, -1, &command_id, &candidate),
+            Err(ReconciliationDiscrepancy::InvalidAmount)
         );
 
         // Missing command ID
         candidate.amount = amount;
         candidate.command_id = BytesN::from_array(&env, &[0u8; 32]);
         assert_eq!(
-            verify_outbound_reconciliation(&note, &token_id, amount, &candidate),
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
             Err(ReconciliationDiscrepancy::CommandIdentityMissing)
         );
     }
@@ -533,8 +587,14 @@ mod tests {
         };
 
         assert_eq!(
-            verify_inbound_reconciliation(&note, &token_id, amount, &candidate),
+            verify_inbound_reconciliation(&note, &token_id, amount, &message_id, &candidate),
             Ok(())
+        );
+
+        let wrong_source_id = String::from_str(&env, "different-complete-source-id");
+        assert_eq!(
+            verify_inbound_reconciliation(&note, &token_id, amount, &wrong_source_id, &candidate),
+            Err(ReconciliationDiscrepancy::CommandIdentityMismatch)
         );
 
         // Missing message ID
@@ -545,9 +605,51 @@ mod tests {
             recipient: candidate.recipient.clone(),
         };
         assert_eq!(
-            verify_inbound_reconciliation(&note, &token_id, amount, &empty_candidate),
+            verify_inbound_reconciliation(&note, &token_id, amount, &message_id, &empty_candidate),
             Err(ReconciliationDiscrepancy::CommandIdentityMissing)
         );
+    }
+
+    #[test]
+    fn reconciliation_requires_source_binding_and_positive_amounts() {
+        let env = Env::default();
+        let note = OutboundNote::new(evm(&env, 1), 42);
+        let token = BytesN::from_array(&env, &[0xaa; 32]);
+        let command = BytesN::from_array(&env, &[0x55; 32]);
+        let empty = BytesN::from_array(&env, &[0; 32]);
+        let candidate = CandidatePayment {
+            command_id: command.clone(),
+            token_id: token.clone(),
+            amount: 1,
+            recipient: note.recipient.clone(),
+        };
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token, 1, &empty, &candidate),
+            Err(ReconciliationDiscrepancy::CommandIdentityMissing)
+        );
+        let empty_token_candidate = CandidatePayment {
+            token_id: empty.clone(),
+            ..candidate.clone()
+        };
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &empty, 1, &command, &empty_token_candidate),
+            Err(ReconciliationDiscrepancy::InvalidTokenIdentity)
+        );
+        let zero_candidate = CandidatePayment {
+            amount: 0,
+            ..candidate
+        };
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token, 0, &command, &zero_candidate),
+            Err(ReconciliationDiscrepancy::InvalidAmount)
+        );
+        for invalid in ["", " ", "ethereum-transaction-17\n"] {
+            assert!(!valid_message_identity(&String::from_str(&env, invalid)));
+        }
+        assert!(valid_message_identity(&String::from_str(
+            &env,
+            "ethereum-transaction-17"
+        )));
     }
 
     #[test]

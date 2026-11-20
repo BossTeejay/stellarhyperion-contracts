@@ -26,13 +26,17 @@
 //!   1. Recipient decoded from source note must match the destination payment recipient.
 //!   2. Axelar token ID must match between source dispatch and destination receipt.
 //!   3. Dispatched amount and destination received amount must match exactly as integers (no float math).
-//!   4. Full command identity (e.g. Axelar `commandId` or `messageId` reference) must be present and verified.
+//!   4. Full command identity (e.g. Axelar `commandId` or `messageId` reference) must be present on both records and agree exactly.
 //! - **Unverified reporting**: Partial receipts (missing amount, recipient, or command identity) or
 //!   mismatched receipts are reported as unverified development evidence with explicit discrepancy tags.
 //! - **Raw reference retention**: Reconciliation tools must retain original raw references (transaction
 //!   hashes, block numbers, raw note payloads, token addresses) without relying on display nonces for
 //!   correctness.
 
+//! These comparisons are development evidence only: no event authentication, finality, custody or
+//! execution proof is established. Source and candidate raw references remain separate when keys
+//! overlap. See `docs/AXELAR_RECONCILIATION.md` for the report boundary and compatibility details.
+//!
 //! # In-Flight Message Transition and Delayed Rotation
 //!
 //! When updating trusted peers on a connected chain:

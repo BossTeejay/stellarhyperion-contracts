@@ -450,7 +450,7 @@ fn note_inspection_views_decode_payloads_or_fail_on_malformed() {
     // Inbound note inspection
     let strkey = String::from_str(
         &w.env,
-        "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7",
+        "GA5ZYIIVYDX5GRF2BKEQD2Y47ZCPG3HX3PUUNPVQ5ZECB57MJG7RLVNR",
     );
     let destination = hyperion_core::StrkeyDestination {
         kind: hyperion_core::AddressKind::Account,
