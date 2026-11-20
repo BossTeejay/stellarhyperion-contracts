@@ -305,66 +305,7 @@ export function wouldSlip(quote: RouteQuote, minDestinationAmount: bigint): bool
   return quote.available && quote.destinationAmount < minDestinationAmount;
 }
 
-/**
- * A sane minimum from a quote and a tolerance in basis points.
- *
- * Multi-snapshot comparison: candidate routes are priced against explicitly dated snapshots so
- * an app can show how a ranking moved over time. Snapshots must agree on network and token
- * representation before they can be compared as the same asset; a snapshot older than the staleness
- * window is reported as stale input, while a route the snapshot cannot price is reported as
- * unavailable. Ranking across equivalent snapshots is deterministic: snapshots are ordered by
- * timestamp then id, and ties resolve through `bestQuote` ordering.
- */
-
-export interface DatedSnapshot {
-  readonly id: string;
-  /** Unix seconds at which the snapshot was taken. */
-  readonly takenAt: number;
-  readonly network: string;
-  readonly tokenId: string;
-  readonly snapshot: RouterSnapshot;
-}
-
-export const SnapshotStatus = {
-  Fresh: "fresh",
-  Stale: "stale",
-  Incompatible: "incompatible",
-  Unavailable: "unavailable",
-} as const;
-
-export type SnapshotStatus = (typeof SnapshotStatus)[keyof typeof SnapshotStatus];
-
-export interface SnapshotComparison {
-  readonly snapshotId: string;
-  readonly status: SnapshotStatus;
-  readonly quote: RouteQuote | null;
-}
-
-/** Compare routes across dated snapshots, reporting stale or incompatible inputs explicitly. */
-export function compareSnapshots(
-  request: Omit<QuoteRequest, "route"> & { readonly route: RouteKind },
-  snapshots: readonly DatedSnapshot[],
-  reference: { readonly network: string; readonly tokenId: string; readonly now: number },
-  maxAgeSeconds: number,
-): readonly SnapshotComparison[] {
-  if (!Number.isSafeInteger(maxAgeSeconds) || maxAgeSeconds < 0) {
-    throw new RangeError("maxAgeSeconds must be a non-negative safe integer");
-  }
-  const ordered = [...snapshots].sort((a, b) =>
-    a.takenAt !== b.takenAt ? a.takenAt - b.takenAt : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-  );
-  return ordered.map((entry) => {
-    if (entry.network !== reference.network || entry.tokenId !== reference.tokenId) {
-      return { snapshotId: entry.id, status: SnapshotStatus.Incompatible, quote: null };
-    }
-    if (reference.now - entry.takenAt > maxAgeSeconds) {
-      return { snapshotId: entry.id, status: SnapshotStatus.Stale, quote: null };
-    }
-    const quote = planQuote(request, entry.snapshot);
-    const status = quote.available ? SnapshotStatus.Fresh : SnapshotStatus.Unavailable;
-    return { snapshotId: entry.id, status, quote };
-  });
-}
+export * from "./quotes/snapshots.js";
 
 /**
  * Rounds the floor down, so the guard is never tighter than the tolerance somebody chose. On a

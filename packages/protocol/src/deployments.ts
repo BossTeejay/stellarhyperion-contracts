@@ -335,3 +335,37 @@ export function parseDeploymentSet(value: unknown): DeploymentSet {
   }
   return { schemaVersion, generatedAt, networks };
 }
+
+export function isEvmDeployment(deployment: Deployment): deployment is EvmDeployment {
+  return deployment.family === "evm";
+}
+
+export function isStellarDeployment(deployment: Deployment): deployment is StellarDeployment {
+  return deployment.family === "stellar";
+}
+
+export function deploymentFor(set: DeploymentSet, chain: ChainKey): Deployment | null {
+  return set.networks[chain] ?? null;
+}
+
+/** The adapter for a rail on a chain, or null when that rail is not wired up there. */
+export function adapterFor(set: DeploymentSet, chain: ChainKey, route: RouteKind): string | null {
+  const deployment = set.networks[chain];
+  if (deployment === undefined) return null;
+  return deployment.adapters[route] ?? null;
+}
+
+export function tokenFor(
+  set: DeploymentSet,
+  chain: ChainKey,
+  symbol: string,
+): EvmTokenDeployment | StellarTokenDeployment | null {
+  const deployment = set.networks[chain];
+  if (deployment === undefined) return null;
+  return deployment.tokens[symbol] ?? null;
+}
+
+/** Every chain in a set that has a router, which is the list a chain picker should offer. */
+export function deployedChains(set: DeploymentSet): readonly ChainKey[] {
+  return Object.keys(set.networks).filter(isChainKey);
+}
