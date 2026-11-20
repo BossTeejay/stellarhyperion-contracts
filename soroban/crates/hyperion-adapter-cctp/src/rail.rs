@@ -10,8 +10,32 @@
 //! Transcribed from `circlefin/stellar-cctp` on branch `master`:
 //!   `packages/cctp-interfaces/src/token_messenger.rs`
 //!   `packages/cctp-interfaces/src/receiver.rs`
+//!
+//! # Provider Upgrade Compatibility & Message Boundary Tooling
+//!
+//! Provider upgrades must adhere to explicit message-boundary guarantees:
+//! - Exact positive integer amounts (`i128`) without overflow or truncation.
+//! - Authenticated rail dispatch: only the authorized router caller may invoke burn dispatch.
+//! - Replay protection: Circle nonces are verified on inbound, and source replay guards hold.
+//! - Recipient-bound claims: mint recipients and hook payloads cannot be mutated in flight.
+//! - Allowance lifecycle: TokenMessenger consumes approvals via `transfer_from`. Dispatch opens
+//!   the allowance for the exact amount and ledger sequence, then closes it to zero.
+//! - Residual approval reconciliation: the read-only allowance auditor inspects standing
+//!   approvals and produces findings (`ApprovalFinding::UnexpectedResidual`) without mutating state. Unreadable amounts report
+//!   `ApprovalFinding::Unavailable` and are never presented as clean zero.
+//!
+//! # Active Deployment Gating
+//!
+//! The active deployment is Stellar Testnet outbound ITS/CCTP. EVM contracts and other rail
+//! development paths remain explicitly gated until independently validated.
 
 use soroban_sdk::{contractclient, Address, Bytes, BytesN, Env};
+
+/// Provider interface version this adapter expects for CCTP v2 on Stellar.
+pub const CCTP_PROVIDER_INTERFACE_VERSION: u32 = 2;
+
+/// Expected allowance consumption method at the TokenMessenger boundary.
+pub const TOKEN_MESSENGER_ALLOWANCE_CONSUMPTION: &str = "transfer_from";
 
 /// The burn half of CCTP v2 on Stellar, `token-messenger-minter-v2`.
 ///

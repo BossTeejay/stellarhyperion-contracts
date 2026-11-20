@@ -24,7 +24,10 @@ pub use amount::{
     FeeSplit,
 };
 pub use axelar::{InboundNote, OutboundNote};
-pub use cctp::{BurnMessage, CctpMessage, HyperionHook};
+pub use cctp::{
+    validate_burn_boundary, ApprovalDiagnostics, ApprovalFinding, BurnMessage, CctpMessage,
+    HyperionHook, APPROVAL_DIAGNOSTICS_VERSION, DOCUMENTED_RESIDUAL_ALLOWANCE,
+};
 pub use error::HyperionError;
 pub use flow::FlowWindow;
 pub use inbound::{Origin, Recipient, Router, RouterClient};
