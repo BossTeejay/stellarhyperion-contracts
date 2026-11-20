@@ -71,10 +71,16 @@ fn the_allowance_circle_needed_is_closed_before_the_call_returns() {
 }
 
 #[test]
-fn preview_and_dispatch_share_the_burn_fee_boundary_before_approval() {
+fn preview_and_dispatch_share_burn_boundary_for_invalid_stored_fee_policy() {
     let w = World::new();
     w.fund_adapter(HUNDRED);
-    w.adapter().set_fee_policy(&10_000, &2000);
+    // Inject malformed persisted state directly: the normal policy setter rejects this value.
+    // Both the read-only validator and execution still enforce the burn boundary on reads.
+    w.env.as_contract(&w.adapter_id, || {
+        let mut cfg = crate::storage::config(&w.env).unwrap();
+        cfg.max_fee_bps = 10_000;
+        crate::storage::set_config(&w.env, &cfg);
+    });
     assert_eq!(
         w.adapter().try_check_dispatch(
             &w.router_id,
