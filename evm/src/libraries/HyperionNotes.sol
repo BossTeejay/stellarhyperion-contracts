@@ -27,8 +27,8 @@ import {StellarAddress} from "./StellarAddress.sol";
 library HyperionNotes {
     /// @dev One envelope version across both rails, so nobody has to remember which rail numbers
     /// its payloads differently from the other.
-    uint8 internal constant NOTE_VERSION_V1 = 1;
-    uint8 internal constant NOTE_VERSION = NOTE_VERSION_V1;
+    uint8 internal constant NOTE_VERSION = 1;
+    uint8 internal constant NOTE_VERSION_V1 = NOTE_VERSION;
 
     /// @dev Version, twenty byte address, eight byte nonce.
     uint256 internal constant OUTBOUND_NOTE_LEN = 29;

@@ -328,8 +328,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
     /// @notice Coherent lane readiness across router and upstream providers.
     function laneReadiness() external view returns (LaneReadiness memory) {
         bool routerPaused = false;
-        (bool routerRead, bytes memory routerResult) =
-            ROUTER.staticcall(abi.encodeWithSignature("paused()"));
+        (bool routerRead, bytes memory routerResult) = ROUTER.staticcall(abi.encodeWithSignature("paused()"));
         if (routerRead && routerResult.length == 32) {
             routerPaused = abi.decode(routerResult, (bool));
         } else {
@@ -340,8 +339,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         ProviderReadStatus transmitter = messageTransmitter == address(0)
             ? ProviderReadStatus.Unknown
             : _providerPause(messageTransmitter);
-        bool available = !routerPaused
-            && messenger == ProviderReadStatus.Usable
+        bool available = !routerPaused && messenger == ProviderReadStatus.Usable
             && transmitter == ProviderReadStatus.Usable;
 
         return LaneReadiness({
@@ -367,9 +365,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
             ? AttestationCondition.Expired
             : !recoverySupported
                 ? AttestationCondition.UnsupportedRecovery
-                : verifiedAttestation
-                    ? AttestationCondition.Verified
-                    : AttestationCondition.Unverified;
+                : verifiedAttestation ? AttestationCondition.Verified : AttestationCondition.Unverified;
         return RenewalPlan({
             version: 1,
             condition: condition,
@@ -381,8 +377,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
     }
 
     function _providerPause(address provider) private view returns (ProviderReadStatus) {
-        (bool readable, bytes memory result) =
-            provider.staticcall(abi.encodeWithSignature("paused()"));
+        (bool readable, bytes memory result) = provider.staticcall(abi.encodeWithSignature("paused()"));
         if (!readable || result.length != 32) return ProviderReadStatus.Unknown;
         return abi.decode(result, (bool)) ? ProviderReadStatus.Paused : ProviderReadStatus.Usable;
     }

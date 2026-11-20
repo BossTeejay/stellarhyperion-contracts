@@ -26,8 +26,8 @@ use crate::strkey::StrkeyDestination;
 ///
 /// Shared with [`crate::cctp::HOOK_VERSION`] on purpose. Two rails, one envelope version, so a
 /// reader never has to remember which rail numbers its payloads differently from the other.
-pub const NOTE_VERSION_V1: u8 = 1;
-pub const NOTE_VERSION: u8 = NOTE_VERSION_V1;
+pub const NOTE_VERSION: u8 = 1;
+pub const NOTE_VERSION_V1: u8 = NOTE_VERSION;
 pub const SUPPORTED_NOTE_VERSIONS: [u8; 1] = [NOTE_VERSION_V1];
 
 /// Whether this build has a decoder and encoder for a note version.

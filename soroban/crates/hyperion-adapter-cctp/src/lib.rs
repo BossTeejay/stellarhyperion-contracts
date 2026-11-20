@@ -703,11 +703,12 @@ impl CctpAdapter {
             Ok(Ok(false)) => cctp::ProviderReadStatus::Usable,
             _ => cctp::ProviderReadStatus::Unknown,
         };
-        let transmitter = match MessageTransmitterClient::new(&env, &cfg.message_transmitter).try_paused() {
-            Ok(Ok(true)) => cctp::ProviderReadStatus::Paused,
-            Ok(Ok(false)) => cctp::ProviderReadStatus::Usable,
-            _ => cctp::ProviderReadStatus::Unknown,
-        };
+        let transmitter =
+            match MessageTransmitterClient::new(&env, &cfg.message_transmitter).try_paused() {
+                Ok(Ok(true)) => cctp::ProviderReadStatus::Paused,
+                Ok(Ok(false)) => cctp::ProviderReadStatus::Usable,
+                _ => cctp::ProviderReadStatus::Unknown,
+            };
         let router_paused = match RouterClient::new(&env, &cfg.router).try_is_paused() {
             Ok(Ok(paused)) => paused,
             _ => true,
