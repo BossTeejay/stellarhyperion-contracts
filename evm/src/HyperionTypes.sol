@@ -95,7 +95,9 @@ enum ClaimSettlementStatus {
     NotFound,
     AlreadySettled,
     RecipientRestricted,
-    InsufficientRouterBalance
+    InsufficientRouterBalance,
+    TokenUnavailable,
+    InvalidTokenPayout
 }
 
 struct ClaimSettlementResult {

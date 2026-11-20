@@ -6,6 +6,7 @@ import {
     ActionKind,
     AdminAction,
     CancelReason,
+    ClaimSettlementResult,
     Destination,
     Origin,
     OutboundRequest,
@@ -13,7 +14,6 @@ import {
     QueuedAction,
     RouteKind,
     RouteQuote,
-    ClaimSettlementResult,
     TokenConfig
 } from "../HyperionTypes.sol";
 
@@ -235,7 +235,29 @@ interface IHyperionRouter {
     function settleClaim(uint64 claimId) external;
 
     /// @notice Attempt a bounded set of claims independently, returning one outcome per input.
-    function settleClaims(uint64[] calldata claimIds) external returns (ClaimSettlementResult[] memory results);
+    function settleClaims(uint64[] calldata claimIds)
+        external
+        returns (ClaimSettlementResult[] memory results);
+
+    /// @notice Dispatch with an explicit maximum native provider payment; legacy request fields remain compatible.
+    /// @param request The legacy outbound request.
+    /// @param maxProviderBudget Maximum msg.value passed to the provider, in native-currency wei.
+    /// @return nonce The outbound nonce.
+    function bridgeOutBounded(OutboundRequest calldata request, uint256 maxProviderBudget)
+        external
+        payable
+        returns (uint64 nonce);
+
+    /// @notice Return zero for passing local bounded checks, otherwise the earliest error selector.
+    /// @param request The legacy outbound request.
+    /// @param providerPayment Prospective native payment in wei.
+    /// @param maxProviderBudget Maximum native payment in wei.
+    /// @return blocker Zero or the earliest error selector; balances and provider execution still need simulation.
+    function explainOutbound(
+        OutboundRequest calldata request,
+        uint256 providerPayment,
+        uint256 maxProviderBudget
+    ) external view returns (bytes4 blocker);
 
     /// @notice What a transfer would cost and whether it would go through, without sending it.
     /// @dev Never reverts for a blocked route. It returns a reason instead, because the app has

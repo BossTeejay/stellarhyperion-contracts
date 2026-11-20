@@ -9,6 +9,7 @@ import {ReentrancyGuard} from "openzeppelin/utils/ReentrancyGuard.sol";
 
 import {
     ActionFieldNotEmpty,
+    AdapterMethodUnavailable,
     AdapterNotSet,
     AmountNotRepresentable,
     ClaimAlreadySettled,
@@ -21,6 +22,7 @@ import {
     LimitNotRaised,
     MuxedNotSupported,
     NotRailReceiver,
+    ProviderBudgetExceeded,
     RecipientNotReady,
     RefundFailed,
     ReplayedMessage,
@@ -225,7 +227,28 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         whenNotPaused
         returns (uint64 nonce)
     {
+        return _bridgeOut(request, false);
+    }
+
+    /// @inheritdoc IHyperionRouter
+    function bridgeOutBounded(OutboundRequest calldata request, uint256 maxProviderBudget)
+        external
+        payable
+        override
+        nonReentrant
+        returns (uint64 nonce)
+    {
+        if (msg.value > maxProviderBudget) revert ProviderBudgetExceeded();
+        _requireNotPaused();
+        return _bridgeOut(request, true);
+    }
+
+    function _bridgeOut(OutboundRequest calldata request, bool validateAdapter)
+        private
+        returns (uint64 nonce)
+    {
         OutboundPlan memory plan = _planOutbound(request);
+        if (validateAdapter) _checkAdapterDispatch(request, plan);
 
         IERC20 token = IERC20(request.token);
         uint256 senderBefore = token.balanceOf(msg.sender);
@@ -275,6 +298,15 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// of it. Charges the flow limit, because a check that does not write is a check two
     /// transactions in the same block both pass.
     function _planOutbound(OutboundRequest calldata request) private returns (OutboundPlan memory plan) {
+        plan = _previewOutbound(request);
+        _consumeFlow(request.token, request.route, plan.net);
+    }
+
+    function _previewOutbound(OutboundRequest calldata request)
+        private
+        view
+        returns (OutboundPlan memory plan)
+    {
         if (request.amount == 0) revert InvalidAmount();
         if (routePaused[request.route]) revert RouteIsPaused(request.route);
         if (!routeEnabled[request.route]) revert RouteDisabled();
@@ -301,7 +333,11 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         // The flow limit is charged against what crosses, not against what the sender handed
         // over. The fee never leaves this chain, so it is not cross-chain exposure and counting
         // it would tighten the limit by a number nobody picked.
-        _consumeFlow(request.token, request.route, net);
+        _flow[_flowKey(
+                request.token, request.route
+            )].consume(
+            _effectiveFlowLimit(request.token, request.route), net, uint64(block.timestamp), flowWindow
+        );
 
         address adapterAddress = _adapters[request.route];
         if (adapterAddress == address(0)) revert AdapterNotSet();
@@ -426,29 +462,84 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
                 results[i] = ClaimSettlementResult(id, ClaimSettlementStatus.NotFound);
             } else if (claim.settled) {
                 results[i] = ClaimSettlementResult(id, ClaimSettlementStatus.AlreadySettled);
-            } else if (_tryPay(claim.token, claim.recipient, claim.amount)) {
-                claim.settled = true;
-                delete claimFailureReason[id];
-                emit ClaimSettled(id, claim.recipient, claim.token, claim.amount, msg.sender);
-                results[i] = ClaimSettlementResult(id, ClaimSettlementStatus.Settled);
             } else {
-                uint8 reason = _payoutFailureReason(claim.token, claim.amount);
-                claimFailureReason[id] = reason;
-                emit ClaimPayoutFailureV1(id, reason, claim.amount, claim.recipient);
-                results[i] = ClaimSettlementResult(
-                    id,
-                    reason == 2
+                try this.settleClaimItem(id, msg.sender) {
+                    results[i] = ClaimSettlementResult(id, ClaimSettlementStatus.Settled);
+                } catch (bytes memory failure) {
+                    uint8 reason = bytes4(failure) == InvalidAmount.selector
+                        ? 4
+                        : _payoutFailureReason(claim.token, claim.amount);
+                    claimFailureReason[id] = reason;
+                    emit ClaimPayoutFailureV1(id, reason, claim.amount, claim.recipient);
+                    ClaimSettlementStatus status = reason == 2
                         ? ClaimSettlementStatus.InsufficientRouterBalance
-                        : ClaimSettlementStatus.RecipientRestricted
-                );
+                        : reason == 3
+                            ? ClaimSettlementStatus.TokenUnavailable
+                            : reason == 4
+                                ? ClaimSettlementStatus.InvalidTokenPayout
+                                : ClaimSettlementStatus.RecipientRestricted;
+                    results[i] = ClaimSettlementResult(id, status);
+                }
             }
         }
     }
 
-    /// @dev V1 codes: 1 recipient/token refused an exact payout; 2 router balance is short.
+    /// @notice Atomic item call for the guarded batch; external callers cannot enter it.
+    /// @param claimId The stored claim to settle.
+    /// @param settler The outer batch caller, retained in the legacy settlement event.
+    function settleClaimItem(uint64 claimId, address settler) external {
+        if (msg.sender != address(this)) revert Unauthorized();
+        PendingClaim storage claim = _claims[claimId];
+        if (claim.id == 0) revert ClaimNotFound();
+        if (claim.settled) revert ClaimAlreadySettled();
+        claim.settled = true;
+        if (!_tryPay(claim.token, claim.recipient, claim.amount)) revert RecipientNotReady();
+        delete claimFailureReason[claimId];
+        emit ClaimSettled(claimId, claim.recipient, claim.token, claim.amount, settler);
+    }
+
+    /// @dev V1: 1 refusal, 2 shortage, 3 unreadable token, 4 inexact token payout.
     function _payoutFailureReason(address token, uint256 amount) private view returns (uint8) {
-        if (IERC20(token).balanceOf(address(this)) < amount) return 2;
-        return 1;
+        try IERC20(token).balanceOf(address(this)) returns (uint256 balance) {
+            return balance < amount ? 2 : 1;
+        } catch {
+            return 3;
+        }
+    }
+
+    /// @inheritdoc IHyperionRouter
+    function explainOutbound(
+        OutboundRequest calldata request,
+        uint256 providerPayment,
+        uint256 maxProviderBudget
+    ) external view override returns (bytes4 blocker) {
+        try this.checkOutbound(request, providerPayment, maxProviderBudget) {
+            return bytes4(0);
+        } catch (bytes memory failure) {
+            return failure.length >= 4 ? bytes4(failure) : AdapterMethodUnavailable.selector;
+        }
+    }
+
+    /// @notice Validate bounded dispatch locally without moving funds.
+    /// @param request The legacy outbound request.
+    /// @param providerPayment Prospective native payment in wei.
+    /// @param maxProviderBudget Maximum native payment in wei.
+    function checkOutbound(
+        OutboundRequest calldata request,
+        uint256 providerPayment,
+        uint256 maxProviderBudget
+    ) external view {
+        if (providerPayment > maxProviderBudget) revert ProviderBudgetExceeded();
+        _requireNotPaused();
+        _checkAdapterDispatch(request, _previewOutbound(request));
+    }
+
+    function _checkAdapterDispatch(OutboundRequest calldata request, OutboundPlan memory plan) private view {
+        try IRailAdapter(plan.adapterAddress).checkDispatch(request.token, plan.net, request.destination) {}
+        catch (bytes memory failure) {
+            if (failure.length == 0) revert AdapterMethodUnavailable();
+            assembly ("memory-safe") { revert(add(failure, 32), mload(failure)) }
+        }
     }
 
     // -------------------------------------------------------------------------------------
