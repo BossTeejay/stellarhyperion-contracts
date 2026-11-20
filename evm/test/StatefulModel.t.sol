@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+
 import {HyperionRouter} from "../src/HyperionRouter.sol";
 import {
     ActionKind,
@@ -15,6 +17,7 @@ import {Fixture} from "./Fixture.sol";
 /// @title Independent EVM state specification and driver
 /// @notice No AmountMath, SlidingWindow, router storage or router quote calls supply expected state.
 contract RouterModelDriver is Fixture {
+    using SafeCast for uint256;
     uint256 internal constant FUNDS = 10_000_000_000_000;
     uint256 internal constant LIMIT = 1_000_000_000;
 
@@ -115,7 +118,8 @@ contract RouterModelDriver is Fixture {
         model.seen[nonce] = true;
         model.balances[2] -= amount;
         if (model.blocked[recipient]) {
-            model.claims[model.claimCount++] = ModelClaim(amount, recipient, false);
+            model.claims[model.claimCount++] =
+                ModelClaim({amount: amount, recipient: recipient, settled: false});
             model.balances[3] += amount;
             return (true, model.claimCount);
         }
@@ -126,7 +130,8 @@ contract RouterModelDriver is Fixture {
     function _predictAction(uint256 kind, uint256 actor, uint256 arg) internal returns (bool, uint256) {
         if (kind == 6) {
             if (actor != 0 || arg % 121 > 100) return (false, 0);
-            model.actions[model.actionCount++] = ModelAction(arg % 121, model.timestamp + 172_800, true);
+            model.actions[model.actionCount++] =
+                ModelAction({bps: arg % 121, eta: model.timestamp + 172_800, pending: true});
             return (true, model.actionCount);
         }
         uint256 id = arg % 20;
@@ -191,15 +196,20 @@ contract RouterModelDriver is Fixture {
             return _realDispatch(small, arg);
         }
         if (kind == 1) {
-            uint64 nonce = uint64((uint256(word) >> 10) % 16);
-            Origin memory origin = Origin("stellar", nonce, bytes32(uint256(nonce)), bytes32(uint256(7)));
+            uint64 nonce = ((uint256(word) >> 10) % 16).toUint64();
+            Origin memory origin = Origin({
+                chain: "stellar",
+                nonce: nonce,
+                messageId: bytes32(uint256(nonce)),
+                sender: bytes32(uint256(7))
+            });
             payload = abi.encodeCall(
                 HyperionRouter.bridgeIn,
                 (RouteKind.Cctp, address(usdc), arg % 1_500_000_000, _recipient(small % 2), origin)
             );
             caller = railReceiver;
         } else if (kind == 3) {
-            payload = abi.encodeCall(HyperionRouter.settleClaim, (uint64(small % 20 + 1)));
+            payload = abi.encodeCall(HyperionRouter.settleClaim, ((small % 20 + 1).toUint64()));
             caller = alice;
         } else if (kind == 4) {
             payload = abi.encodeCall(HyperionRouter.pause, ());
@@ -210,9 +220,9 @@ contract RouterModelDriver is Fixture {
             action.amount = arg % 121;
             payload = abi.encodeCall(HyperionRouter.queueAction, (action));
         } else if (kind == 7) {
-            payload = abi.encodeCall(HyperionRouter.executeAction, (queueBase + uint64(arg % 20 + 1)));
+            payload = abi.encodeCall(HyperionRouter.executeAction, (queueBase + (arg % 20 + 1).toUint64()));
         } else {
-            payload = abi.encodeCall(HyperionRouter.cancelAction, (queueBase + uint64(arg % 20 + 1)));
+            payload = abi.encodeCall(HyperionRouter.cancelAction, (queueBase + (arg % 20 + 1).toUint64()));
         }
         vm.prank(caller);
         bytes memory data;
@@ -281,7 +291,7 @@ contract RouterModelDriver is Fixture {
     function _liabilities() internal view returns (uint256[2] memory sums) {
         for (uint256 i; i < model.claimCount; ++i) {
             ModelClaim storage expected = model.claims[i];
-            PendingClaim memory actual = router.pendingClaim(uint64(i + 1));
+            PendingClaim memory actual = router.pendingClaim((i + 1).toUint64());
             assertEq(actual.recipient, _recipient(expected.recipient), "fixed recipient");
             assertEq(actual.amount, expected.amount, "claim amount");
             assertEq(actual.settled, expected.settled, "settled");
@@ -333,7 +343,7 @@ contract StatefulRouterModelTest is RouterModelDriver {
         vm.readLine(path); // header
         for (uint256 i; i < 64; ++i) {
             uint256[20] memory row = _parse(vm.readLine(path));
-            (bool success, uint256 result) = applyWord(uint64(row[0]));
+            (bool success, uint256 result) = applyWord(SafeCast.toUint64(row[0]));
             assertEq(success, row[1] != 0, "Rust model outcome");
             assertEq(result, row[2], "Rust model result");
             for (uint256 j; j < 6; ++j) {
