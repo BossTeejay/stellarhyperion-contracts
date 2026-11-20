@@ -96,12 +96,9 @@ export function quoteBatch(
         route: ctx.route,
         available: false,
         reason: QuoteBlocker.None,
-        requestedAmount: tierAmount,
         grossAmount: tierAmount,
         fee: 0n,
         netAmount: 0n,
-        retainedDust: 0n,
-        actualDebit: 0n,
         destinationAmount: 0n,
         flowAvailable: ctx.headroom,
         waitsOnAttestation: ctx.waitsOnAttestation,
@@ -139,8 +136,6 @@ export function quoteBatch(
       }
 
       // Convert to destination decimals
-      const retainedDust = netRaw - net;
-      const actualDebit = fee + net;
       const { converted } = convertDecimals(net, snapshot.tokenDecimals, destinationDecimals);
 
       return {
@@ -149,9 +144,7 @@ export function quoteBatch(
         reason: QuoteBlocker.None,
         fee,
         netAmount: net,
-        retainedDust,
-        actualDebit,
-        grossAmount: actualDebit,
+        grossAmount: fee + net,
         destinationAmount: converted,
       };
     });

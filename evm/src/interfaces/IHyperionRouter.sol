@@ -13,6 +13,7 @@ import {
     QueuedAction,
     RouteKind,
     RouteQuote,
+    RouteQuoteV2,
     TokenConfig
 } from "../HyperionTypes.sol";
 
@@ -325,4 +326,18 @@ interface IHyperionRouter {
     /// @param route The rail to check.
     /// @return True if the rail is paused.
     function routePaused(RouteKind route) external view returns (bool);
+    /// @notice Versioned debit breakdown preserving the legacy quote tuple.
+    /// @param route The rail being priced.
+    /// @param token The registered source asset.
+    /// @param amount Requested source units before fees and flooring.
+    /// @param destination Recipient and destination chain.
+    /// @param destinationDecimals Decimal precision of the destination asset.
+    /// @return The legacy quote with an explicit prospective debit breakdown.
+    function quoteV2(
+        RouteKind route,
+        address token,
+        uint256 amount,
+        Destination calldata destination,
+        uint8 destinationDecimals
+    ) external view returns (RouteQuoteV2 memory);
 }

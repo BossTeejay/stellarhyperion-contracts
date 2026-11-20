@@ -25,11 +25,11 @@ pub use adapter::{PaidRailAdapter, PaidRailAdapterClient, RailAdapter, RailAdapt
 pub use storage::DataKey;
 pub use timelock::{GRACE_PERIOD, MAX_TIMELOCK_DELAY, MIN_TIMELOCK_DELAY};
 pub use types::{
-    ActionAuditStatus, AdminAction, CancelReason, ClaimLiability, ClaimProvenance, Config,
-    Destination, InboundRecord, MigrationStatus, Origin, OutboundRequest, PendingClaim,
-    QueuedAction, Recipient, RecipientEligibility, RouteConfig, RouteQuote, TokenConfig,
-    TransferRecord, CURRENT_SCHEMA_VERSION, LEGACY_SCHEMA_VERSION, MAX_MAINTENANCE_BATCH,
-    MAX_REASON_LEN,
+    ActionAuditStatus, AdminAction, CancelReason, ClaimHistory, ClaimLiability, ClaimProvenance,
+    Config, DebitBreakdown, Destination, InboundRecord, MigrationStatus, Origin, OutboundRequest,
+    PendingClaim, QueuedAction, Recipient, RecipientEligibility, RouteConfig, RouteQuote,
+    RouteQuoteV2, SourceDebit, TokenConfig, TransferRecord, CURRENT_SCHEMA_VERSION,
+    LEGACY_SCHEMA_VERSION, MAX_MAINTENANCE_BATCH, MAX_REASON_LEN,
 };
 
 use hyperion_core::{
@@ -39,7 +39,7 @@ use hyperion_core::{
 };
 use soroban_sdk::{contract, contractimpl, token, vec, Address, BytesN, Env, String, Vec};
 
-/// Every rail Hyperion knows how to speak, in the order the app shows them.
+// Every rail Hyperion knows how to speak, in the order the app shows them.
 const ALL_ROUTES: [RouteKind; 4] = [
     RouteKind::Cctp,
     RouteKind::AxelarIts,
@@ -52,7 +52,7 @@ pub struct HyperionRouter;
 
 #[contractimpl]
 impl HyperionRouter {
-    /// Stand the router up. Callable exactly once.
+    // Stand the router up. Callable exactly once.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -95,7 +95,7 @@ impl HyperionRouter {
     // Outbound
     // ---------------------------------------------------------------------------------------
 
-    /// Send `amount` of `token` to an EVM chain over `route`.
+    // Send `amount` of `token` to an EVM chain over `route`.
     // Send `amount` of `token` to an EVM chain over `route`.
     //
     // `destination_decimals` is what the asset uses on the far side, six for USDC on every
@@ -214,7 +214,7 @@ impl HyperionRouter {
         Ok(claim_id)
     }
 
-    /// Hand a parked claim to the recipient it was always going to.
+    // Hand a parked claim to the recipient it was always going to.
     // Hand a parked claim to the recipient it was always going to.
     //
     // Permissionless on purpose. The funds can only move to the address recorded at delivery
@@ -223,6 +223,9 @@ impl HyperionRouter {
     pub fn settle_claim(env: Env, settler: Address, id: u64) -> Result<(), HyperionError> {
         settler.require_auth();
         storage::assert_liability_migration_not_running(&env)?;
+        if storage::is_claim_archived(&env, id) {
+            return Err(HyperionError::ClaimAlreadySettled);
+        }
         let mut claim = storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)?;
         if claim.settled {
             return Err(HyperionError::ClaimAlreadySettled);
@@ -237,6 +240,7 @@ impl HyperionRouter {
         }
         claim.settled = true;
         storage::set_claim(&env, &claim);
+        storage::set_claim_settled_at(&env, id, env.ledger().timestamp());
         events::claim_settled(&env, &claim, &settler);
         Ok(())
     }
@@ -245,7 +249,7 @@ impl HyperionRouter {
     // Quoting
     // ---------------------------------------------------------------------------------------
 
-    /// Price `amount` across every rail at once, losers included.
+    // Price `amount` across every rail at once, losers included.
     // Price `amount` across every rail at once, losers included.
     //
     // The app draws all four and says why the three it did not pick lost, so this returns a
@@ -286,11 +290,52 @@ impl HyperionRouter {
         out
     }
 
+    // Versioned quote wrapper; legacy quote_routes retains its exact schema.
+    pub fn quote_routes_v2(
+        env: Env,
+        token: Address,
+        amount: i128,
+        destination_decimals: u32,
+    ) -> Vec<RouteQuoteV2> {
+        let breakdown = storage::config(&env)
+            .ok()
+            .and_then(|cfg| {
+                storage::token_config_opt(&env, &token).and_then(|t| {
+                    hyperion_core::amount::compute_quote_breakdown(
+                        amount,
+                        cfg.fee_bps,
+                        t.decimals,
+                        destination_decimals,
+                    )
+                    .ok()
+                })
+            })
+            .map(|b| {
+                DebitBreakdown::Known(SourceDebit {
+                    requested_amount: b.requested_amount,
+                    fee: b.fee,
+                    net_amount: b.net_amount,
+                    retained_dust: b.retained_dust,
+                    actual_debit: b.actual_debit,
+                    destination_amount: b.destination_amount,
+                })
+            })
+            .unwrap_or(DebitBreakdown::Unavailable);
+        let mut out = vec![&env];
+        for quote in Self::quote_routes(env.clone(), token, amount, destination_decimals) {
+            out.push_back(RouteQuoteV2 {
+                quote,
+                breakdown: breakdown.clone(),
+            });
+        }
+        out
+    }
+
     // ---------------------------------------------------------------------------------------
     // Circuit breakers
     // ---------------------------------------------------------------------------------------
 
-    /// Stop new departures. Either key can do it, immediately, with no delay to sit through.
+    // Stop new departures. Either key can do it, immediately, with no delay to sit through.
     pub fn pause(env: Env, caller: Address) -> Result<(), HyperionError> {
         caller.require_auth();
         let mut cfg = storage::config(&env)?;
@@ -303,7 +348,7 @@ impl HyperionRouter {
         Ok(())
     }
 
-    /// Start again. Admin only, because deciding an incident is over is not a safety action.
+    // Start again. Admin only, because deciding an incident is over is not a safety action.
     pub fn unpause(env: Env, caller: Address) -> Result<(), HyperionError> {
         caller.require_auth();
         let mut cfg = storage::config(&env)?;
@@ -316,7 +361,7 @@ impl HyperionRouter {
         Ok(())
     }
 
-    /// Turn a rail off. No timelock: closing a lane only ever narrows what the bridge will do.
+    // Turn a rail off. No timelock: closing a lane only ever narrows what the bridge will do.
     pub fn disable_route(env: Env, caller: Address, route: RouteKind) -> Result<(), HyperionError> {
         caller.require_auth();
         let cfg = storage::config(&env)?;
@@ -328,7 +373,7 @@ impl HyperionRouter {
         Ok(())
     }
 
-    /// Stop a token dead without touching any other token.
+    // Stop a token dead without touching any other token.
     // Stop a token dead without touching any other token. No timelock, same reasoning as
     // pausing: if an asset turns out to be doing something it should not, waiting out a delay
     // to stop routing it is not a policy, it is a countdown.
@@ -348,7 +393,7 @@ impl HyperionRouter {
         Ok(())
     }
 
-    /// Tighten a flow limit immediately.
+    // Tighten a flow limit immediately.
     // Tighten a flow limit immediately. Raising one goes through the timelock; lowering one
     // does not, for the same reason pausing does not.
     pub fn lower_token_flow_limit(
@@ -406,7 +451,7 @@ impl HyperionRouter {
         Ok(())
     }
 
-    /// Throw away a queued change.
+    // Throw away a queued change.
     // Throw away a queued change. The guardian can do this too, which is the point: noticing
     // something wrong in the queue should not require the key that put it there.
     pub fn cancel_action(env: Env, caller: Address, id: u64) -> Result<(), HyperionError> {
@@ -419,7 +464,7 @@ impl HyperionRouter {
         )
     }
 
-    /// Cancel a queued change with a structured reason code and bounded audit note (#44).
+    // Cancel a queued change with a structured reason code and bounded audit note (#44).
     pub fn cancel_action_with_reason(
         env: Env,
         caller: Address,
@@ -440,7 +485,7 @@ impl HyperionRouter {
     // Keeper, restoration planner, and schema migration
     // ---------------------------------------------------------------------------------------
 
-    /// Push archival dates back on entries nobody has touched lately.
+    // Push archival dates back on entries nobody has touched lately.
     // Push archival dates back on entries nobody has touched lately.
     //
     // Soroban storage expires, which is a genuine difference from every EVM chain on the other
@@ -480,13 +525,14 @@ impl HyperionRouter {
         for id in claims.iter() {
             let _ = storage::claim(&env, id);
             storage::touch_persistent_key(&env, &DataKey::ClaimProvenance(id));
+            storage::touch_persistent_key(&env, &DataKey::ClaimSettledAt(id));
         }
         for nonce in transfers.iter() {
             let _ = storage::transfer(&env, nonce);
         }
     }
 
-    /// Bounded storage schema migration entrypoint, callable only by the reviewed upgrade authority (`cfg.admin`) (#46).
+    // Bounded storage schema migration entrypoint, callable only by the reviewed upgrade authority (`cfg.admin`) (#46).
     // Bounded storage schema migration entrypoint, callable only by the reviewed upgrade
     // authority (`cfg.admin`) (#46).
     pub fn migrate_storage(
@@ -535,6 +581,11 @@ impl HyperionRouter {
         }
         while remaining > 0 && status.migrated_claims < status.total_claims {
             let id = status.migrated_claims + 1;
+            if storage::is_claim_archived(&env, id) {
+                status.migrated_claims = id;
+                remaining -= 1;
+                continue;
+            }
             let record = storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)?;
             if target_version == CURRENT_SCHEMA_VERSION
                 && !storage::liability_tracking(&env)
@@ -563,7 +614,7 @@ impl HyperionRouter {
         Ok(status)
     }
 
-    /// Extend the long retention policy for at most 32 exact, route-scoped replay keys.
+    // Extend the long retention policy for at most 32 exact, route-scoped replay keys.
     pub fn keep_alive_replays(env: Env, replays: Vec<(RouteKind, BytesN<32>)>) {
         if replays.len() > MAX_MAINTENANCE_BATCH {
             soroban_sdk::panic_with_error!(&env, HyperionError::InvalidLimit);
@@ -580,7 +631,7 @@ impl HyperionRouter {
     // Views
     // ---------------------------------------------------------------------------------------
 
-    /// Where the protocol's cut goes.
+    // Where the protocol's cut goes.
     // Where the protocol's cut goes.
     //
     // Broken out of `get_config` because the rail adapters read it on their sweep path and
@@ -602,14 +653,57 @@ impl HyperionRouter {
         storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)
     }
 
-    /// Full source provenance for claims created after this view was introduced.
+    // Historical lookup: archived is permanent; unavailable requires RPC restoration.
+    pub fn claim_history(env: Env, id: u64) -> ClaimHistory {
+        if storage::is_claim_archived(&env, id) {
+            ClaimHistory::Archived(id)
+        } else if storage::claim(&env, id).is_some() {
+            ClaimHistory::Live(id)
+        } else {
+            ClaimHistory::Unavailable
+        }
+    }
+
+    // Ascending cursor, at most 32 IDs; only timestamped settled records are removed.
+    pub fn archive_settled_claims(env: Env, after: u64, limit: u32) -> Result<u64, HyperionError> {
+        if limit == 0 || limit > MAX_MAINTENANCE_BATCH {
+            return Err(HyperionError::InvalidLimit);
+        }
+        storage::assert_liability_migration_not_running(&env)?;
+        let end = after
+            .saturating_add(limit as u64)
+            .min(storage::claim_count(&env));
+        let now = env.ledger().timestamp();
+        for id in after.saturating_add(1)..=end {
+            if storage::is_claim_archived(&env, id) {
+                continue;
+            }
+            let Some(claim) = storage::claim(&env, id) else {
+                continue;
+            };
+            if !claim.settled {
+                continue;
+            }
+            let Some(at) = storage::claim_settled_at(&env, id) else {
+                continue;
+            };
+            if now.saturating_sub(at) < storage::MIN_CLAIM_RETENTION_SECONDS {
+                continue;
+            }
+            events::claim_archived(&env, &claim, at, now);
+            storage::archive_claim(&env, id);
+        }
+        Ok(end.max(after))
+    }
+
+    // Full source provenance for claims created after this view was introduced.
     // Full source provenance for claims created after this view was introduced. `None` means
     // the claim predates the provenance sidecar; its legacy nonce and route remain available.
     pub fn get_claim_provenance(env: Env, id: u64) -> Option<ClaimProvenance> {
         storage::claim_provenance(&env, id)
     }
 
-    /// Sum unsettled liabilities for a token and compare them with router custody.
+    // Sum unsettled liabilities for a token and compare them with router custody.
     // Sum unsettled liabilities for a token and compare them with router custody. A missing
     // record or failed balance read makes the result explicitly unknown.
     pub fn claim_liability(env: Env, token: Address) -> ClaimLiability {
@@ -634,7 +728,7 @@ impl HyperionRouter {
         }
     }
 
-    /// Best-effort payout preview. This is diagnostic only and never affects settlement.
+    // Best-effort payout preview. This is diagnostic only and never affects settlement.
     pub fn preview_claim_recipient(
         env: Env,
         id: u64,
@@ -734,7 +828,7 @@ impl HyperionRouter {
         storage::queue_count(&env)
     }
 
-    /// Check token metadata; success classifies transfer behavior as unverified.
+    // Check token metadata; success classifies transfer behavior as unverified.
     // Check token metadata; success classifies transfer behavior as unverified.
     // Runtime balance invariants and operator token review are still required.
     //
@@ -749,7 +843,7 @@ impl HyperionRouter {
     }
 }
 
-/// A quote for a route that cannot be used, carrying the reason it cannot.
+// A quote for a route that cannot be used, carrying the reason it cannot.
 fn unavailable(route: RouteKind, amount: i128, reason: HyperionError) -> RouteQuote {
     RouteQuote {
         route,
@@ -992,7 +1086,7 @@ fn bridge_out_inner(
     Ok(nonce)
 }
 
-/// Recipient refusals are safe to park only when no token balance moved.
+// Recipient refusals are safe to park only when no token balance moved.
 fn transfer_exact(
     client: &token::Client,
     from: &Address,
@@ -1019,7 +1113,7 @@ fn transfer_exact(
     Ok(delivered)
 }
 
-/// A built-in SAC reports contract error 13 for an absent account trustline.
+// A built-in SAC reports contract error 13 for an absent account trustline.
 // A built-in SAC reports contract error 13 for an absent account trustline.
 // Its balance is zero; arbitrary token balance errors are not trusted as zero.
 fn payout_balance(client: &token::Client, to: &Address) -> Result<i128, HyperionError> {

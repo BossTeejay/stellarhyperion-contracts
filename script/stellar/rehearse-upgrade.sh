@@ -1,38 +1,28 @@
 #!/usr/bin/env bash
-#
-# Local upgrade rehearsal fixture runner for HyperionRouter (#53).
-#
-# Snapshots router storage state, simulates a WASM upgrade over persisted ledger entries,
-# and verifies every critical record through public contract methods. Also runs the
-# storage cost projection tool against a representative fixture footprint.
-#
-# Usage: script/stellar/rehearse-upgrade.sh [--build-wasm]
+# Real released-WASM -> candidate-WASM timelock upgrade, with executable rollback fixture.
+# Usage: script/stellar/rehearse-upgrade.sh --old-wasm /path/released-router.wasm
 source "$(dirname "$0")/lib.sh"
-
-BUILD_WASM=0
-for arg in "$@"; do
-  case "$arg" in
-    --build-wasm) BUILD_WASM=1 ;;
-    *) die "unknown option: $arg" ;;
+OLD_WASM=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --old-wasm) [ "$#" -ge 2 ] || die "missing --old-wasm value"; OLD_WASM="$2"; shift 2 ;;
+    *) die "unknown option: $1" ;;
   esac
 done
-
-if [ "$BUILD_WASM" -eq 1 ]; then
-  note "building router WASM"
-  "$CONTRACTS_ROOT/script/stellar/build.sh"
-fi
-
-note "running Soroban upgrade rehearsal snapshot & comparison fixture"
-cargo test --manifest-path "$SOROBAN_DIR/Cargo.toml" \
-  -p hyperion-router \
-  storage_maintenance::upgrade_rehearsal_snapshots_and_compares_critical_records_via_public_methods
-
-note "running storage cost projection against rehearsal fixture"
+[ -f "$OLD_WASM" ] || die "supply the released router artifact with --old-wasm"
+OLD_WASM="$(realpath "$OLD_WASM")"
+# Always build the candidate from current source and apply the unchanged deployment size gate.
+env -u CARGO_TARGET_DIR "$CONTRACTS_ROOT/script/stellar/build.sh"
+note "running real executable upgrade and missing-hash rollback fixtures"
+(
+  # Select the workspace's declared toolchain, even when invoked from the repository root.
+  cd "$SOROBAN_DIR"
+  HYPERION_UPGRADE_OLD_WASM="$OLD_WASM" \
+  HYPERION_UPGRADE_NEW_WASM="$WASM_DIR/hyperion_router.wasm" \
+  cargo test --locked -p hyperion-router \
+    storage_maintenance::actual_wasm_upgrade_preserves_state_and_failure_retains_executable -- --ignored --nocapture
+)
+note "read-only storage cost fixture with real XDR codec"
 node "$CONTRACTS_ROOT/script/stellar/storage-cost.mjs" \
-  --out-nonce 100 \
-  --claim-count 10 \
-  --archived-claims 4 \
-  --queue-count 2 \
-  --processed-count 10
-
-printf '\n\033[32mUpgrade rehearsal and storage projection passed.\033[0m\n'
+  --record "$CONTRACTS_ROOT/script/stellar/fixtures/storage-cost-rpc-v2.json"
+printf '\nUpgrade rehearsal and exact recorded projection passed.\n'

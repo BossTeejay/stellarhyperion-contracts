@@ -6,7 +6,7 @@ use crate::types::{
     PendingClaim, QueuedAction, TokenConfig, TransferRecord,
 };
 
-/// Every state change the router makes is announced here.
+// Every state change the router makes is announced here.
 // Every state change the router makes is announced here.
 //
 // The indexer reads these to answer "where is my transfer", and the monitoring job watches the
@@ -35,7 +35,7 @@ pub struct BridgeIn {
     pub inbound: InboundRecord,
 }
 
-/// An inbound delivery the recipient could not accept yet. Almost always a missing trustline.
+// An inbound delivery the recipient could not accept yet. Almost always a missing trustline.
 #[contractevent(topics = ["hyperion", "park"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimParked {
@@ -67,6 +67,8 @@ pub struct ClaimArchived {
     pub claim_id: u64,
     pub amount: i128,
     pub source_nonce: u64,
+    pub claim: PendingClaim,
+    pub provenance: Option<crate::types::ClaimProvenance>,
     pub settled_at: u64,
     pub archived_at: u64,
 }
@@ -104,7 +106,7 @@ pub struct ActionCancelled {
     pub id: u64,
 }
 
-/// Stable action lifecycle audit event emitted on queue, execution, and cancellation (#44).
+// Stable action lifecycle audit event emitted on queue, execution, and cancellation (#44).
 #[contractevent(topics = ["hyperion", "audit"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionAuditRecorded {
@@ -112,13 +114,13 @@ pub struct ActionAuditRecorded {
     pub id: u64,
     pub version: u32,
     pub status: ActionAuditStatus,
-    /// Actor for this lifecycle transition; legacy queuing authors are never invented.
+    // Actor for this lifecycle transition; legacy queuing authors are never invented.
     pub actor: Address,
     pub reason: CancelReason,
     pub note: soroban_sdk::String,
 }
 
-/// Emitted when bounded storage migration advances or completes (#46).
+// Emitted when bounded storage migration advances or completes (#46).
 #[contractevent(topics = ["hyperion", "migrated"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageMigrated {
@@ -150,7 +152,7 @@ pub struct RouteConfigured {
     pub enabled: bool,
 }
 
-/// Emitted when a limit is tightened without waiting out the timelock, which is allowed precisely because it only ever narrows what the bridge will do.
+// Emitted when a limit is tightened without waiting out the timelock, which is allowed precisely because it only ever narrows what the bridge will do.
 // Emitted when a limit is tightened without waiting out the timelock, which is allowed
 // precisely because it only ever narrows what the bridge will do.
 #[contractevent(topics = ["hyperion", "flow"])]
@@ -208,6 +210,8 @@ pub fn claim_archived(env: &Env, claim: &PendingClaim, settled_at: u64, archived
         claim_id: claim.id,
         amount: claim.amount,
         source_nonce: claim.source_nonce,
+        claim: claim.clone(),
+        provenance: crate::storage::claim_provenance(env, claim.id),
         settled_at,
         archived_at,
     }
@@ -301,7 +305,7 @@ pub fn flow_limit_lowered(env: &Env, token: &Address, limit: i128, by: &Address)
     .publish(env);
 }
 
-/// Durable journal identity for each successfully processed message; consumers archive all bytes.
+// Durable journal identity for each successfully processed message; consumers archive all bytes.
 #[contractevent(topics = ["hyperion", "replay"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplayRecorded {

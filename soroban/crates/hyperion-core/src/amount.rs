@@ -166,9 +166,6 @@ pub fn compute_quote_breakdown(
 ) -> Result<QuoteBreakdown, HyperionError> {
     let split = apply_fee(requested_amount, fee_bps)?;
     let net_amount = floor_to_representable(split.net, source_decimals, destination_decimals)?;
-    if net_amount <= 0 {
-        return Err(HyperionError::AmountNotRepresentable);
-    }
     let retained_dust = split.net - net_amount;
     let actual_debit = split.fee + net_amount;
     let destination_amount =

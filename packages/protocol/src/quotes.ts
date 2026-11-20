@@ -150,13 +150,10 @@ export interface RouteQuote {
   readonly route: RouteKind;
   readonly available: boolean;
   readonly reason: QuoteBlocker;
-  readonly requestedAmount: bigint;
   /** Fee plus net, which is what leaves the sender's wallet. */
   readonly grossAmount: bigint;
   readonly fee: bigint;
   readonly netAmount: bigint;
-  readonly retainedDust: bigint;
-  readonly actualDebit: bigint;
   /** What lands, in the destination's own decimal base. */
   readonly destinationAmount: bigint;
   readonly flowAvailable: bigint;
@@ -210,12 +207,9 @@ export function planQuote(request: QuoteRequest, snapshot: RouterSnapshot): Rout
     route,
     available: false,
     reason: QuoteBlocker.None,
-    requestedAmount: amount,
     grossAmount: amount,
     fee: 0n,
     netAmount: 0n,
-    retainedDust: 0n,
-    actualDebit: 0n,
     destinationAmount: 0n,
     flowAvailable: 0n,
     waitsOnAttestation: waitsOnAttestation(route),
@@ -254,8 +248,6 @@ export function planQuote(request: QuoteRequest, snapshot: RouterSnapshot): Rout
   const withFlow: RouteQuote = { ...base, flowAvailable: headroom };
   if (net > headroom) return blocked(withFlow, QuoteBlocker.FlowLimitExceeded);
 
-  const retainedDust = netRaw - net;
-  const actualDebit = fee + net;
   const { converted } = convertDecimals(net, snapshot.tokenDecimals, destinationDecimals);
   return {
     ...withFlow,
@@ -263,9 +255,7 @@ export function planQuote(request: QuoteRequest, snapshot: RouterSnapshot): Rout
     reason: QuoteBlocker.None,
     fee,
     netAmount: net,
-    retainedDust,
-    actualDebit,
-    grossAmount: actualDebit,
+    grossAmount: fee + net,
     destinationAmount: converted,
   };
 }
@@ -338,3 +328,49 @@ export const quoteAllRails = planQuotes;
 
 export * from "./quotes/types.js";
 export * from "./quotes/ladder.js";
+
+/** Additive V2 wrapper. `quote`, planQuote and quoteBatch retain their legacy schema. */
+export interface RouteQuoteV2 {
+  readonly quote: RouteQuote;
+  readonly requestedAmount: bigint;
+  readonly fee: bigint;
+  readonly netAmount: bigint;
+  readonly retainedDust: bigint;
+  readonly actualDebit: bigint;
+  readonly breakdownKnown: boolean;
+}
+
+export function planQuoteV2(request: QuoteRequest, snapshot: RouterSnapshot): RouteQuoteV2 {
+  const quote = planQuote(request, snapshot);
+  const base = {
+    quote,
+    requestedAmount: request.amount,
+    fee: 0n,
+    netAmount: 0n,
+    retainedDust: 0n,
+    actualDebit: 0n,
+    breakdownKnown: false,
+  };
+  if (
+    !snapshot.tokenRegistered ||
+    request.amount <= 0n ||
+    request.amount > MAX_QUOTE_AMOUNT ||
+    snapshot.tokenDecimals > MAX_DECIMALS ||
+    request.destinationDecimals > MAX_DECIMALS
+  )
+    return base;
+  const fee = (request.amount * BigInt(snapshot.feeBps)) / BPS_DENOMINATOR;
+  const netAmount = floorToRepresentable(
+    request.amount - fee,
+    snapshot.tokenDecimals,
+    request.destinationDecimals,
+  );
+  return {
+    ...base,
+    fee,
+    netAmount,
+    retainedDust: request.amount - fee - netAmount,
+    actualDebit: fee + netAmount,
+    breakdownKnown: true,
+  };
+}

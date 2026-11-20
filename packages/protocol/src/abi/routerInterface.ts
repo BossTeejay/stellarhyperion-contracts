@@ -526,11 +526,6 @@ export const hyperionRouterInterfaceAbi = [
             "internalType": "enum QuoteBlocker"
           },
           {
-            "name": "requestedAmount",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
             "name": "grossAmount",
             "type": "uint256",
             "internalType": "uint256"
@@ -542,16 +537,6 @@ export const hyperionRouterInterfaceAbi = [
           },
           {
             "name": "netAmount",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "retainedDust",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "actualDebit",
             "type": "uint256",
             "internalType": "uint256"
           },
@@ -639,12 +624,152 @@ export const hyperionRouterInterfaceAbi = [
             "internalType": "enum QuoteBlocker"
           },
           {
-            "name": "requestedAmount",
+            "name": "grossAmount",
             "type": "uint256",
             "internalType": "uint256"
           },
           {
-            "name": "grossAmount",
+            "name": "fee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "netAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "destinationAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "flowAvailable",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "waitsOnAttestation",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "isCanonical",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "quoteV2",
+    "inputs": [
+      {
+        "name": "route",
+        "type": "uint8",
+        "internalType": "enum RouteKind"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "destination",
+        "type": "tuple",
+        "internalType": "struct Destination",
+        "components": [
+          {
+            "name": "chain",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "strkey",
+            "type": "string",
+            "internalType": "string"
+          }
+        ]
+      },
+      {
+        "name": "destinationDecimals",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct RouteQuoteV2",
+        "components": [
+          {
+            "name": "quote",
+            "type": "tuple",
+            "internalType": "struct RouteQuote",
+            "components": [
+              {
+                "name": "route",
+                "type": "uint8",
+                "internalType": "enum RouteKind"
+              },
+              {
+                "name": "available",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "reason",
+                "type": "uint8",
+                "internalType": "enum QuoteBlocker"
+              },
+              {
+                "name": "grossAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "fee",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "netAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "destinationAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "flowAvailable",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "waitsOnAttestation",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
+                "name": "isCanonical",
+                "type": "bool",
+                "internalType": "bool"
+              }
+            ]
+          },
+          {
+            "name": "requestedAmount",
             "type": "uint256",
             "internalType": "uint256"
           },
@@ -669,22 +794,7 @@ export const hyperionRouterInterfaceAbi = [
             "internalType": "uint256"
           },
           {
-            "name": "destinationAmount",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "flowAvailable",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "waitsOnAttestation",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "isCanonical",
+            "name": "breakdownKnown",
             "type": "bool",
             "internalType": "bool"
           }
