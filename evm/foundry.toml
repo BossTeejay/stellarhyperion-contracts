@@ -33,8 +33,11 @@ deny = "warnings"
 
 gas_reports = ["HyperionRouter", "CctpAdapter", "AxelarItsAdapter"]
 
-# The deploy scripts write an address book. Nothing else on disk is reachable.
-fs_permissions = [{access = "read-write", path = "./deployments"}]
+# Deploy scripts may write only their address book. Tests may read the shared reference corpus.
+fs_permissions = [
+  {access = "read-write", path = "./deployments"},
+  {access = "read", path = "../testdata"},
+]
 
 [lint]
 # Hand written assembly instead of `keccak256(abi.encode(...))` saves roughly a hundred gas on a
@@ -44,7 +47,7 @@ exclude_lints = [
   "asm-keccak256",
   # Reading and writing the deployment record is what a deploy script is for. The lint is right
   # that `readFile` and `writeJson` reach outside the EVM, and `fs_permissions` above is the
-  # answer to that: the only path either one can touch is ./deployments. Silencing it per line
+  # answer to that: writes stay in ./deployments; the shared test corpus is read-only. Silencing it per line
   # would mean a disable comment on every call in three scripts, which trains people to add the
   # comment rather than to think about the access.
   "unsafe-cheatcode",

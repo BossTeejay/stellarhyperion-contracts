@@ -45,6 +45,32 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "applyPeerRotation",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "cancelPeerRotation",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "chainForAxelarName",
     "inputs": [
       {
@@ -60,6 +86,41 @@ export const axelarItsAdapterAbi = [
         "internalType": "string"
       }
     ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "checkDispatch",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "destination",
+        "type": "tuple",
+        "internalType": "struct Destination",
+        "components": [
+          {
+            "name": "chain",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "strkey",
+            "type": "string",
+            "internalType": "string"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
     "stateMutability": "view"
   },
   {
@@ -216,6 +277,19 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "MIN_ROTATION_DELAY",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "owner",
     "inputs": [],
     "outputs": [
@@ -283,6 +357,65 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "pendingRotationOf",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct AxelarItsAdapter.PeerRotation",
+        "components": [
+          {
+            "name": "newPeer",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "eta",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "queuedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "proposePeerRotation",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "newPeer",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "delay",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "quoteFee",
     "inputs": [
       {
@@ -304,6 +437,19 @@ export const axelarItsAdapterAbi = [
       }
     ],
     "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "removePeer",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -574,6 +720,100 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "event",
+    "name": "PeerRemoved",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "indexed": true,
+        "internalType": "string"
+      },
+      {
+        "name": "axelarChain",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PeerRotationApplied",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "indexed": true,
+        "internalType": "string"
+      },
+      {
+        "name": "oldPeer",
+        "type": "bytes",
+        "indexed": false,
+        "internalType": "bytes"
+      },
+      {
+        "name": "newPeer",
+        "type": "bytes",
+        "indexed": false,
+        "internalType": "bytes"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PeerRotationCancelled",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "indexed": true,
+        "internalType": "string"
+      },
+      {
+        "name": "cancelledPeer",
+        "type": "bytes",
+        "indexed": false,
+        "internalType": "bytes"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PeerRotationQueued",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "indexed": true,
+        "internalType": "string"
+      },
+      {
+        "name": "currentPeer",
+        "type": "bytes",
+        "indexed": false,
+        "internalType": "bytes"
+      },
+      {
+        "name": "newPeer",
+        "type": "bytes",
+        "indexed": false,
+        "internalType": "bytes"
+      },
+      {
+        "name": "eta",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "TokenLinked",
     "inputs": [
       {
@@ -641,6 +881,11 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "DecimalOverflow",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "InvalidAmount",
     "inputs": []
   },
@@ -694,6 +939,27 @@ export const axelarItsAdapterAbi = [
         "name": "token",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "TimelockDelayOutOfRange",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TimelockNotQueued",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TimelockNotReady",
+    "inputs": [
+      {
+        "name": "eta",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },

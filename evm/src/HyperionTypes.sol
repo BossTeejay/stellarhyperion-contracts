@@ -89,6 +89,22 @@ struct PendingClaim {
     bool settled;
 }
 
+/// @dev Versioned operational result for one requested claim settlement.
+enum ClaimSettlementStatus {
+    Settled,
+    NotFound,
+    AlreadySettled,
+    RecipientRestricted,
+    InsufficientRouterBalance,
+    TokenUnavailable,
+    InvalidTokenPayout
+}
+
+struct ClaimSettlementResult {
+    uint64 id;
+    ClaimSettlementStatus status;
+}
+
 /// @dev Where an inbound delivery says it came from.
 struct Origin {
     string chain;
@@ -204,4 +220,15 @@ enum QuoteBlocker {
     MuxedNotSupported,
     InvalidDestination,
     ChainNotSupported
+}
+
+// Additive V2 result: the legacy RouteQuote tuple and its selectors remain unchanged.
+struct RouteQuoteV2 {
+    RouteQuote quote;
+    uint256 requestedAmount;
+    uint256 fee;
+    uint256 netAmount;
+    uint256 retainedDust;
+    uint256 actualDebit;
+    bool breakdownKnown;
 }
