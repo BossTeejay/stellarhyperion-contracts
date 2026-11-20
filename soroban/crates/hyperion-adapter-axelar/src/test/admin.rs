@@ -586,6 +586,59 @@ fn emergency_disable_and_enable_toggles_chain_status() {
 }
 
 #[test]
+fn disabled_chain_preview_and_both_dispatch_paths_agree_without_spending() {
+    let w = World::new();
+    let user_before = w.token().balance(&w.user);
+    let treasury_before = w.token().balance(&w.treasury);
+    for (adapter, paid) in [(w.adapter(), false), (w.bare(), true)] {
+        adapter.set_chain_enabled(&w.ethereum(), &false);
+        for gas in [None, Some(1_000)].into_iter().take(if paid { 2 } else { 1 }) {
+            assert_eq!(
+                adapter.try_check_dispatch(
+                    &w.router_id,
+                    &w.token_id,
+                    &HUNDRED,
+                    &w.ethereum(),
+                    &w.evm(1),
+                    &gas,
+                ),
+                Err(Ok(HyperionError::RouteDisabled))
+            );
+        }
+        assert_eq!(
+            adapter.try_dispatch(
+                &w.router_id,
+                &w.token_id,
+                &HUNDRED,
+                &w.ethereum(),
+                &w.evm(1),
+                &1,
+            ),
+            Err(Ok(HyperionError::RouteDisabled))
+        );
+        if paid {
+            assert_eq!(
+                adapter.try_dispatch_from(
+                    &w.router_id,
+                    &w.user,
+                    &w.token_id,
+                    &HUNDRED,
+                    &w.ethereum(),
+                    &w.evm(1),
+                    &1,
+                    &1_000,
+                ),
+                Err(Ok(HyperionError::RouteDisabled))
+            );
+        }
+    }
+    assert_eq!(w.token().balance(&w.user), user_before);
+    assert_eq!(w.token().balance(&w.treasury), treasury_before);
+    assert_eq!(w.token().balance(&w.adapter_id), 0);
+    assert_eq!(w.token().balance(&w.bare_id), 0);
+}
+
+#[test]
 fn unlinking_chain_removes_it_completely() {
     let w = World::new();
     let new_peer: BytesN<20> = BytesN::from_array(&w.env, &[0x99u8; 20]);
