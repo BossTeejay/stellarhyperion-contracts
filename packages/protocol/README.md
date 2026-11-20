@@ -40,6 +40,30 @@ import { hyperionRouterAbi } from "@hyperion/protocol/abi";
 The ABIs sit behind `@hyperion/protocol/abi` so an app that only wants to format an amount does not
 pull forty kilobytes of JSON into its bundle to get it.
 
+## Destination minimum planning
+
+`planForwardQuote` applies a caller-supplied forwarding reserve to an ordinary route quote, and
+`planInverseQuote` finds the smallest source amount that meets a requested destination minimum
+after that reserve. `quoteMinimumBatch` performs the same inversion for a list of minimums. These
+APIs use bigint end to end and the exact protocol-fee and representability floors used by
+`planQuote`; the inverse result includes the achieved minimum, rounding overshoot and its bound.
+
+The reserve is explicitly denominated in `destination-token-base-units` and is subtracted from the
+bridged amount before comparing the recipient minimum. It is not a provider gas estimate or a
+conversion from native gas to the bridged asset. Callers must supply a reserve appropriate to their
+provider and denomination; no provider pricing or exchange rate is assumed.
+
+These are planning primitives, not authorization to dispatch. The only independently validated
+outbound scope is Stellar Testnet USDC over CCTP to Sepolia, Base Sepolia or Arc Testnet, and over
+ITS to Sepolia. Consumers should gate outbound use with
+`validatedOutboundRoutesForPair` and `hasValidatedOutboundQuoteWiring`; generic `routesForPair`
+and `planQuote` describe configured/math capabilities, not launch validation. EVM-source routes
+and other rails remain gated until separately validated. This adds SDK APIs only: no wire format,
+ABI, authenticated rail dispatch, replay protection, or recipient-bound claim behavior changes.
+Existing `QuoteRequest` and quote results remain compatible; consumers opting into inverse plans
+must provide the explicit reserve unit and migrate UI copy to distinguish a destination-token
+reserve from gas units.
+
 ## Three decisions worth knowing about
 
 **No runtime dependencies.** Everything works on `Uint8Array` and `bigint`. No `Buffer`, no viem at

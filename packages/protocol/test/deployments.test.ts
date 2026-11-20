@@ -5,6 +5,7 @@ import {
   adapterFor,
   deployedChains,
   deploymentFor,
+  hasValidatedOutboundQuoteWiring,
   isEvmDeployment,
   isStellarDeployment,
   parseDeploymentSet,
@@ -123,6 +124,33 @@ describe("reading a record that holds together", () => {
     const parsed = parseDeploymentSet(set({ base: evmRecord() }));
     expect(tokenFor(parsed, "base", "USDC")?.decimals).toBe(6);
     expect(tokenFor(parsed, "base", "EURC")).toBeNull();
+  });
+
+  it("keeps inverse-quote wiring gated to configured Stellar Testnet CCTP and ITS", () => {
+    const activeTestnet = stellarRecord({
+      adapters: { cctp: ROUTER_C, "axelar-its": C_ADDR },
+      tokens: {
+        USDC: {
+          sacId: ROUTER_C,
+          code: "USDC",
+          issuer: G_ADDR,
+          decimals: 7,
+          flowLimit: "10000000000000",
+          routes: ["cctp", "axelar-its"],
+        },
+      },
+    });
+    const parsed = parseDeploymentSet(set({ "stellar-testnet": activeTestnet }));
+    expect(hasValidatedOutboundQuoteWiring(parsed, "stellar-testnet", "USDC", RouteKind.Cctp)).toBe(
+      true,
+    );
+    expect(
+      hasValidatedOutboundQuoteWiring(parsed, "stellar-testnet", "USDC", RouteKind.AxelarIts),
+    ).toBe(true);
+    expect(
+      hasValidatedOutboundQuoteWiring(parsed, "stellar-testnet", "USDC", RouteKind.Allbridge),
+    ).toBe(false);
+    expect(hasValidatedOutboundQuoteWiring(parsed, "sepolia", "USDC", RouteKind.Cctp)).toBe(false);
   });
 
   it("keeps a flow ceiling as a string, because a big one does not survive a double", () => {
