@@ -464,7 +464,7 @@ fn note_inspection_views_decode_payloads_or_fail_on_malformed() {
     assert_eq!(decoded_inbound.nonce, 9001);
 
     // Malformed notes return appropriate errors
-    let invalid = Bytes::from_array(&w.env, &[0u8; 10]);
+    let invalid = Bytes::from_array(&w.env, &[1u8; 10]);
     assert_eq!(
         client.try_inspect_outbound_note(&invalid),
         Err(Ok(HyperionError::MalformedMessage))
