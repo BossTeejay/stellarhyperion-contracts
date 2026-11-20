@@ -52,6 +52,7 @@ import {
     QuoteBlocker,
     RouteKind,
     RouteQuote,
+    RouteQuoteV2,
     TokenConfig
 } from "./HyperionTypes.sol";
 import {IHyperionRouter} from "./interfaces/IHyperionRouter.sol";
@@ -498,6 +499,30 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         q.grossAmount = fee + net;
         q.destinationAmount = landing;
         return q;
+    }
+
+    /// @inheritdoc IHyperionRouter
+    /// @notice Quote prospective debit without changing the legacy result schema.
+    /// @dev Unavailable quotes never imply a debit occurred.
+    function quoteV2(
+        RouteKind route,
+        address token,
+        uint256 amount,
+        Destination calldata destination,
+        uint8 destinationDecimals
+    ) public view override returns (RouteQuoteV2 memory v) {
+        v.quote = quote(route, token, amount, destination, destinationDecimals);
+        v.requestedAmount = amount;
+        TokenConfig memory cfg = _tokens[token];
+        if (
+            !cfg.registered || amount == 0 || amount > type(uint128).max
+                || cfg.decimals > AmountMath.MAX_DECIMALS || destinationDecimals > AmountMath.MAX_DECIMALS
+        ) return v;
+        v.fee = (amount * feeBps) / AmountMath.BPS_DENOMINATOR;
+        v.netAmount = AmountMath.floorToRepresentable(amount - v.fee, cfg.decimals, destinationDecimals);
+        v.retainedDust = amount - v.fee - v.netAmount;
+        v.actualDebit = v.fee + v.netAmount;
+        v.breakdownKnown = true;
     }
 
     /// @inheritdoc IHyperionRouter

@@ -158,3 +158,7 @@ if [ "$problems" -eq 0 ]; then
 else
   die "$problems mismatch(es) between the chain and the record"
 fi
+
+say "Historical cleanup: claim_history distinguishes Live, intentional Archived(id), and Unavailable (restore via RPC)."
+say "Cost capture (read-only): node script/stellar/storage-cost.mjs --rpc RPC_URL --request recorded-keysets.json"
+say "Cost replay: node script/stellar/storage-cost.mjs --record recorded-rpc.json"
