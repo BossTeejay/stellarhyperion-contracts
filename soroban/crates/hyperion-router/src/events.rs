@@ -57,6 +57,17 @@ pub struct ClaimSettled {
     pub settled_by: Address,
 }
 
+// V1 reasons: 1 refused unchanged payout, 2 custody short, 3 token/accounting unavailable.
+#[contractevent(topics = ["hyperion", "claim_failure_v1"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimPayoutFailureV1 {
+    #[topic]
+    pub claim_id: u64,
+    pub reason: u32,
+    pub outstanding_amount: i128,
+    pub recipient: Address,
+}
+
 #[contractevent(topics = ["hyperion", "claim_archived"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimArchived {
@@ -203,6 +214,16 @@ pub fn claim_settled(env: &Env, claim: &PendingClaim, settled_by: &Address) {
     .publish(env);
 }
 
+pub fn claim_payout_failure_v1(env: &Env, claim: &PendingClaim, reason: u32) {
+    ClaimPayoutFailureV1 {
+        claim_id: claim.id,
+        reason,
+        outstanding_amount: claim.amount,
+        recipient: claim.recipient.clone(),
+    }
+    .publish(env);
+}
+
 pub fn claim_archived(env: &Env, claim: &PendingClaim, settled_at: u64, archived_at: u64) {
     ClaimArchived {
         recipient: claim.recipient.clone(),
@@ -226,20 +247,20 @@ pub fn paused(env: &Env, by: &Address, state: bool) {
     .publish(env);
 }
 
-pub fn action_queued(env: &Env, action: &QueuedAction) {
+pub fn action_queued(env: &Env, action: QueuedAction) {
     ActionQueued {
         id: action.id,
-        action: action.action.clone(),
+        action: action.action,
         eta: action.eta,
         expires_at: action.expires_at,
     }
     .publish(env);
 }
 
-pub fn action_executed(env: &Env, action: &QueuedAction) {
+pub fn action_executed(env: &Env, action: QueuedAction) {
     ActionExecuted {
         id: action.id,
-        action: action.action.clone(),
+        action: action.action,
         queued_at: action.queued_at,
     }
     .publish(env);
