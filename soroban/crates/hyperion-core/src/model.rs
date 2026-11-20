@@ -109,7 +109,7 @@ impl Operation {
             },
             2 => Self::Block {
                 recipient: (small % 2) as usize,
-                blocked: arg % 2 != 0,
+                blocked: arg & 1 != 0,
             },
             3 => Self::Settle {
                 id: (small % 20 + 1) as usize,
@@ -130,7 +130,7 @@ impl Operation {
             },
             _ => Self::Advance {
                 seconds: arg % 800_000,
-                ledgers: (small % 1_500) as u64,
+                ledgers: small % 1_500,
             },
         }
     }
