@@ -248,10 +248,10 @@ The actual deployable router WASM was loaded into Soroban host29.0.1 and measure
 
 | Supplied replay keys | Metered WASM instructions | Metered memory bytes | Memory read entries | Persistent rent ledger-bytes | TTL bump entries |
 | -------------------- | ------------------------: | -------------------: | ------------------: | ---------------------------: | ---------------: |
-| 1                    |                   729,761 |            1,305,306 |                   3 |                  447,307,920 |                1 |
-| 32                   |                 3,786,158 |            1,576,587 |                  34 |               14,313,853,440 |               32 |
+| 1                    |                   735,323 |            1,304,496 |                   3 |                  447,307,920 |                1 |
+| 32                   |                 3,847,504 |            1,575,777 |                  34 |               14,313,853,440 |               32 |
 
-The router is initialized through its loaded WASM before measurement, so these resources cover upkeep of the supplied cold tombstones without charging the newly loaded code and instance TTL rent to upkeep. They are not a quoted network fee. The final artifact is 64,670 bytes. Reproduce with `HYPERION_MEASURE_ROUTER_WASM=$PWD/target/wasm32v1-none/release/hyperion_router.wasm cargo test -p hyperion-router discovery::measure_bounded_replay_upkeep_resources_and_exact_ttl -- --nocapture` from `soroban` after the strict repository build. CI runs this actual-WASM fixture and all 57 read-only host/CLI regressions, in addition to the complete unchanged application/security gates.
+The router is initialized through its loaded WASM before measurement, so these resources cover upkeep of the supplied cold tombstones without charging the newly loaded code and instance TTL rent to upkeep. They are not a quoted network fee. The final artifact is 65,404 bytes. Reproduce with `HYPERION_MEASURE_ROUTER_WASM=$PWD/target/wasm32v1-none/release/hyperion_router.wasm cargo test -p hyperion-router discovery::measure_bounded_replay_upkeep_resources_and_exact_ttl -- --nocapture` from `soroban` after the strict repository build. CI runs this actual-WASM fixture and all 57 read-only host/CLI regressions, in addition to the complete unchanged application/security gates.
 
 ### Versioned debit quotes, archival cleanup and upgrade rehearsal
 

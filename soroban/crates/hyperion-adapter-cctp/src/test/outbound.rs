@@ -71,6 +71,38 @@ fn the_allowance_circle_needed_is_closed_before_the_call_returns() {
 }
 
 #[test]
+fn preview_and_dispatch_share_the_burn_fee_boundary_before_approval() {
+    let w = World::new();
+    w.fund_adapter(HUNDRED);
+    w.adapter().set_fee_policy(&10_000, &2000);
+    assert_eq!(
+        w.adapter().try_check_dispatch(
+            &w.router_id,
+            &w.token_id,
+            &HUNDRED,
+            &w.ethereum(),
+            &evm(&w, 0x11),
+            &None,
+        ),
+        Err(Ok(HyperionError::FeeTooHigh))
+    );
+    assert_eq!(
+        w.adapter().try_dispatch(
+            &w.router_id,
+            &w.token_id,
+            &HUNDRED,
+            &w.ethereum(),
+            &evm(&w, 0x11),
+            &1,
+        ),
+        Err(Ok(HyperionError::FeeTooHigh))
+    );
+    assert_eq!(w.token().balance(&w.adapter_id), HUNDRED);
+    assert_eq!(w.token().allowance(&w.adapter_id, &w.messenger_id), 0);
+    assert_eq!(w.messenger().burn_count(), 0);
+}
+
+#[test]
 fn the_destination_caller_is_whatever_the_admin_wrote_down_for_that_lane() {
     let w = World::new();
     // Naming a caller on the far side means only Hyperion's own EVM relayer can broadcast the

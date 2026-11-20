@@ -100,4 +100,8 @@ pub enum HyperionError {
     ProtectedAsset = 46,
     // A single transfer exceeds the maximum amount permitted for the chosen route.
     ExceedsRouteLimit = 47,
+    // The requested provider payment exceeds the sender's explicit budget in this rail's units.
+    ProviderBudgetExceeded = 48,
+    // The configured adapter has no supported read-only dispatch validation interface.
+    AdapterMethodUnavailable = 49,
 }
