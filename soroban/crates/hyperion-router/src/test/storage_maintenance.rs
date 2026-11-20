@@ -34,6 +34,38 @@ fn settled(w: &World, nonce: u64) -> u64 {
 }
 
 #[test]
+fn batch_settlement_records_true_age_and_archived_claim_cannot_repay_after_restoration() {
+    let w = World::new();
+    let id = parked(&w, 105);
+    let original = w.router().get_claim(&id);
+    w.env
+        .ledger()
+        .set_timestamp(w.env.ledger().timestamp() + storage::MIN_CLAIM_RETENTION_SECONDS * 2);
+    w.failable(&original.token)
+        .set_blocked(&w.recipient, &false);
+    let results = w
+        .router()
+        .settle_claims(&w.user, &soroban_sdk::vec![&w.env, id]);
+    assert_eq!(results.get(0).unwrap().status, 0);
+    w.router().archive_settled_claims(&0, &32);
+    assert_eq!(w.router().claim_history(&id), ClaimHistory::Live(id));
+    w.env
+        .ledger()
+        .set_timestamp(w.env.ledger().timestamp() + storage::MIN_CLAIM_RETENTION_SECONDS);
+    w.router().archive_settled_claims(&0, &32);
+    assert_eq!(w.router().claim_history(&id), ClaimHistory::Archived(id));
+    w.env.as_contract(&w.router_id, || {
+        storage::set_claim(&w.env, &original);
+    });
+    let results = w
+        .router()
+        .settle_claims(&w.user, &soroban_sdk::vec![&w.env, id]);
+    assert_eq!(results.get(0).unwrap().status, 2);
+    assert_eq!(w.failable(&original.token).balance(&w.recipient), HUNDRED);
+    assert_eq!(w.router().claim_liability(&original.token).outstanding, 0);
+}
+
+#[test]
 fn cleanup_preserves_liability_replay_exact_history_and_restart_cursor() {
     let w = World::new();
     let first = settled(&w, 101);

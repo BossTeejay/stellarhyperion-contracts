@@ -8,9 +8,13 @@ import {SafeERC20} from "openzeppelin/token/ERC20/utils/SafeERC20.sol";
 
 import {
     AlreadyConfigured,
+    DecimalOverflow,
     InvalidAmount,
     RailNotConfigured,
     RefundFailed,
+    TimelockDelayOutOfRange,
+    TimelockNotQueued,
+    TimelockNotReady,
     TokenNotMapped,
     Unauthorized,
     UnexpectedRailContract,
@@ -84,7 +88,20 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         bool enabled;
     }
 
+    /// @notice Minimum delay before a proposed peer rotation can become active (1 hour).
+    uint64 public constant MIN_ROTATION_DELAY = 1 hours;
+
+    /// @notice A proposed peer rotation awaiting the timelock delay.
+    struct PeerRotation {
+        bytes newPeer;
+        uint64 eta;
+        uint64 queuedAt;
+    }
+
+    mapping(string chain => bool retired) private _retiredChains;
+    mapping(string axelarChain => bool retired) private _retiredAxelarNames;
     mapping(string chain => Peer peer) private _peers;
+    mapping(string chain => PeerRotation) private _pendingRotations;
 
     /// @dev Reverse lookup, so an inbound delivery can check the chain it names against the peer
     /// that is allowed to speak for it without the caller telling us which key to look under.
@@ -110,6 +127,18 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
 
     /// @notice A chain was turned on or off.
     event PeerEnabled(string chain, bool enabled);
+
+    /// @notice A peer rotation was proposed.
+    event PeerRotationQueued(string indexed chain, bytes currentPeer, bytes newPeer, uint64 eta);
+
+    /// @notice A peer rotation was applied.
+    event PeerRotationApplied(string indexed chain, bytes oldPeer, bytes newPeer);
+
+    /// @notice A peer rotation was cancelled.
+    event PeerRotationCancelled(string indexed chain, bytes cancelledPeer);
+
+    /// @notice A chain was removed from the adapter.
+    event PeerRemoved(string indexed chain, string axelarChain);
 
     /// @notice A token became routable over ITS.
     event TokenLinked(address indexed token, bytes32 tokenId);
@@ -169,6 +198,32 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     }
 
     /// @inheritdoc IRailAdapter
+    function checkDispatch(address token, uint256 amount, Destination calldata destination)
+        external
+        view
+        override
+    {
+        _dispatchPlan(token, amount, destination);
+    }
+
+    function _dispatchPlan(address token, uint256 amount, Destination calldata destination)
+        private
+        view
+        returns (Peer memory peer, bytes32 tokenId, AddressKind kind)
+    {
+        if (amount == 0) revert InvalidAmount();
+
+        tokenId = tokenIdOf[token];
+        if (tokenId == bytes32(0)) revert TokenNotMapped();
+
+        peer = _peers[destination.chain];
+        if (!peer.configured) revert UnknownChain();
+        if (!peer.enabled) revert RailNotConfigured();
+
+        (kind,,) = StellarAddress.parse(destination.strkey);
+    }
+
+    /// @inheritdoc IRailAdapter
     function dispatch(address token, uint256 amount, Destination calldata destination, uint64 nonce)
         external
         payable
@@ -176,18 +231,8 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         returns (bytes32)
     {
         if (msg.sender != ROUTER) revert Unauthorized();
-        if (amount == 0) revert InvalidAmount();
-
-        bytes32 tokenId = tokenIdOf[token];
-        if (tokenId == bytes32(0)) revert TokenNotMapped();
-
-        Peer memory peer = _peers[destination.chain];
-        if (!peer.configured) revert UnknownChain();
-        if (!peer.enabled) revert RailNotConfigured();
-
-        (AddressKind kind,,) = StellarAddress.parse(destination.strkey);
+        (Peer memory peer, bytes32 tokenId, AddressKind kind) = _dispatchPlan(token, amount, destination);
         bytes memory note = HyperionNotes.encodeInboundNote(kind, destination.strkey, nonce);
-
         emit TransferSubmitted(destination.chain, tokenId, amount, nonce, msg.value, note);
 
         IERC20(token).forceApprove(address(ITS), amount);
@@ -272,16 +317,15 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     }
 
     /// @notice Make a chain reachable, and name the contract allowed to speak for it.
-    /// @dev Once only, like the CCTP adapter's lanes. Repointing a live peer would let a different
-    /// contract deliver on a chain people are already using, which is not a configuration change,
-    /// it is a new trust assumption, and those go through the router's timelock by way of a new
-    /// adapter.
+    /// @dev Initial links are once only. Live peer changes use the delayed rotation functions.
+    /// Retired names cannot be relinked to bypass that delay; use a separately governed adapter.
     function setPeer(string calldata chain, string calldata axelarChain, bytes calldata peerAddress)
         external
         onlyOwner
     {
         if (bytes(chain).length == 0 || bytes(axelarChain).length == 0) revert UnknownChain();
-        if (peerAddress.length == 0) revert ZeroAddress();
+        if (!_hasNonzeroByte(peerAddress)) revert ZeroAddress();
+        if (_retiredChains[chain] || _retiredAxelarNames[axelarChain]) revert AlreadyConfigured();
         Peer storage peer = _peers[chain];
         if (peer.configured) revert AlreadyConfigured();
         if (bytes(_byAxelarName[axelarChain]).length != 0) revert AlreadyConfigured();
@@ -302,6 +346,77 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         if (!peer.configured) revert RailNotConfigured();
         peer.enabled = enabled;
         emit PeerEnabled(chain, enabled);
+    }
+
+    /// @notice Propose a rotation of the trusted peer contract on a remote chain.
+    /// @param chain The Hyperion chain name.
+    /// @param newPeer The new peer address (wire format).
+    /// @param delay Timelock delay in seconds (must be >= MIN_ROTATION_DELAY).
+    function proposePeerRotation(string calldata chain, bytes calldata newPeer, uint64 delay)
+        external
+        onlyOwner
+    {
+        Peer storage peer = _peers[chain];
+        if (!peer.configured) revert UnknownChain();
+        if (!_hasNonzeroByte(newPeer)) revert ZeroAddress();
+        if (keccak256(newPeer) == keccak256(peer.peer)) revert AlreadyConfigured();
+        if (delay < MIN_ROTATION_DELAY) revert TimelockDelayOutOfRange();
+
+        if (_pendingRotations[chain].eta != 0) revert AlreadyConfigured();
+        if (block.timestamp > type(uint64).max - delay) revert DecimalOverflow();
+        uint64 nowTime = uint64(block.timestamp);
+        uint64 eta = nowTime + delay;
+        _pendingRotations[chain] = PeerRotation({newPeer: newPeer, eta: eta, queuedAt: nowTime});
+
+        emit PeerRotationQueued(chain, peer.peer, newPeer, eta);
+    }
+
+    /// @notice Apply a previously proposed peer rotation after the delay has passed.
+    /// @param chain The Hyperion chain name.
+    function applyPeerRotation(string calldata chain) external onlyOwner {
+        Peer storage peer = _peers[chain];
+        if (!peer.configured) revert UnknownChain();
+
+        PeerRotation memory rotation = _pendingRotations[chain];
+        if (rotation.eta == 0) revert TimelockNotQueued();
+        if (block.timestamp < rotation.eta) revert TimelockNotReady(rotation.eta);
+
+        bytes memory oldPeer = peer.peer;
+        peer.peer = rotation.newPeer;
+        delete _pendingRotations[chain];
+
+        emit PeerRotationApplied(chain, oldPeer, peer.peer);
+    }
+
+    /// @notice Cancel a pending peer rotation.
+    /// @param chain The Hyperion chain name.
+    function cancelPeerRotation(string calldata chain) external onlyOwner {
+        Peer storage peer = _peers[chain];
+        if (!peer.configured) revert UnknownChain();
+
+        PeerRotation memory rotation = _pendingRotations[chain];
+        if (rotation.eta == 0) revert TimelockNotQueued();
+
+        bytes memory cancelledPeer = rotation.newPeer;
+        delete _pendingRotations[chain];
+
+        emit PeerRotationCancelled(chain, cancelledPeer);
+    }
+
+    /// @notice Permanently retire both names and remove their active peer/reverse mapping.
+    /// @param chain The Hyperion chain name.
+    function removePeer(string calldata chain) external onlyOwner {
+        Peer storage peer = _peers[chain];
+        if (!peer.configured) revert UnknownChain();
+
+        string memory axelarChain = peer.axelarChain;
+        _retiredChains[chain] = true;
+        _retiredAxelarNames[axelarChain] = true;
+        delete _byAxelarName[axelarChain];
+        delete _peers[chain];
+        delete _pendingRotations[chain];
+
+        emit PeerRemoved(chain, axelarChain);
     }
 
     /// @notice Point a local token at its ITS token id.
@@ -508,9 +623,22 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         return _peers[chain];
     }
 
+    /// @notice Read the pending rotation for a chain.
+    function pendingRotationOf(string calldata chain) external view returns (PeerRotation memory) {
+        return _pendingRotations[chain];
+    }
+
     /// @notice Hyperion's own name for whatever Axelar calls a chain.
     function chainForAxelarName(string calldata axelarChain) external view returns (string memory) {
         return _byAxelarName[axelarChain];
+    }
+
+    /// @dev Reject empty or all-zero wire addresses without narrowing chain-specific formats.
+    function _hasNonzeroByte(bytes calldata peerAddress) private pure returns (bool) {
+        for (uint256 i; i < peerAddress.length; ++i) {
+            if (peerAddress[i] != bytes1(0)) return true;
+        }
+        return false;
     }
 
     function _refund() private {

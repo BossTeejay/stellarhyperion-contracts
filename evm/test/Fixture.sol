@@ -223,4 +223,19 @@ contract Fixture is Test {
         request = _request(amount, RouteKind.Cctp);
         request.token = address(usdc);
     }
+
+    /// @dev Snapshot of the balances a conservation invariant needs: what the router holds,
+    /// what the treasury holds and what the sender holds. Taken before and after an operation
+    /// so a test can assert that the three sum to the same total.
+    struct BalanceSnapshot {
+        uint256 router;
+        uint256 treasury;
+        uint256 sender;
+    }
+
+    function _snapshot(address sender) internal view returns (BalanceSnapshot memory s) {
+        s.router = usdc.balanceOf(address(router));
+        s.treasury = usdc.balanceOf(treasury);
+        s.sender = usdc.balanceOf(sender);
+    }
 }

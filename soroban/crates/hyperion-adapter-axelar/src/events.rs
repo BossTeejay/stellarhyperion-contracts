@@ -92,3 +92,45 @@ pub struct AdminChanged {
     #[topic]
     pub new: Address,
 }
+
+#[contractevent(topics = ["hyperion", "axl_cfg"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerRotationQueued {
+    #[topic]
+    pub chain: String,
+    pub current_peer: BytesN<20>,
+    pub new_peer: BytesN<20>,
+    pub eta: u64,
+}
+
+#[contractevent(topics = ["hyperion", "axl_cfg"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerRotated {
+    #[topic]
+    pub chain: String,
+    pub old_peer: BytesN<20>,
+    pub new_peer: BytesN<20>,
+}
+
+#[contractevent(topics = ["hyperion", "axl_cfg"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerRotationCancelled {
+    #[topic]
+    pub chain: String,
+    pub cancelled_peer: BytesN<20>,
+}
+
+#[contractevent(topics = ["hyperion", "axl_cfg"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChainStatusChanged {
+    #[topic]
+    pub chain: String,
+    pub enabled: bool,
+}
+
+#[contractevent(topics = ["hyperion", "axl_cfg"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkRemoved {
+    #[topic]
+    pub chain: String,
+}

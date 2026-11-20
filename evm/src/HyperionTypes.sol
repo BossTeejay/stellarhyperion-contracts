@@ -89,6 +89,22 @@ struct PendingClaim {
     bool settled;
 }
 
+/// @dev Versioned operational result for one requested claim settlement.
+enum ClaimSettlementStatus {
+    Settled,
+    NotFound,
+    AlreadySettled,
+    RecipientRestricted,
+    InsufficientRouterBalance,
+    TokenUnavailable,
+    InvalidTokenPayout
+}
+
+struct ClaimSettlementResult {
+    uint64 id;
+    ClaimSettlementStatus status;
+}
+
 /// @dev Where an inbound delivery says it came from.
 struct Origin {
     string chain;

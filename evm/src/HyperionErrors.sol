@@ -81,3 +81,9 @@ error ZeroAddress();
 // sending change to the sender. A sender who cannot accept it is refused rather than tipped,
 // because silently keeping the difference is a second fee nobody agreed to.
 error RefundFailed();
+
+/// @notice The native provider payment exceeds the explicit sender cap.
+error ProviderBudgetExceeded();
+
+/// @notice The adapter lacks a usable local dispatch validation method.
+error AdapterMethodUnavailable();
