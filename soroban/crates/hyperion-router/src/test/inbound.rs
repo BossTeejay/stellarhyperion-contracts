@@ -682,3 +682,128 @@ fn hostile_claim_credit_stays_funded_and_unsettled_until_exact_delivery() {
     w.router().settle_claim(&w.user, &claim);
     assert_eq!(fot.balance(&w.recipient), HUNDRED);
 }
+
+#[test]
+fn batch_nonconforming_token_rolls_back_all_mutations_claims_and_liabilities() {
+    let w = World::new();
+    let token = w.env.register(super::doubles::FeeOnTransferToken, ());
+    let asset = super::doubles::FeeOnTransferTokenClient::new(&w.env, &token);
+    asset.init(&7, &0);
+    w.register_token(token.clone(), 7, FLOW_LIMIT);
+    let recipients = [
+        Address::generate(&w.env),
+        w.recipient.clone(),
+        Address::generate(&w.env),
+    ];
+    asset.mint(&w.rail_id, &(HUNDRED * 3));
+    for (index, recipient) in recipients.iter().enumerate() {
+        asset.set_blocked(recipient, &true);
+        w.rail().deliver(&Delivery {
+            route: RouteKind::Cctp,
+            token: token.clone(),
+            amount: HUNDRED,
+            recipient: recipient.clone(),
+            recipient_kind: hyperion_core::AddressKind::Account,
+            source_chain: w.ethereum(),
+            source_nonce: 801 + index as u64,
+        });
+        asset.set_blocked(recipient, &false);
+    }
+    asset.configure(&w.recipient, &500, &false);
+    let ids = soroban_sdk::vec![&w.env, 1, 2, 3, 1];
+    assert_eq!(
+        w.router().try_settle_claims(&w.user, &ids),
+        Err(Ok(HyperionError::InvalidAmount))
+    );
+    for recipient in recipients.iter() {
+        assert_eq!(asset.balance(recipient), 0);
+    }
+    assert_eq!(asset.balance(&w.router_id), HUNDRED * 3);
+    for id in 1..=3 {
+        assert!(!w.router().get_claim(&id).settled);
+    }
+    let claim = w.router().get_claim(&2);
+    assert_eq!(claim.amount, HUNDRED);
+    assert_eq!(claim.recipient, w.recipient);
+    // A reverting batch cannot retain a new diagnostic, just like the legacy single API.
+    assert_eq!(w.router().claim_failure_reason(&2), 1);
+    assert_eq!(w.router().claim_liability(&token).outstanding, HUNDRED * 3);
+    asset.configure(&w.recipient, &0, &false);
+    let result = w.router().settle_claims(&w.user, &ids);
+    for (index, status) in [0, 0, 0, 2].iter().enumerate() {
+        assert_eq!(result.get(index as u32).unwrap().status, *status);
+    }
+    for recipient in recipients.iter() {
+        assert_eq!(asset.balance(recipient), HUNDRED);
+    }
+    assert_eq!(w.router().claim_liability(&token).outstanding, 0);
+    assert_eq!(w.router().claim_failure_reason(&2), 0);
+}
+
+#[test]
+fn unreadable_token_balance_is_unavailable_and_unrelated_claim_still_settles() {
+    let w = World::new();
+    let token = w.with_failable_token();
+    let other = Address::generate(&w.env);
+    w.failable(&token).mint(&w.rail_id, &(HUNDRED * 2));
+    for (nonce, recipient) in [(901, w.recipient.clone()), (902, other.clone())] {
+        w.failable(&token).set_blocked(&recipient, &true);
+        w.rail().deliver(&Delivery {
+            route: RouteKind::Cctp,
+            token: token.clone(),
+            amount: HUNDRED,
+            recipient: recipient.clone(),
+            recipient_kind: hyperion_core::AddressKind::Account,
+            source_chain: w.ethereum(),
+            source_nonce: nonce,
+        });
+        w.failable(&token).set_blocked(&recipient, &false);
+    }
+    w.failable(&token).set_balance_error(&w.recipient, &true);
+    let result = w
+        .router()
+        .settle_claims(&w.user, &soroban_sdk::vec![&w.env, 1, 2]);
+    assert_eq!(result.get(0).unwrap().status, 5);
+    assert_eq!(result.get(1).unwrap().status, 0);
+    assert_eq!(w.failable(&token).balance(&w.router_id), HUNDRED);
+    assert_eq!(w.failable(&token).balance(&other), HUNDRED);
+    assert!(!w.router().get_claim(&1).settled);
+    assert_eq!(w.router().claim_failure_reason(&1), 3);
+    assert_eq!(w.router().claim_liability(&token).outstanding, HUNDRED);
+    w.failable(&token).set_balance_error(&w.recipient, &false);
+    w.failable(&token).transfer(&w.router_id, &w.user, &HUNDRED);
+    let short = w
+        .router()
+        .settle_claims(&w.user, &soroban_sdk::vec![&w.env, 1]);
+    assert_eq!(short.get(0).unwrap().status, 4);
+    assert_eq!(w.router().claim_failure_reason(&1), 2);
+    assert!(!w.router().get_claim(&1).settled);
+    assert_eq!(w.router().claim_liability(&token).outstanding, HUNDRED);
+    w.failable(&token).mint(&w.router_id, &HUNDRED);
+    w.router()
+        .settle_claims(&w.user, &soroban_sdk::vec![&w.env, 1]);
+    assert_eq!(w.failable(&token).balance(&w.recipient), HUNDRED);
+    assert_eq!(w.router().claim_failure_reason(&1), 0);
+}
+
+#[test]
+fn batch_bounds_and_settler_authorization_are_enforced() {
+    let w = World::new();
+    assert_eq!(
+        w.router()
+            .try_settle_claims(&w.user, &soroban_sdk::Vec::new(&w.env)),
+        Err(Ok(HyperionError::InvalidAmount))
+    );
+    let mut ids = soroban_sdk::Vec::new(&w.env);
+    for id in 0..51 {
+        ids.push_back(id);
+    }
+    assert_eq!(
+        w.router().try_settle_claims(&w.user, &ids),
+        Err(Ok(HyperionError::InvalidAmount))
+    );
+    ids.pop_back();
+    assert_eq!(w.router().settle_claims(&w.user, &ids).len(), 50);
+    w.env.mock_auths(&[]);
+    assert!(w.router().try_settle_claims(&w.user, &ids).is_err());
+}

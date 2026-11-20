@@ -111,7 +111,7 @@ pub struct PendingClaim {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimSettlementResult {
     pub id: u64,
-    /// 0 settled, 1 missing, 2 already settled, 3 recipient refused, 4 router balance short.
+    /// 0 settled, 1 missing, 2 already settled, 3 refused, 4 custody short, 5 unavailable.
     pub status: u32,
 }
 

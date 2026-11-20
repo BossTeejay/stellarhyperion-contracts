@@ -57,7 +57,7 @@ pub struct ClaimSettled {
     pub settled_by: Address,
 }
 
-/// Version 1 payout failure diagnostic. `reason`: 1 recipient/token refusal, 2 router balance short.
+/// V1 reasons: 1 refused unchanged payout, 2 custody short, 3 token/accounting unavailable.
 #[contractevent(topics = ["hyperion", "claim_failure_v1"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimPayoutFailureV1 {

@@ -113,6 +113,29 @@ impl AxelarAdapter {
     // Outbound
     // ---------------------------------------------------------------------------------------
 
+    // Auth-free validation only. Dispatch keeps caller/sender authorization unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_dispatch(
+        env: Env,
+        caller: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        gas_amount: Option<i128>,
+    ) -> Result<(), HyperionError> {
+        validate_dispatch(
+            &env,
+            &caller,
+            &token,
+            amount,
+            &destination_chain,
+            &destination,
+            gas_amount,
+        )?;
+        Ok(())
+    }
+
     /// Hand funds the router has already moved here over to ITS.
     ///
     /// The router transfers the net amount in before calling, so by the time this runs the
@@ -128,16 +151,15 @@ impl AxelarAdapter {
         nonce: u64,
     ) -> Result<(), HyperionError> {
         caller.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.router {
-            return Err(HyperionError::Unauthorized);
-        }
-        if amount <= 0 {
-            return Err(HyperionError::InvalidAmount);
-        }
-        let link = storage::link(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
-        let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
-        let recipient = bytes32_to_evm(&env, &destination)?;
+        let (cfg, link, token_id, recipient) = validate_dispatch(
+            &env,
+            &caller,
+            &token,
+            amount,
+            &destination_chain,
+            &destination,
+            None,
+        )?;
 
         let this = env.current_contract_address();
         let its = InterchainTokenServiceClient::new(&env, &cfg.its);
@@ -257,19 +279,15 @@ impl AxelarAdapter {
     ) -> Result<(), HyperionError> {
         caller.require_auth();
         sender.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.router {
-            return Err(HyperionError::Unauthorized);
-        }
-        if cfg.route != RouteKind::AxelarIts {
-            return Err(HyperionError::UnsupportedRoute);
-        }
-        if amount <= 0 || gas_amount <= 0 {
-            return Err(HyperionError::InvalidAmount);
-        }
-        let link = storage::link(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
-        let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
-        let recipient = bytes32_to_evm(&env, &destination)?;
+        let (cfg, link, token_id, recipient) = validate_dispatch(
+            &env,
+            &caller,
+            &token,
+            amount,
+            &destination_chain,
+            &destination,
+            Some(gas_amount),
+        )?;
         let its = InterchainTokenServiceClient::new(&env, &cfg.its);
         let destination_address = Bytes::from_array(&env, &recipient.to_array());
         let asset = token::Client::new(&env, &token);
@@ -718,4 +736,38 @@ fn replay_key(env: &Env, source_chain: &String, message_id: &String) -> BytesN<3
     env.crypto()
         .keccak256(&(source_chain.clone(), message_id.clone()).to_xdr(env))
         .into()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_dispatch(
+    env: &Env,
+    caller: &Address,
+    token: &Address,
+    amount: i128,
+    chain: &String,
+    destination: &BytesN<32>,
+    gas_amount: Option<i128>,
+) -> Result<(Config, ChainLink, BytesN<32>, BytesN<20>), HyperionError> {
+    let cfg = storage::config(env)?;
+    if caller != &cfg.router {
+        return Err(HyperionError::Unauthorized);
+    }
+    if gas_amount.is_some() && cfg.route != RouteKind::AxelarIts {
+        return Err(HyperionError::UnsupportedRoute);
+    }
+    if amount <= 0 || gas_amount.is_some_and(|gas| gas <= 0) {
+        return Err(HyperionError::InvalidAmount);
+    }
+    let link = storage::link(env, chain).ok_or(HyperionError::UnknownChain)?;
+    let token_id = storage::token_id(env, token).ok_or(HyperionError::TokenNotMapped)?;
+    let recipient = bytes32_to_evm(env, destination)?;
+    // ITS debits both legs from the same balance when gas uses the bridged asset.
+    if let Some(gas) = gas_amount {
+        if InterchainTokenServiceClient::new(env, &cfg.its).native_token_address() == *token {
+            amount
+                .checked_add(gas)
+                .ok_or(HyperionError::DecimalOverflow)?;
+        }
+    }
+    Ok((cfg, link, token_id, recipient))
 }
