@@ -152,12 +152,14 @@ fn migration_requires_review_is_interruptible_preserves_exact_values_and_has_fix
     let (transfer, claim) = legacy_records(&w);
     assert_eq!(w.router().get_migration_status().current_version, 1);
     assert_eq!(
-        w.router().try_migrate_storage(&w.admin, &2, &1),
+        w.router()
+            .try_migrate_storage(&w.admin, &CURRENT_SCHEMA_VERSION, &1),
         Err(Ok(HyperionError::TimelockNotQueued))
     );
-    let q = w
-        .router()
-        .queue_action(&w.admin, &AdminAction::BeginStorageMigration(2));
+    let q = w.router().queue_action(
+        &w.admin,
+        &AdminAction::BeginStorageMigration(CURRENT_SCHEMA_VERSION),
+    );
     assert_eq!(
         w.router().try_execute_action(&w.admin, &q),
         Err(Ok(HyperionError::TimelockNotReady))
@@ -165,16 +167,19 @@ fn migration_requires_review_is_interruptible_preserves_exact_values_and_has_fix
     w.advance_time(MIN_TIMELOCK_DELAY + 1);
     w.router().execute_action(&w.admin, &q);
     assert_eq!(
-        w.router().try_migrate_storage(&w.guardian, &2, &1),
+        w.router()
+            .try_migrate_storage(&w.guardian, &CURRENT_SCHEMA_VERSION, &1),
         Err(Ok(HyperionError::Unauthorized))
     );
-    let first = w.router().migrate_storage(&w.admin, &2, &1);
+    let first = w
+        .router()
+        .migrate_storage(&w.admin, &CURRENT_SCHEMA_VERSION, &1);
     assert!(first.migration_pending);
     assert_eq!(first.migrated_transfers, 1);
     assert_eq!(w.router().get_transfer(&1), transfer);
     assert_eq!(w.router().get_claim(&1), claim);
     assert_eq!(first.current_version, 1);
-    assert_eq!(first.target_version, 2);
+    assert_eq!(first.target_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(first.migrated_claims, 0);
     w.env.as_contract(&w.router_id, || {
         w.env.storage().instance().set(&DataKey::OutNonce, &2u64);
@@ -182,28 +187,36 @@ fn migration_requires_review_is_interruptible_preserves_exact_values_and_has_fix
         new.nonce = 2;
         storage::set_transfer(&w.env, &new);
     });
-    let done = w.router().migrate_storage(&w.admin, &2, &1);
+    let done = w
+        .router()
+        .migrate_storage(&w.admin, &CURRENT_SCHEMA_VERSION, &1);
     assert!(!done.migration_pending);
     assert_eq!(done.total_transfers, 1);
     assert_eq!(done.current_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(w.router().get_claim(&1), claim);
-    assert_eq!(w.router().migrate_storage(&w.admin, &2, &1), done);
+    assert_eq!(
+        w.router()
+            .migrate_storage(&w.admin, &CURRENT_SCHEMA_VERSION, &1),
+        done
+    );
 }
 
 #[test]
 fn migration_refuses_missing_records_instead_of_marking_them_migrated() {
     let w = World::bare();
     legacy_records(&w);
-    let q = w
-        .router()
-        .queue_action(&w.admin, &AdminAction::BeginStorageMigration(2));
+    let q = w.router().queue_action(
+        &w.admin,
+        &AdminAction::BeginStorageMigration(CURRENT_SCHEMA_VERSION),
+    );
     w.advance_time(MIN_TIMELOCK_DELAY + 1);
     w.router().execute_action(&w.admin, &q);
     w.env.as_contract(&w.router_id, || {
         w.env.storage().persistent().remove(&DataKey::Claim(1))
     });
     assert_eq!(
-        w.router().try_migrate_storage(&w.admin, &2, &2),
+        w.router()
+            .try_migrate_storage(&w.admin, &CURRENT_SCHEMA_VERSION, &2),
         Err(Ok(HyperionError::ClaimNotFound))
     );
     assert_eq!(w.router().get_migration_status().migrated_transfers, 0);

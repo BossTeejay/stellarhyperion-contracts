@@ -126,21 +126,48 @@ export async function planRestoration(request, rpc, codec = cliCodec) {
     throw new Error("Invalid or stale RPC ledger evidence; simulate again");
   if (!Array.isArray(ledger.entries) || ledger.entries.length > keys.length)
     throw new Error("Invalid ledger response");
-  const active = new Set();
+  const active = new Map();
   for (const entry of ledger.entries) {
     if (!keys.includes(entry.key))
       throw new Error("RPC returned an unrequested key");
-    if (!Number.isSafeInteger(entry.liveUntilLedgerSeq))
-      throw new Error("RPC omitted persistent TTL evidence");
-    if (entry.liveUntilLedgerSeq >= ledger.latestLedger) active.add(entry.key);
+    if (
+      !Number.isSafeInteger(entry.liveUntilLedgerSeq) ||
+      entry.liveUntilLedgerSeq < 0 ||
+      entry.liveUntilLedgerSeq > 4294967295
+    )
+      throw new Error("RPC omitted valid persistent TTL evidence");
+    if (active.has(entry.key))
+      throw new Error("RPC returned duplicate ledger entries");
+    active.set(entry.key, entry.liveUntilLedgerSeq);
   }
   const records = keys.map((key) => {
-    if (restoreKeys.has(key)) return { key, state: "archived" };
-    if (active.has(key)) return { key, state: "active" };
-    if (!simulation.error && touched.has(key)) return { key, state: "missing" };
+    if (restoreKeys.has(key))
+      return {
+        key,
+        state: "archived",
+        ttlState: "archived",
+        remainingTtl: null,
+      };
+    if (active.has(key) && active.get(key) >= ledger.latestLedger)
+      return {
+        key,
+        state: "active",
+        ttlState: "live",
+        remainingTtl: active.get(key) - ledger.latestLedger,
+        liveUntilLedger: active.get(key),
+      };
+    if (!simulation.error && touched.has(key))
+      return {
+        key,
+        state: "missing",
+        ttlState: "unavailable",
+        remainingTtl: null,
+      };
     return {
       key,
       state: "unknown",
+      ttlState: "unavailable",
+      remainingTtl: null,
       reason:
         "RPC absence without a successful matching footprint is inconclusive",
     };
