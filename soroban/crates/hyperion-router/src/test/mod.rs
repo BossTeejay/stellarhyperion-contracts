@@ -2,10 +2,10 @@ mod doubles;
 mod setup;
 
 mod admin;
+mod discovery;
 mod inbound;
 mod maintenance;
 mod outbound;
 mod quotes;
-mod discovery;
-mod storage_maintenance;
 mod stateful_model;
+mod storage_maintenance;
