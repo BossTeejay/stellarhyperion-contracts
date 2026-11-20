@@ -307,6 +307,13 @@ contract StatefulRouterInvariantTest is RouterModelDriver {
 /// @title Stateful real-router comparison
 /// @notice Fresh fuzz sequences and invariant call-sequence shrinking complement the common Rust corpus.
 contract StatefulRouterModelTest is RouterModelDriver {
+    /// @notice A deliberately wrong expected balance produces a fatal comparison assertion.
+    function test_comparisonRejectsInjectedBalanceDivergence() public {
+        ++model.balances[0];
+        vm.expectRevert();
+        this.applyWord(2);
+    }
+
     /// @notice Arbitrary inputs shrink in both values and independent operation words.
     function testFuzz_operationSequence(uint64[8] memory words) public {
         for (uint256 i; i < words.length; ++i) {
