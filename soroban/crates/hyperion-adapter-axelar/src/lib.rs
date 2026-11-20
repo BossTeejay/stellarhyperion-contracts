@@ -851,6 +851,16 @@ impl AxelarAdapter {
         let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
         Ok(InterchainTokenServiceClient::new(&env, &cfg.its).flow_limit(&token_id))
     }
+
+    /// Read-only inspection of an Axelar outbound note payload, decoding recipient and nonce.
+    pub fn inspect_outbound_note(env: Env, note: Bytes) -> Result<OutboundNote, HyperionError> {
+        OutboundNote::decode(&env, &note)
+    }
+
+    /// Read-only inspection of an Axelar inbound note payload, decoding kind, strkey, and nonce.
+    pub fn inspect_inbound_note(env: Env, note: Bytes) -> Result<InboundNote, HyperionError> {
+        InboundNote::decode(&env, &note)
+    }
 }
 
 /// Read the config and insist the admin signed for whatever is about to happen.

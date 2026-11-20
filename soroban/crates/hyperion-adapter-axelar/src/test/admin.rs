@@ -3,7 +3,7 @@
 use hyperion_core::{HyperionError, RouteKind};
 use soroban_sdk::{
     testutils::{Ledger, MockAuth, MockAuthInvoke},
-    Address, BytesN, IntoVal, String,
+    Address, Bytes, BytesN, IntoVal, String,
 };
 
 use super::setup::{World, FLOW_LIMIT, HUNDRED, STRANGE_TOKEN_ID};
@@ -429,6 +429,50 @@ fn the_admin_is_not_special_on_the_permissionless_calls() {
     let keeper: Address = w.relayer.clone();
     w.adapter().keep_alive(&w.ethereum());
     assert_eq!(w.adapter().sweep(&keeper, &w.token_id), HUNDRED);
+}
+
+#[test]
+fn note_inspection_views_decode_payloads_or_fail_on_malformed() {
+    let w = World::new();
+    let client = w.adapter();
+
+    // Outbound note inspection
+    let recipient_bytes = [0x42u8; 20];
+    let outbound = hyperion_core::axelar::OutboundNote::new(
+        BytesN::from_array(&w.env, &recipient_bytes),
+        1337,
+    );
+    let encoded_outbound = outbound.encode(&w.env).unwrap();
+    let decoded_outbound = client.inspect_outbound_note(&encoded_outbound);
+    assert_eq!(decoded_outbound.recipient, outbound.recipient);
+    assert_eq!(decoded_outbound.nonce, 1337);
+
+    // Inbound note inspection
+    let strkey = String::from_str(
+        &w.env,
+        "GA5ZYIIVYDX5GRF2BKEQD2Y47ZCPG3HX3PUUNPVQ5ZECB57MJG7RLVNR",
+    );
+    let destination = hyperion_core::StrkeyDestination {
+        kind: hyperion_core::AddressKind::Account,
+        value: strkey.clone(),
+    };
+    let inbound = hyperion_core::axelar::InboundNote::new(destination, 9001);
+    let encoded_inbound = inbound.encode(&w.env).unwrap();
+    let decoded_inbound = client.inspect_inbound_note(&encoded_inbound);
+    assert_eq!(decoded_inbound.destination.kind, inbound.destination.kind);
+    assert_eq!(decoded_inbound.destination.value, inbound.destination.value);
+    assert_eq!(decoded_inbound.nonce, 9001);
+
+    // Malformed notes return appropriate errors
+    let invalid = Bytes::from_array(&w.env, &[0u8; 10]);
+    assert_eq!(
+        client.try_inspect_outbound_note(&invalid),
+        Err(Ok(HyperionError::MalformedMessage))
+    );
+    assert_eq!(
+        client.try_inspect_inbound_note(&invalid),
+        Err(Ok(HyperionError::MalformedMessage))
+    );
 }
 
 // ------------------------------------------------------------------------------------------

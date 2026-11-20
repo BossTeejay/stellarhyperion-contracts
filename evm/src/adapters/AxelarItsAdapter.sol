@@ -429,6 +429,24 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         return _byAxelarName[axelarChain];
     }
 
+    /// @notice Read-only inspection of an Axelar outbound note payload.
+    function inspectOutboundNote(bytes calldata payload)
+        external
+        pure
+        returns (address recipient, uint64 nonce)
+    {
+        return HyperionNotes.decodeOutboundNote(payload);
+    }
+
+    /// @notice Read-only inspection of an Axelar inbound note payload.
+    function inspectInboundNote(bytes calldata payload)
+        external
+        pure
+        returns (AddressKind kind, string memory strkey, uint64 nonce)
+    {
+        return HyperionNotes.decodeInboundNote(payload);
+    }
+
     /// @dev Reject empty or all-zero wire addresses without narrowing chain-specific formats.
     function _hasNonzeroByte(bytes calldata peerAddress) private pure returns (bool) {
         for (uint256 i; i < peerAddress.length; ++i) {
