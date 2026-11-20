@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  APPROVAL_DIAGNOSTICS_VERSION,
+  ApprovalFinding,
   BURN_HOOK_DATA,
   BURN_MESSAGE_VERSION,
+  DOCUMENTED_RESIDUAL_ALLOWANCE,
   FINALITY_THRESHOLD_FINALIZED,
   HOOK_VERSION,
   MESSAGE_VERSION,
   MSG_BODY,
   STELLAR_DOMAIN,
+  auditCctpAllowance,
   assertSupportedBurn,
   assertSupportedMessage,
   cctpBody,
@@ -230,5 +234,42 @@ describe("the hook", () => {
 
   it("shares its version with the Axelar note", () => {
     expect(HOOK_VERSION).toBe(1);
+  });
+});
+
+describe("the approval diagnostics", () => {
+  it("has the expected version and documented allowance baseline", () => {
+    expect(APPROVAL_DIAGNOSTICS_VERSION).toBe(1);
+    expect(DOCUMENTED_RESIDUAL_ALLOWANCE).toBe(0n);
+  });
+
+  it("exports approval finding variants", () => {
+    expect(ApprovalFinding.Clean).toBe(0);
+    expect(ApprovalFinding.UnexpectedResidual).toBe(1);
+  });
+});
+
+describe("approval diagnostics readings", () => {
+  it("preserves full-width allowances and classifies zero and residual values", () => {
+    for (const value of [0n, 500n, (1n << 127n) - 1n, (1n << 256n) - 1n]) {
+      const diag = auditCctpAllowance(value);
+      expect(diag.allowance).toBe(value);
+      expect(diag.version).toBe(1);
+      expect(diag.expectedAllowance).toBe(0n);
+      expect(diag.isClean).toBe(value === 0n);
+      expect(diag.finding).toBe(
+        value === 0n ? ApprovalFinding.Clean : ApprovalFinding.UnexpectedResidual,
+      );
+    }
+  });
+
+  it("distinguishes unavailable and invalid readings from clean zero", () => {
+    for (const value of [null, -1n, 1n << 256n]) {
+      const diag = auditCctpAllowance(value);
+      expect(diag.allowance).toBe(0n);
+      expect(diag.isClean).toBe(false);
+      expect(diag.finding).toBe(ApprovalFinding.Unavailable);
+    }
+    expect(ApprovalFinding.Unavailable).toBe(2);
   });
 });
