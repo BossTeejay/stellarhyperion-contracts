@@ -1266,11 +1266,7 @@ fn migrate_storage_inner(
 }
 
 #[inline(never)]
-fn archive_settled_claims_inner(
-    env: &Env,
-    after: u64,
-    limit: u32,
-) -> Result<u64, HyperionError> {
+fn archive_settled_claims_inner(env: &Env, after: u64, limit: u32) -> Result<u64, HyperionError> {
     let end = after
         .saturating_add(limit as u64)
         .min(storage::claim_count(env));
@@ -1305,9 +1301,7 @@ fn preview_claim_recipient_inner(
     let claim = storage::claim(env, id).ok_or(HyperionError::ClaimNotFound)?;
     let client = token::Client::new(env, &claim.token);
     match client.try_balance(&claim.recipient) {
-        Ok(Ok(_))
-            if client.address.executable() == Some(soroban_sdk::Executable::StellarAsset) =>
-        {
+        Ok(Ok(_)) if client.address.executable() == Some(soroban_sdk::Executable::StellarAsset) => {
             if token::StellarAssetClient::new(env, &claim.token).authorized(&claim.recipient) {
                 Ok(RecipientEligibility::Eligible)
             } else {
