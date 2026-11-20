@@ -39,8 +39,38 @@ import {StellarAddress} from "../libraries/StellarAddress.sol";
 /// classic account or a Soroban contract, and on Stellar those are two completely different kinds
 /// of delivery. So the recipient names Hyperion over there and the real destination travels in
 /// the hook, where there is room to say which of the three kinds it is.
+///
+/// Note on deployment gating: The active deployment is Stellar Testnet outbound ITS/CCTP.
+/// EVM and other rail development paths remain explicitly gated until independently validated.
+/// Compatibility with provider upgrades requires explicit message-boundary tooling and approval
+/// lifecycle reconciliation.
 contract CctpAdapter is IRailAdapter, Ownable2Step {
     using SafeERC20 for IERC20;
+
+    /// @notice Version for CCTP approval diagnostics.
+    uint32 public constant APPROVAL_DIAGNOSTICS_VERSION = 1;
+
+    /// @notice Expected residual allowance on the token messenger.
+    uint256 public constant DOCUMENTED_RESIDUAL_ALLOWANCE = 0;
+
+    /// @notice Findings produced by the allowance auditor.
+    enum ApprovalFinding {
+        Clean,
+        UnexpectedResidual,
+        Unavailable
+    }
+
+    /// @notice Versioned diagnostics snapshot of the allowance state.
+    struct ApprovalDiagnostics {
+        uint32 version;
+        address token;
+        address spender;
+        // Zero is a placeholder when finding is Unavailable.
+        uint256 allowance;
+        uint256 expectedAllowance;
+        bool isClean;
+        ApprovalFinding finding;
+    }
 
     /// @notice The confirmation level every burn asks Circle for.
     /// @dev Finalized rather than fast. Fast confirmation trades reorg risk for about fifteen
@@ -77,6 +107,15 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
     /// @notice A burn was handed to Circle.
     event BurnSubmitted(
         string chain, uint32 domain, uint256 amount, bytes32 mintRecipient, uint64 nonce, bytes hookData
+    );
+
+    /// @notice Diagnostics announced for CCTP approval lifecycle during dispatch.
+    event ApprovalAudited(
+        address indexed token,
+        address indexed spender,
+        uint256 allowanceBefore,
+        uint256 allowanceAfter,
+        bool isClean
     );
 
     constructor(address router, address tokenMessenger, address usdc, address owner_) Ownable(owner_) {
@@ -142,8 +181,11 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         if (msg.sender != ROUTER) revert Unauthorized();
         (Lane memory lane, bytes memory hookData) = _dispatchPlan(token, amount, destination);
         emit BurnSubmitted(destination.chain, lane.domain, amount, lane.mintRecipient, nonce, hookData);
-
+        uint256 allowanceBefore = IERC20(USDC).allowance(address(this), address(TOKEN_MESSENGER));
         IERC20(USDC).forceApprove(address(TOKEN_MESSENGER), amount);
+        if (IERC20(USDC).allowance(address(this), address(TOKEN_MESSENGER)) != amount) {
+            revert InvalidAmount();
+        }
         TOKEN_MESSENGER.depositForBurnWithHook(
             amount,
             lane.domain,
@@ -159,6 +201,12 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
             FINALITY_THRESHOLD_FINALIZED,
             hookData
         );
+        // Closing the allowance leaves only the documented allowance state (0).
+        IERC20(USDC).forceApprove(address(TOKEN_MESSENGER), 0);
+        uint256 allowanceAfter = IERC20(USDC).allowance(address(this), address(TOKEN_MESSENGER));
+        if (allowanceAfter != DOCUMENTED_RESIDUAL_ALLOWANCE) revert InvalidAmount();
+
+        emit ApprovalAudited(USDC, address(TOKEN_MESSENGER), allowanceBefore, allowanceAfter, true);
 
         // CCTP wanted no native currency, so none of it is this contract's to keep.
         _refund();
@@ -198,6 +246,40 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
     /// @notice Read a configured destination.
     function laneOf(string calldata chain) external view returns (Lane memory) {
         return _lanes[chain];
+    }
+
+    /// @notice Audits current allowance granted to the token messenger for USDC.
+    /// @dev Read-only inspection. Unexpected residual approvals produce findings
+    /// without automatic mutation.
+    /// @return Diagnostics snapshot including allowance, expected allowance, and finding.
+    function auditAllowance() external view returns (ApprovalDiagnostics memory) {
+        return auditAllowance(USDC);
+    }
+
+    /// @notice Audits current allowance granted to the token messenger for a specific token.
+    /// @dev Read-only inspection. Unexpected residual approvals produce findings
+    /// without automatic mutation.
+    /// @param token The token address to audit.
+    /// @return Diagnostics snapshot including allowance, expected allowance, and finding.
+    function auditAllowance(address token) public view returns (ApprovalDiagnostics memory) {
+        (bool readable, bytes memory result) =
+            token.staticcall(abi.encodeCall(IERC20.allowance, (address(this), address(TOKEN_MESSENGER))));
+        readable = readable && result.length == 32;
+        uint256 currentAllowance = readable ? abi.decode(result, (uint256)) : 0;
+        bool isClean = readable && currentAllowance == DOCUMENTED_RESIDUAL_ALLOWANCE;
+        ApprovalFinding finding = !readable
+            ? ApprovalFinding.Unavailable
+            : (isClean ? ApprovalFinding.Clean : ApprovalFinding.UnexpectedResidual);
+
+        return ApprovalDiagnostics({
+            version: APPROVAL_DIAGNOSTICS_VERSION,
+            token: token,
+            spender: address(TOKEN_MESSENGER),
+            allowance: currentAllowance,
+            expectedAllowance: DOCUMENTED_RESIDUAL_ALLOWANCE,
+            isClean: isClean,
+            finding: finding
+        });
     }
 
     /// @dev Adapters hold nothing. Anything sent here goes straight back to the router, which

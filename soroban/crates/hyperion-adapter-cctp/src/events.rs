@@ -12,6 +12,19 @@
 
 use soroban_sdk::{contractevent, Address, BytesN, String};
 
+/// Diagnostics announced for CCTP approval lifecycle during dispatch.
+#[contractevent(topics = ["hyperion", "cctp_approval"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalAudited {
+    #[topic]
+    pub token: Address,
+    #[topic]
+    pub spender: Address,
+    pub allowance_before: i128,
+    pub allowance_after: i128,
+    pub is_clean: bool,
+}
+
 /// Funds handed to Circle on the way out.
 #[contractevent(topics = ["hyperion", "cctp_out"])]
 #[derive(Clone, Debug, Eq, PartialEq)]

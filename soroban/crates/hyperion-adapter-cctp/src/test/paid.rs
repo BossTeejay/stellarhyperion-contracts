@@ -2,7 +2,8 @@ use super::setup::{net_of, World, EVM_DECIMALS, HUNDRED};
 use hyperion_core::{HyperionError, RouteKind};
 use hyperion_router::{Destination, OutboundRequest};
 use soroban_sdk::{
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    events::Event as _,
+    testutils::{Address as _, Events, MockAuth, MockAuthInvoke},
     Address, Bytes, BytesN, IntoVal,
 };
 
@@ -220,4 +221,69 @@ fn cctp_explanation_rejects_restricted_forwarding_and_unrepresentable_receive() 
     );
     assert_eq!(w.messenger().burn_count(), 0);
     assert_eq!(w.token().balance(&w.treasury), 0);
+}
+
+#[test]
+fn paid_messenger_failure_after_burn_rolls_back_fees_flow_nonce_hook_and_approval() {
+    let w = World::new();
+    w.router()
+        .bridge_out_with_gas(&w.user, &request(&w), &1_000_000);
+    let burn_before = w.messenger().last_burn();
+    let hook_before = w.messenger().last_hook();
+    let user_before = w.token().balance(&w.user);
+    let treasury_before = w.token().balance(&w.treasury);
+    let flow_before = w.router().flow_available(&w.token_id, &RouteKind::Cctp);
+    w.token()
+        .approve(&w.adapter_id, &w.messenger_id, &500, &200_000);
+    w.messenger().set_should_revert(&true);
+    let events_before = w.env.events().all();
+    assert!(w
+        .router()
+        .try_bridge_out_with_gas(&w.user, &request(&w), &2_000_000)
+        .is_err());
+    assert_eq!(w.token().balance(&w.user), user_before);
+    assert_eq!(w.token().balance(&w.treasury), treasury_before);
+    assert_eq!(w.token().balance(&w.router_id), 0);
+    assert_eq!(w.token().balance(&w.adapter_id), 0);
+    assert_eq!(w.token().allowance(&w.adapter_id, &w.messenger_id), 500);
+    assert!(w.env.events().all() == events_before);
+    assert_eq!(w.messenger().burn_count(), 1);
+    assert_eq!(w.messenger().last_burn(), burn_before);
+    assert_eq!(w.messenger().last_hook(), hook_before);
+    assert_eq!(w.router().last_out_nonce(), 1);
+    assert_eq!(
+        w.router().flow_available(&w.token_id, &RouteKind::Cctp),
+        flow_before
+    );
+    w.messenger().set_should_revert(&false);
+    assert_eq!(
+        w.router()
+            .bridge_out_with_gas(&w.user, &request(&w), &2_000_000),
+        2
+    );
+    assert_eq!(w.messenger().burn_count(), 2);
+    assert_eq!(w.token().balance(&w.user), user_before - HUNDRED);
+    assert_eq!(w.token().allowance(&w.adapter_id, &w.messenger_id), 0);
+}
+
+#[test]
+fn paid_burn_publishes_the_same_verified_approval_diagnostics() {
+    let w = World::new();
+    w.token()
+        .approve(&w.adapter_id, &w.messenger_id, &500, &200_000);
+    w.router()
+        .bridge_out_with_gas(&w.user, &request(&w), &1_000_000);
+    let expected = crate::events::ApprovalAudited {
+        token: w.token_id.clone(),
+        spender: w.messenger_id.clone(),
+        allowance_before: 500,
+        allowance_after: 0,
+        is_clean: true,
+    };
+    assert!(w
+        .env
+        .events()
+        .all()
+        .events()
+        .contains(&expected.to_xdr(&w.env, &w.adapter_id)));
 }
