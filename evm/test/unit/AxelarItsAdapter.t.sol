@@ -343,90 +343,97 @@ contract AxelarItsAdapterTest is Fixture {
 
     function test_in_flight_messages_transition_during_and_after_peer_rotation() public {
         bytes memory newPeer = hex"feed";
-
+        uint256 recipientBefore = usdc.balanceOf(bob);
+        uint256 itsBefore = usdc.balanceOf(address(its));
         vm.prank(admin);
         adapter.proposePeerRotation(STELLAR, newPeer, 1 hours);
 
-        // In-flight window: delivery from active peer succeeds
-        _fund(DELIVERY);
+        // Only the current peer may deliver during the proposal window.
         bytes32 res1 = its.deliver(
             address(adapter),
             keccak256("cmd1"),
             AXELAR_STELLAR,
             peerAddress,
-            _outboundNote(recipient, SOURCE_NONCE),
+            _outboundNote(bob, SOURCE_NONCE),
             TOKEN_ID,
             address(usdc),
             DELIVERY
         );
         assertEq(res1, adapter.EXECUTE_SUCCESS());
+        assertEq(usdc.balanceOf(bob), recipientBefore + DELIVERY);
+        assertEq(usdc.balanceOf(address(its)), itsBefore - DELIVERY);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
 
-        // Delivery from pending peer fails
-        _fund(DELIVERY);
         vm.expectRevert(UnexpectedRailContract.selector);
         its.deliver(
             address(adapter),
             keccak256("cmd2"),
             AXELAR_STELLAR,
             newPeer,
-            _outboundNote(recipient, SOURCE_NONCE),
+            _outboundNote(bob, SOURCE_NONCE),
             TOKEN_ID,
             address(usdc),
             DELIVERY
         );
+        assertEq(usdc.balanceOf(bob), recipientBefore + DELIVERY);
+        assertEq(usdc.balanceOf(address(its)), itsBefore - DELIVERY);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
 
-        // Apply rotation
         vm.warp(block.timestamp + 1 hours);
         vm.prank(admin);
         adapter.applyPeerRotation(STELLAR);
-
-        // After rotation: delivery from new peer succeeds
         bytes32 res3 = its.deliver(
             address(adapter),
             keccak256("cmd3"),
             AXELAR_STELLAR,
             newPeer,
-            _outboundNote(recipient, SOURCE_NONCE),
+            _outboundNote(bob, SOURCE_NONCE),
             TOKEN_ID,
             address(usdc),
             DELIVERY
         );
         assertEq(res3, adapter.EXECUTE_SUCCESS());
+        assertEq(usdc.balanceOf(bob), recipientBefore + 2 * DELIVERY);
+        assertEq(usdc.balanceOf(address(its)), itsBefore - 2 * DELIVERY);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
 
-        // Delivery from old peer now fails
-        _fund(DELIVERY);
         vm.expectRevert(UnexpectedRailContract.selector);
         its.deliver(
             address(adapter),
             keccak256("cmd4"),
             AXELAR_STELLAR,
             peerAddress,
-            _outboundNote(recipient, SOURCE_NONCE),
+            _outboundNote(bob, SOURCE_NONCE),
             TOKEN_ID,
             address(usdc),
             DELIVERY
         );
+        assertEq(usdc.balanceOf(bob), recipientBefore + 2 * DELIVERY);
+        assertEq(usdc.balanceOf(address(its)), itsBefore - 2 * DELIVERY);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
     }
 
     function test_remove_peer_clears_mappings_and_rejects_deliveries() public {
+        uint256 recipientBefore = usdc.balanceOf(bob);
+        uint256 itsBefore = usdc.balanceOf(address(its));
         vm.prank(admin);
         adapter.removePeer(STELLAR);
-
         assertFalse(adapter.supportsChain(STELLAR));
         assertEq(bytes(adapter.chainForAxelarName(AXELAR_STELLAR)).length, 0);
-
-        _fund(DELIVERY);
         vm.expectRevert(RailNotConfigured.selector);
         its.deliver(
             address(adapter),
             keccak256("cmd5"),
             AXELAR_STELLAR,
             peerAddress,
-            _outboundNote(recipient, SOURCE_NONCE),
+            _outboundNote(bob, SOURCE_NONCE),
             TOKEN_ID,
             address(usdc),
             DELIVERY
         );
+        assertEq(usdc.balanceOf(bob), recipientBefore);
+        assertEq(usdc.balanceOf(address(its)), itsBefore);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
     }
 
     function test_retired_names_cannot_be_relinked_or_reused_under_an_alias() public {
