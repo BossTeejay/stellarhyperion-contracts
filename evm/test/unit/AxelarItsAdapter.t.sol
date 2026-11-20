@@ -1067,10 +1067,10 @@ contract AxelarItsAdapterTest is Fixture {
     }
 
     function test_inspect_inbound_note() public view {
-        bytes memory note = _inboundNote(AddressKind.Account, STELLAR_ALICE, 99);
+        bytes memory note = _inboundNote(AddressKind.Account, G_ADDR, 99);
         (AddressKind kind, string memory strkey, uint64 nonce) = adapter.inspectInboundNote(note);
         assertEq(uint8(kind), uint8(AddressKind.Account));
-        assertEq(strkey, STELLAR_ALICE);
+        assertEq(strkey, G_ADDR);
         assertEq(nonce, 99);
     }
 

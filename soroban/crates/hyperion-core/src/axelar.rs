@@ -215,7 +215,7 @@ pub fn verify_outbound_reconciliation(
     expected_command_id: &BytesN<32>,
     candidate: &CandidatePayment,
 ) -> Result<(), ReconciliationDiscrepancy> {
-    let empty_id = BytesN::from_array(&candidate.token_id.env(), &[0u8; 32]);
+    let empty_id = BytesN::from_array(candidate.token_id.env(), &[0u8; 32]);
     if expected_command_id == &empty_id || candidate.command_id == empty_id {
         return Err(ReconciliationDiscrepancy::CommandIdentityMissing);
     }
@@ -259,7 +259,7 @@ pub fn verify_inbound_reconciliation(
     if dispatched_amount <= 0 || candidate.amount <= 0 {
         return Err(ReconciliationDiscrepancy::InvalidAmount);
     }
-    if dispatched_token_id == &BytesN::from_array(&dispatched_token_id.env(), &[0; 32]) {
+    if dispatched_token_id == &BytesN::from_array(dispatched_token_id.env(), &[0; 32]) {
         return Err(ReconciliationDiscrepancy::InvalidTokenIdentity);
     }
     if note.destination != candidate.recipient {

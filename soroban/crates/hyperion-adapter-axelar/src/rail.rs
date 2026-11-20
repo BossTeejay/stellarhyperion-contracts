@@ -33,6 +33,7 @@
 //!   hashes, block numbers, raw note payloads, token addresses) without relying on display nonces for
 //!   correctness.
 
+//!
 //! These comparisons are development evidence only: no event authentication, finality, custody or
 //! execution proof is established. Source and candidate raw references remain separate when keys
 //! overlap. See `docs/AXELAR_RECONCILIATION.md` for the report boundary and compatibility details.
