@@ -14,6 +14,15 @@ use soroban_sdk::{contractclient, Address, BytesN, Env, String};
 // received in this adapter's balance is guaranteed to equal `amount` exactly.
 #[contractclient(name = "RailAdapterClient")]
 pub trait RailAdapter {
+    fn check_dispatch(
+        env: Env,
+        caller: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        gas_amount: Option<i128>,
+    );
     /// Push `amount` of `token`, already sitting in this adapter's balance, onto the rail.
     // Push `amount` of `token`, already sitting in this adapter's balance, onto the rail.
     //
@@ -29,6 +38,11 @@ pub trait RailAdapter {
     );
 }
 
+/// Paid rail adapter interface for routes that collect destination relay gas upfront.
+///
+/// Router quotes report `actual_debit` for the bridge transfer itself (`fee + net_amount`).
+/// When `bridge_out_with_gas` is used and `gas_token() == token`, the atomic source transaction
+/// debits `actual_debit + gas_amount` from `sender`.
 #[soroban_sdk::contractclient(name = "PaidRailAdapterClient")]
 pub trait PaidRailAdapter {
     fn gas_token(env: Env) -> Address;

@@ -25,6 +25,11 @@ contract MockTokenMessenger is ITokenMessengerV2 {
 
     Burn private _lastBurn;
     uint256 public burnCount;
+    bool public shouldRevert;
+
+    function setShouldRevert(bool _shouldRevert) external {
+        shouldRevert = _shouldRevert;
+    }
 
     function depositForBurnWithHook(
         uint256 amount,
@@ -52,6 +57,9 @@ contract MockTokenMessenger is ITokenMessengerV2 {
             hookData: hookData
         });
         ++burnCount;
+        if (shouldRevert) {
+            revert("MockTokenMessenger: burn failed");
+        }
     }
 
     function depositForBurn(
@@ -76,6 +84,9 @@ contract MockTokenMessenger is ITokenMessengerV2 {
             hookData: ""
         });
         ++burnCount;
+        if (shouldRevert) {
+            revert("MockTokenMessenger: burn failed");
+        }
     }
 
     function lastBurn() external view returns (Burn memory) {
