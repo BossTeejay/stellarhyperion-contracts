@@ -1,7 +1,7 @@
 use hyperion_core::HyperionError;
 use soroban_sdk::{contracttype, Address, BytesN, Env, String};
 
-use crate::types::{ChainLink, Config};
+use crate::types::{ChainLink, Config, PendingRotation};
 
 pub const BUMP_THRESHOLD: u32 = 17_280;
 pub const BUMP_TO: u32 = 518_400;
@@ -23,6 +23,13 @@ pub enum DataKey {
     /// about; an unmapped one is refused here, which is the correct behaviour on the day Axelar
     /// registers a token nobody on this side has looked at yet.
     Token(BytesN<32>),
+    /// Pending peer rotation for a chain.
+    PendingRotation(String),
+    /// Emergency disable flag for a chain.
+    Disabled(String),
+    /// Retired names cannot be reused to bypass a peer rotation delay.
+    RetiredChain(String),
+    RetiredSource(String),
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -133,6 +140,73 @@ pub fn touch_link(env: &Env, chain: &String) -> u32 {
         touched += 1;
     }
     touched
+}
+
+/// New rotation/disable metadata shares the instance lifetime with configuration.
+pub fn pending_rotation(env: &Env, chain: &String) -> Option<PendingRotation> {
+    env.storage()
+        .instance()
+        .get(&DataKey::PendingRotation(chain.clone()))
+}
+
+pub fn set_pending_rotation(env: &Env, chain: &String, rotation: &PendingRotation) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingRotation(chain.clone()), rotation);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn clear_pending_rotation(env: &Env, chain: &String) {
+    env.storage()
+        .instance()
+        .remove(&DataKey::PendingRotation(chain.clone()));
+}
+
+pub fn is_chain_disabled(env: &Env, chain: &String) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Disabled(chain.clone()))
+        .unwrap_or(false)
+}
+
+pub fn set_chain_disabled(env: &Env, chain: &String, disabled: bool) {
+    let key = DataKey::Disabled(chain.clone());
+    if disabled {
+        env.storage().instance().set(&key, &true);
+    } else {
+        env.storage().instance().remove(&key);
+    }
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn names_retired(env: &Env, chain: &String, axelar_chain: &String) -> bool {
+    env.storage()
+        .instance()
+        .has(&DataKey::RetiredChain(chain.clone()))
+        || env
+            .storage()
+            .instance()
+            .has(&DataKey::RetiredSource(axelar_chain.clone()))
+}
+
+pub fn remove_link(env: &Env, chain: &String) {
+    if let Some(link) = link(env, chain) {
+        env.storage()
+            .instance()
+            .set(&DataKey::RetiredChain(chain.clone()), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::RetiredSource(link.axelar_chain.clone()), &true);
+        env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Source(link.axelar_chain));
+    }
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Link(chain.clone()));
+    clear_pending_rotation(env, chain);
+    set_chain_disabled(env, chain, false);
 }
 
 pub fn touch_token(env: &Env, token: &Address) -> u32 {

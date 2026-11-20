@@ -57,3 +57,50 @@ fn combined_physical_peer_key_footprint_is_bounded() {
         Err(Ok(HyperionError::InvalidLimit))
     );
 }
+
+#[test]
+fn new_trust_metadata_shares_instance_lifetime_and_maintenance_keeps_it_intact() {
+    let w = World::new();
+    let next_peer = soroban_sdk::BytesN::from_array(&w.env, &[0x99; 20]);
+    w.adapter()
+        .propose_peer_rotation(&w.ethereum(), &next_peer, &3_600);
+    w.adapter().set_chain_enabled(&w.ethereum(), &false);
+    let pending = w.adapter().get_pending_rotation(&w.ethereum());
+    w.env
+        .ledger()
+        .with_mut(|ledger| ledger.sequence_number += 4_097);
+    w.env.set_auths(&[]);
+    let summary = w.adapter().maintain_storage(
+        &vec![&w.env],
+        &vec![&w.env, w.ethereum()],
+        &vec![&w.env],
+        &vec![&w.env],
+        &vec![&w.env],
+    );
+    assert_eq!(summary.peer_trust_touched, 2);
+    assert_eq!(summary.total_keys_touched, 2);
+    assert_eq!(w.adapter().get_pending_rotation(&w.ethereum()), pending);
+    assert!(!w.adapter().is_chain_enabled(&w.ethereum()));
+    w.env.as_contract(&w.adapter_id, || {
+        assert!(w
+            .env
+            .storage()
+            .instance()
+            .has(&DataKey::PendingRotation(w.ethereum())));
+        assert!(w
+            .env
+            .storage()
+            .instance()
+            .has(&DataKey::Disabled(w.ethereum())));
+        assert!(!w
+            .env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingRotation(w.ethereum())));
+        assert!(!w
+            .env
+            .storage()
+            .persistent()
+            .has(&DataKey::Disabled(w.ethereum())));
+    });
+}

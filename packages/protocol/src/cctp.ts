@@ -31,6 +31,47 @@ export const FINALITY_THRESHOLD_FINALIZED = 2000;
 /** Version byte on Hyperion's own hook payload. */
 export const HOOK_VERSION = 1;
 
+/** Diagnostic format version for CCTP approval lifecycle audits. */
+export const APPROVAL_DIAGNOSTICS_VERSION = 1;
+
+/** Documented residual allowance expected between adapter and token messenger. */
+export const DOCUMENTED_RESIDUAL_ALLOWANCE = 0n;
+
+/** Findings produced by the allowance auditor. */
+export enum ApprovalFinding {
+  Clean = 0,
+  UnexpectedResidual = 1,
+  Unavailable = 2,
+}
+
+/** Versioned diagnostics snapshot of the CCTP allowance and approval lifecycle. */
+export interface ApprovalDiagnostics {
+  readonly version: number;
+  /** Zero is a placeholder when finding is Unavailable. */
+  readonly allowance: bigint;
+  readonly expectedAllowance: bigint;
+  readonly isClean: boolean;
+  readonly finding: ApprovalFinding;
+}
+
+/** Inspect a raw token reading without mutating approvals. Null means the read failed. */
+export function auditCctpAllowance(allowance: bigint | null): ApprovalDiagnostics {
+  const readable = allowance !== null && allowance >= 0n && allowance < 1n << 256n;
+  const value = readable ? allowance : 0n;
+  const isClean = readable && value === DOCUMENTED_RESIDUAL_ALLOWANCE;
+  return {
+    version: APPROVAL_DIAGNOSTICS_VERSION,
+    allowance: value,
+    expectedAllowance: DOCUMENTED_RESIDUAL_ALLOWANCE,
+    isClean,
+    finding: !readable
+      ? ApprovalFinding.Unavailable
+      : isClean
+        ? ApprovalFinding.Clean
+        : ApprovalFinding.UnexpectedResidual,
+  };
+}
+
 /** Header field offsets. */
 const MSG_VERSION = 0;
 const MSG_SOURCE_DOMAIN = 4;

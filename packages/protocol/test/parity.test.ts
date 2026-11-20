@@ -166,6 +166,39 @@ describe("the address kinds", () => {
   });
 });
 
+describe("the stateful router reference model parity", () => {
+  it("shares operation words across chains while conserving balances and fixed-recipient liabilities", () => {
+    const root = resolve(evmRoot, "..");
+    const rows = ["soroban", "evm"].map((chain) =>
+      read(join(root, "testdata", `router-model-${chain}.csv`))
+        .trim()
+        .split("\n")
+        .slice(1)
+        .map((line) => line.split(",").map(BigInt)),
+    );
+    expect(rows[0]!.length).toBe(64);
+    expect(rows[1]!.map((row) => row[0])).toEqual(rows[0]!.map((row) => row[0]));
+    const operations = new Set<bigint>();
+    for (const chain of rows) {
+      for (const row of chain) {
+        expect(row.length).toBe(20);
+        operations.add((row[0]! & 255n) % 10n);
+        expect(row.slice(3, 9).reduce((sum, value) => sum + value, 0n)).toBe(20_000_000_000_000n);
+        expect(row[18]! + row[19]!).toBe(row[6]);
+        expect(row.slice(14, 18).every((value) => value >= 0n && value <= 1_000_000_000n)).toBe(
+          true,
+        );
+      }
+    }
+    expect([...operations].sort()).toEqual([0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n]);
+    // Step8 matures the Soroban proposal after3600seconds; EVM still requires2days.
+    expect(rows[0]![8]![1]).toBe(1n);
+    expect(rows[1]![8]![1]).toBe(0n);
+    // The same outbound request retains Soroban decimal dust; EVM expands6→7decimals.
+    expect(rows[0]![18]![3]).not.toBe(rows[1]![18]![3]);
+  });
+});
+
 describe("the quote blockers", () => {
   it("matches the Solidity enum, in order", () => {
     // These travel in a struct an app reads over eth_call, so a reordering would relabel every

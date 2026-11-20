@@ -2,7 +2,11 @@
 
 use hyperion_core::{HyperionError, RouteKind};
 use hyperion_router::{Destination, OutboundRequest};
-use soroban_sdk::{testutils::Address as _, Address, BytesN, String};
+use soroban_sdk::{
+    events::Event as _,
+    testutils::{Address as _, Events},
+    Address, BytesN, String,
+};
 
 use super::setup::{net_of, World, ETHEREUM_DOMAIN, EVM_DECIMALS, HUNDRED};
 
@@ -64,6 +68,44 @@ fn the_allowance_circle_needed_is_closed_before_the_call_returns() {
     // An allowance outliving the transaction that needed it is a standing claim on the adapter's
     // balance. Circle has no reason to keep one and this contract has no reason to grant one.
     assert_eq!(w.token().allowance(&w.adapter_id, &w.messenger_id), 0);
+}
+
+#[test]
+fn preview_and_dispatch_share_burn_boundary_for_invalid_stored_fee_policy() {
+    let w = World::new();
+    w.fund_adapter(HUNDRED);
+    // Inject malformed persisted state directly: the normal policy setter rejects this value.
+    // Both the read-only validator and execution still enforce the burn boundary on reads.
+    w.env.as_contract(&w.adapter_id, || {
+        let mut cfg = crate::storage::config(&w.env).unwrap();
+        cfg.max_fee_bps = 10_000;
+        crate::storage::set_config(&w.env, &cfg);
+    });
+    assert_eq!(
+        w.adapter().try_check_dispatch(
+            &w.router_id,
+            &w.token_id,
+            &HUNDRED,
+            &w.ethereum(),
+            &evm(&w, 0x11),
+            &None,
+        ),
+        Err(Ok(HyperionError::FeeTooHigh))
+    );
+    assert_eq!(
+        w.adapter().try_dispatch(
+            &w.router_id,
+            &w.token_id,
+            &HUNDRED,
+            &w.ethereum(),
+            &evm(&w, 0x11),
+            &1,
+        ),
+        Err(Ok(HyperionError::FeeTooHigh))
+    );
+    assert_eq!(w.token().balance(&w.adapter_id), HUNDRED);
+    assert_eq!(w.token().allowance(&w.adapter_id, &w.messenger_id), 0);
+    assert_eq!(w.messenger().burn_count(), 0);
 }
 
 #[test]
@@ -260,4 +302,118 @@ fn a_sweep_follows_the_treasury_the_router_names_today() {
     w.adapter().sweep(&w.relayer, &w.token_id);
     assert_eq!(w.token().balance(&new_treasury), 500);
     assert_eq!(w.token().balance(&w.treasury), 0);
+}
+
+#[test]
+fn the_allowance_auditor_reports_clean_state_after_dispatch() {
+    let w = World::new();
+    w.router().bridge_out(&w.user, &request(&w, HUNDRED));
+
+    let diag = w.adapter().audit_allowance(&w.token_id);
+    assert_eq!(
+        diag.version,
+        hyperion_core::cctp::APPROVAL_DIAGNOSTICS_VERSION
+    );
+    assert_eq!(diag.allowance, 0);
+    assert_eq!(diag.expected_allowance, 0);
+    assert!(diag.is_clean);
+    assert_eq!(diag.finding, hyperion_core::cctp::ApprovalFinding::Clean);
+}
+
+#[test]
+fn the_allowance_auditor_reports_residual_approvals_without_mutating_state() {
+    let w = World::new();
+    let residual = 500_000i128;
+    // Simulate an unexpected residual approval granted to the token messenger
+    w.token()
+        .approve(&w.adapter_id, &w.messenger_id, &residual, &200_000);
+
+    let diag = w.adapter().audit_allowance(&w.token_id);
+    assert_eq!(
+        diag.version,
+        hyperion_core::cctp::APPROVAL_DIAGNOSTICS_VERSION
+    );
+    assert_eq!(diag.allowance, residual);
+    assert_eq!(diag.expected_allowance, 0);
+    assert!(!diag.is_clean);
+    assert_eq!(
+        diag.finding,
+        hyperion_core::cctp::ApprovalFinding::UnexpectedResidual
+    );
+
+    // Verify read-only property: the auditor never mutates the allowance
+    assert_eq!(
+        w.token().allowance(&w.adapter_id, &w.messenger_id),
+        residual
+    );
+}
+
+#[test]
+fn a_reverting_messenger_fixture_preserves_source_atomicity() {
+    let w = World::new();
+    w.router().bridge_out(&w.user, &request(&w, HUNDRED));
+    let burn_before = w.messenger().last_burn();
+    let user_before = w.token().balance(&w.user);
+    let treasury_before = w.token().balance(&w.treasury);
+    let flow_before = w.router().flow_available(&w.token_id, &RouteKind::Cctp);
+    w.token()
+        .approve(&w.adapter_id, &w.messenger_id, &500, &200_000);
+    w.messenger().set_should_revert(&true);
+    let events_before = w.env.events().all();
+    assert!(w
+        .router()
+        .try_bridge_out(&w.user, &request(&w, HUNDRED))
+        .is_err());
+    assert_eq!(w.token().balance(&w.user), user_before);
+    assert_eq!(w.token().balance(&w.treasury), treasury_before);
+    assert_eq!(w.token().balance(&w.router_id), 0);
+    assert_eq!(w.token().balance(&w.adapter_id), 0);
+    assert_eq!(w.token().allowance(&w.adapter_id, &w.messenger_id), 500);
+    assert!(w.env.events().all() == events_before);
+    assert_eq!(w.messenger().burn_count(), 1);
+    assert_eq!(w.messenger().last_burn(), burn_before);
+    assert_eq!(w.router().last_out_nonce(), 1);
+    assert_eq!(
+        w.router().flow_available(&w.token_id, &RouteKind::Cctp),
+        flow_before
+    );
+    w.messenger().set_should_revert(&false);
+    assert_eq!(w.router().bridge_out(&w.user, &request(&w, HUNDRED)), 2);
+    assert_eq!(w.messenger().burn_count(), 2);
+    assert_eq!(w.token().balance(&w.user), user_before - HUNDRED);
+    assert_eq!(w.token().allowance(&w.adapter_id, &w.messenger_id), 0);
+}
+
+#[test]
+fn unreadable_allowance_has_an_explicit_unavailable_finding() {
+    let w = World::new();
+    let unknown = Address::generate(&w.env);
+    let diag = w.adapter().audit_allowance(&unknown);
+    assert!(!diag.is_clean);
+    assert_eq!(diag.allowance, 0);
+    assert_eq!(
+        diag.finding,
+        hyperion_core::cctp::ApprovalFinding::Unavailable
+    );
+}
+
+#[test]
+fn allowance_event_records_the_residual_and_verified_reset() {
+    let w = World::new();
+    w.token()
+        .approve(&w.adapter_id, &w.messenger_id, &500, &200_000);
+    w.router().bridge_out(&w.user, &request(&w, HUNDRED));
+    let expected = crate::events::ApprovalAudited {
+        token: w.token_id.clone(),
+        spender: w.messenger_id.clone(),
+        allowance_before: 500,
+        allowance_after: 0,
+        is_clean: true,
+    };
+    assert!(w
+        .env
+        .events()
+        .all()
+        .events()
+        .contains(&expected.to_xdr(&w.env, &w.adapter_id)));
 }
