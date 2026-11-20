@@ -37,6 +37,11 @@ const INBOUND_NOTE_MIN = 1 + 3 + 8;
 /** Axelar's own envelope version for "there is a payload and it is for a contract". */
 export const METADATA_CONTRACT_CALL = 0;
 
+/**
+ * Minimum delay required before a proposed Axelar peer rotation can become active (1 hour).
+ */
+export const MIN_PEER_ROTATION_DELAY = 3600n;
+
 export interface OutboundNote {
   /** The EVM address the funds are for, once they land. */
   readonly recipient: Hex;

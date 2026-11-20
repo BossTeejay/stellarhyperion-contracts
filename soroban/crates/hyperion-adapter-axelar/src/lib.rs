@@ -60,6 +60,7 @@ use hyperion_core::{
     axelar::{InboundNote, OutboundNote},
     inbound::{Origin, Recipient, RouterClient},
     AdapterKeyCoverage, HyperionError, MaintenanceSummary, RouteKind, MAX_MAINTENANCE_BATCH,
+    MIN_PEER_ROTATION_DELAY,
 };
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
@@ -69,7 +70,7 @@ use soroban_sdk::{
 };
 
 use rail::{InterchainTokenServiceClient, Token, TokenManagerType};
-use types::{ChainLink, Config};
+use types::{ChainLink, Config, PendingRotation};
 
 #[contract]
 pub struct AxelarAdapter;
@@ -113,6 +114,28 @@ impl AxelarAdapter {
     // Outbound
     // ---------------------------------------------------------------------------------------
 
+    // Auth-free validation only. Dispatch keeps caller/sender authorization unchanged.
+    pub fn check_dispatch(
+        env: Env,
+        caller: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        gas_amount: Option<i128>,
+    ) -> Result<(), HyperionError> {
+        validate_dispatch(
+            &env,
+            &caller,
+            &token,
+            amount,
+            &destination_chain,
+            &destination,
+            gas_amount,
+        )?;
+        Ok(())
+    }
+
     /// Hand funds the router has already moved here over to ITS.
     ///
     /// The router transfers the net amount in before calling, so by the time this runs the
@@ -128,16 +151,15 @@ impl AxelarAdapter {
         nonce: u64,
     ) -> Result<(), HyperionError> {
         caller.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.router {
-            return Err(HyperionError::Unauthorized);
-        }
-        if amount <= 0 {
-            return Err(HyperionError::InvalidAmount);
-        }
-        let link = storage::link(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
-        let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
-        let recipient = bytes32_to_evm(&env, &destination)?;
+        let (cfg, link, token_id, recipient) = validate_dispatch(
+            &env,
+            &caller,
+            &token,
+            amount,
+            &destination_chain,
+            &destination,
+            None,
+        )?;
 
         let this = env.current_contract_address();
         let its = InterchainTokenServiceClient::new(&env, &cfg.its);
@@ -257,19 +279,15 @@ impl AxelarAdapter {
     ) -> Result<(), HyperionError> {
         caller.require_auth();
         sender.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.router {
-            return Err(HyperionError::Unauthorized);
-        }
-        if cfg.route != RouteKind::AxelarIts {
-            return Err(HyperionError::UnsupportedRoute);
-        }
-        if amount <= 0 || gas_amount <= 0 {
-            return Err(HyperionError::InvalidAmount);
-        }
-        let link = storage::link(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
-        let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
-        let recipient = bytes32_to_evm(&env, &destination)?;
+        let (cfg, link, token_id, recipient) = validate_dispatch(
+            &env,
+            &caller,
+            &token,
+            amount,
+            &destination_chain,
+            &destination,
+            Some(gas_amount),
+        )?;
         let its = InterchainTokenServiceClient::new(&env, &cfg.its);
         let destination_address = Bytes::from_array(&env, &recipient.to_array());
         let asset = token::Client::new(&env, &token);
@@ -379,6 +397,9 @@ impl AxelarAdapter {
         // here, which is what happens on the day somebody deploys a Hyperion peer on a chain
         // this instance has never been told about.
         let chain = storage::chain_of(&env, &source_chain).ok_or(HyperionError::UnknownChain)?;
+        if storage::is_chain_disabled(&env, &chain) {
+            return Err(HyperionError::RouteDisabled);
+        }
         let link = storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
 
         // ITS will deliver a payload from anybody who pays for one. Only Hyperion's own
@@ -594,6 +615,20 @@ impl AxelarAdapter {
         if cfg.route == RouteKind::AxelarGmp && peer == BytesN::from_array(&env, &[0u8; 20]) {
             return Err(HyperionError::ZeroAddressKey);
         }
+        if storage::names_retired(&env, &chain, &axelar_chain) {
+            return Err(HyperionError::AlreadyConfigured);
+        }
+        if let Some(existing) = storage::link(&env, &chain) {
+            // Identical deployment reruns are harmless; every trust change uses the delayed path.
+            if existing.axelar_chain != axelar_chain || existing.peer != peer {
+                return Err(HyperionError::AlreadyConfigured);
+            }
+        }
+        if let Some(existing_chain) = storage::chain_of(&env, &axelar_chain) {
+            if existing_chain != chain {
+                return Err(HyperionError::AlreadyConfigured);
+            }
+        }
         let link = ChainLink {
             chain,
             axelar_chain,
@@ -606,6 +641,110 @@ impl AxelarAdapter {
             peer: link.peer,
         }
         .publish(&env);
+        Ok(())
+    }
+
+    /// Propose a rotation of the trusted peer contract on a remote chain.
+    ///
+    /// Requires an explicit timelock delay of at least [`MIN_PEER_ROTATION_DELAY`].
+    pub fn propose_peer_rotation(
+        env: Env,
+        chain: String,
+        new_peer: BytesN<20>,
+        delay: u64,
+    ) -> Result<(), HyperionError> {
+        let cfg = require_admin(&env)?;
+        let link = storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        if cfg.route == RouteKind::AxelarGmp && new_peer == BytesN::from_array(&env, &[0u8; 20]) {
+            return Err(HyperionError::ZeroAddressKey);
+        }
+        if new_peer == link.peer {
+            return Err(HyperionError::AlreadyConfigured);
+        }
+        if delay < MIN_PEER_ROTATION_DELAY {
+            return Err(HyperionError::TimelockDelayOutOfRange);
+        }
+        if storage::pending_rotation(&env, &chain).is_some() {
+            return Err(HyperionError::AlreadyConfigured);
+        }
+        let now = env.ledger().timestamp();
+        let eta = now
+            .checked_add(delay)
+            .ok_or(HyperionError::DecimalOverflow)?;
+        storage::set_pending_rotation(
+            &env,
+            &chain,
+            &PendingRotation {
+                new_peer: new_peer.clone(),
+                eta,
+                queued_at: now,
+            },
+        );
+        events::PeerRotationQueued {
+            chain,
+            current_peer: link.peer,
+            new_peer,
+            eta,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Apply a previously queued peer rotation after the timelock delay has elapsed.
+    pub fn apply_peer_rotation(env: Env, chain: String) -> Result<(), HyperionError> {
+        require_admin(&env)?;
+        let mut link = storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        let pending =
+            storage::pending_rotation(&env, &chain).ok_or(HyperionError::TimelockNotQueued)?;
+        let now = env.ledger().timestamp();
+        if now < pending.eta {
+            return Err(HyperionError::TimelockNotReady);
+        }
+        let old_peer = link.peer.clone();
+        link.peer = pending.new_peer.clone();
+        storage::set_link(&env, &link);
+        storage::clear_pending_rotation(&env, &chain);
+        events::PeerRotated {
+            chain,
+            old_peer,
+            new_peer: link.peer,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Cancel a pending peer rotation.
+    pub fn cancel_peer_rotation(env: Env, chain: String) -> Result<(), HyperionError> {
+        require_admin(&env)?;
+        let _link = storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        let pending =
+            storage::pending_rotation(&env, &chain).ok_or(HyperionError::TimelockNotQueued)?;
+        storage::clear_pending_rotation(&env, &chain);
+        events::PeerRotationCancelled {
+            chain,
+            cancelled_peer: pending.new_peer,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Emergency disable or re-enable a connected chain.
+    ///
+    /// Takes immediate effect: disabled chains refuse both dispatch and inbound delivery.
+    pub fn set_chain_enabled(env: Env, chain: String, enabled: bool) -> Result<(), HyperionError> {
+        require_admin(&env)?;
+        let _link = storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        storage::set_chain_disabled(&env, &chain, !enabled);
+        events::ChainStatusChanged { chain, enabled }.publish(&env);
+        Ok(())
+    }
+
+    /// Permanently retire both chain names and remove the active forward/reverse mapping.
+    pub fn unlink_chain(env: Env, chain: String) -> Result<(), HyperionError> {
+        require_admin(&env)?;
+        let _link = storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        storage::remove_link(&env, &chain);
+        events::LinkRemoved { chain }.publish(&env);
         Ok(())
     }
 
@@ -668,6 +807,19 @@ impl AxelarAdapter {
         storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)
     }
 
+    pub fn get_pending_rotation(
+        env: Env,
+        chain: String,
+    ) -> Result<Option<PendingRotation>, HyperionError> {
+        let _ = storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        Ok(storage::pending_rotation(&env, &chain))
+    }
+
+    pub fn is_chain_enabled(env: Env, chain: String) -> Result<bool, HyperionError> {
+        let _ = storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        Ok(!storage::is_chain_disabled(&env, &chain))
+    }
+
     /// Hyperion's name for the chain Axelar calls this.
     pub fn chain_for(env: Env, axelar_chain: String) -> Result<String, HyperionError> {
         storage::chain_of(&env, &axelar_chain).ok_or(HyperionError::UnknownChain)
@@ -728,4 +880,40 @@ fn replay_key(env: &Env, source_chain: &String, message_id: &String) -> BytesN<3
     env.crypto()
         .keccak256(&(source_chain.clone(), message_id.clone()).to_xdr(env))
         .into()
+}
+
+fn validate_dispatch(
+    env: &Env,
+    caller: &Address,
+    token: &Address,
+    amount: i128,
+    chain: &String,
+    destination: &BytesN<32>,
+    gas_amount: Option<i128>,
+) -> Result<(Config, ChainLink, BytesN<32>, BytesN<20>), HyperionError> {
+    let cfg = storage::config(env)?;
+    if caller != &cfg.router {
+        return Err(HyperionError::Unauthorized);
+    }
+    if gas_amount.is_some() && cfg.route != RouteKind::AxelarIts {
+        return Err(HyperionError::UnsupportedRoute);
+    }
+    if amount <= 0 || gas_amount.is_some_and(|gas| gas <= 0) {
+        return Err(HyperionError::InvalidAmount);
+    }
+    let link = storage::link(env, chain).ok_or(HyperionError::UnknownChain)?;
+    if storage::is_chain_disabled(env, chain) {
+        return Err(HyperionError::RouteDisabled);
+    }
+    let token_id = storage::token_id(env, token).ok_or(HyperionError::TokenNotMapped)?;
+    let recipient = bytes32_to_evm(env, destination)?;
+    // ITS debits both legs from the same balance when gas uses the bridged asset.
+    if let Some(gas) = gas_amount {
+        if InterchainTokenServiceClient::new(env, &cfg.its).native_token_address() == *token {
+            amount
+                .checked_add(gas)
+                .ok_or(HyperionError::DecimalOverflow)?;
+        }
+    }
+    Ok((cfg, link, token_id, recipient))
 }

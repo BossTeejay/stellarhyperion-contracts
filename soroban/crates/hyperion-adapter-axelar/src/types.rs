@@ -28,3 +28,15 @@ pub struct ChainLink {
     /// the single address an inbound note is accepted from.
     pub peer: BytesN<20>,
 }
+
+/// A proposed peer rotation awaiting the timelock delay to elapse.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingRotation {
+    /// The newly proposed peer contract on the remote chain.
+    pub new_peer: BytesN<20>,
+    /// Ledger timestamp when this rotation can first be applied.
+    pub eta: u64,
+    /// Ledger timestamp when the rotation was proposed.
+    pub queued_at: u64,
+}

@@ -26,8 +26,12 @@ pub use amount::{
 pub use axelar::{
     verify_inbound_reconciliation, verify_outbound_reconciliation, CandidateInboundPayment,
     CandidatePayment, InboundNote, OutboundNote, ReconciliationDiscrepancy,
+    MIN_PEER_ROTATION_DELAY,
 };
-pub use cctp::{BurnMessage, CctpMessage, HyperionHook};
+pub use cctp::{
+    validate_burn_boundary, ApprovalDiagnostics, ApprovalFinding, BurnMessage, CctpMessage,
+    HyperionHook, APPROVAL_DIAGNOSTICS_VERSION, DOCUMENTED_RESIDUAL_ALLOWANCE,
+};
 pub use error::HyperionError;
 pub use flow::FlowWindow;
 pub use inbound::{Origin, Recipient, Router, RouterClient};

@@ -28,6 +28,13 @@ use crate::strkey::StrkeyDestination;
 /// reader never has to remember which rail numbers its payloads differently from the other.
 pub const NOTE_VERSION: u8 = 1;
 
+/// Minimum delay required before a proposed peer rotation can become active.
+///
+/// 3600 seconds (1 hour) enforces an explicit review and timelock window so that
+/// malicious or accidental peer migrations can be detected, audited, and cancelled
+/// before becoming effective.
+pub const MIN_PEER_ROTATION_DELAY: u64 = 3_600;
+
 /// Version, twenty byte address, eight byte nonce.
 pub const OUTBOUND_NOTE_LEN: u32 = 29;
 
@@ -522,10 +529,7 @@ mod tests {
             message_id: message_id.clone(),
             token_id: token_id.clone(),
             amount,
-            recipient: StrkeyDestination::new(
-                AddressKind::Account,
-                String::from_str(&env, G_ADDR),
-            ),
+            recipient: StrkeyDestination::new(AddressKind::Account, String::from_str(&env, G_ADDR)),
         };
 
         assert_eq!(
@@ -544,5 +548,10 @@ mod tests {
             verify_inbound_reconciliation(&note, &token_id, amount, &empty_candidate),
             Err(ReconciliationDiscrepancy::CommandIdentityMissing)
         );
+    }
+
+    #[test]
+    fn minimum_peer_rotation_delay_is_at_least_one_hour() {
+        assert_eq!(MIN_PEER_ROTATION_DELAY, 3_600);
     }
 }
