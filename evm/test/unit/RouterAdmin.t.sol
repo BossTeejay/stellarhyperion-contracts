@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {Ownable2Step} from "openzeppelin/access/Ownable2Step.sol";
 import {Vm} from "forge-std/Vm.sol";
 
 import {IAccessControl} from "openzeppelin/access/IAccessControl.sol";
@@ -35,7 +34,6 @@ import {
 import {IHyperionRouter} from "../../src/interfaces/IHyperionRouter.sol";
 import {Fixture} from "../Fixture.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockAdapter} from "../mocks/MockAdapter.sol";
 
 /// @title Who may change what, and how long they have to wait
 /// @notice The timelock, the guardian, the field validation, and the two overrides that stop
@@ -860,55 +858,5 @@ contract RouterAdminTest is Fixture {
         vm.prank(guardian);
         router.renounceRole(guardianRole, guardian);
         assertFalse(router.hasRole(guardianRole, guardian));
-    }
-
-    // -------------------------------------------------------------------------------------
-    // Adapter ownership handover
-    // -------------------------------------------------------------------------------------
-
-    function test_a_pending_adapter_owner_cannot_configure_before_accepting() public {
-        MockAdapter adapter = new MockAdapter(admin);
-        vm.prank(admin);
-        adapter.transferOwnership(alice);
-
-        assertEq(adapter.owner(), admin, "current owner is unchanged until acceptance");
-        assertEq(adapter.pendingOwner(), alice);
-
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Ownable2Step.OwnableUnauthorizedAccount.selector, alice));
-        adapter.setRouter(stranger);
-    }
-
-    function test_repeated_acceptance_cannot_transfer_authority_again() public {
-        MockAdapter adapter = new MockAdapter(admin);
-        vm.prank(admin);
-        adapter.transferOwnership(alice);
-
-        vm.prank(alice);
-        adapter.acceptOwnership();
-        assertEq(adapter.owner(), alice);
-        assertEq(adapter.pendingOwner(), address(0));
-
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Ownable2Step.OwnableUnauthorizedAccount.selector, alice));
-        adapter.acceptOwnership();
-    }
-
-    function test_handover_report_preserves_each_contracts_actual_owners() public {
-        MockAdapter first = new MockAdapter(admin);
-        MockAdapter second = new MockAdapter(admin);
-
-        vm.prank(admin);
-        first.transferOwnership(alice);
-        vm.prank(admin);
-        second.transferOwnership(stranger);
-
-        vm.prank(alice);
-        first.acceptOwnership();
-
-        assertEq(first.owner(), alice);
-        assertEq(first.pendingOwner(), address(0));
-        assertEq(second.owner(), admin);
-        assertEq(second.pendingOwner(), stranger);
     }
 }

@@ -100,12 +100,6 @@ contract Fixture is Test {
         usdc.approve(address(router), type(uint256).max);
     }
 
-    /// @dev A router with nothing wired to it. For tests about a half finished deployment,
-    /// which the fixture's own `setUp` has already moved past.
-    function _freshRouter() internal returns (HyperionRouter) {
-        return new HyperionRouter(admin, guardian, treasury, FEE_BPS, TIMELOCK, FLOW_WINDOW);
-    }
-
     // -------------------------------------------------------------------------------------
     // Timelock shorthand
     // -------------------------------------------------------------------------------------
@@ -206,6 +200,12 @@ contract Fixture is Test {
         });
     }
 
+    /// @dev A router with nothing wired to it. For tests about a half finished deployment,
+    /// which the fixture's own `setUp` has already moved past.
+    function _freshRouter() internal returns (HyperionRouter) {
+        return new HyperionRouter(admin, guardian, treasury, FEE_BPS, TIMELOCK, FLOW_WINDOW);
+    }
+
     /// @dev Some other asset, over CCTP, to a classic account. For the decimal pairs USDC does
     /// not exercise.
     function _tokenRequest(address token, uint256 amount, uint8 destinationDecimals)
@@ -222,5 +222,20 @@ contract Fixture is Test {
     function _usdcRequest(uint256 amount) internal view returns (OutboundRequest memory request) {
         request = _request(amount, RouteKind.Cctp);
         request.token = address(usdc);
+    }
+
+    /// @dev Snapshot of the balances a conservation invariant needs: what the router holds,
+    /// what the treasury holds and what the sender holds. Taken before and after an operation
+    /// so a test can assert that the three sum to the same total.
+    struct BalanceSnapshot {
+        uint256 router;
+        uint256 treasury;
+        uint256 sender;
+    }
+
+    function _snapshot(address sender) internal view returns (BalanceSnapshot memory s) {
+        s.router = usdc.balanceOf(address(router));
+        s.treasury = usdc.balanceOf(treasury);
+        s.sender = usdc.balanceOf(sender);
     }
 }

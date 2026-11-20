@@ -16,7 +16,7 @@ enum RouteKind {
 /// @dev What kind of Stellar address a 32 byte key describes.
 ///
 /// Stellar has three, and a cross-chain message carries a bare key with nothing to say which.
-/// `G` is a classic ed25519 account, `C a Soroban contract, `M` a SEP-23 muxed account that
+/// `G` is a classic ed25519 account, `C` a Soroban contract, `M` a SEP-23 muxed account that
 /// shares one underlying `G` with thousands of others. Paying the wrong kind is not a reverted
 /// transaction, it is money delivered somewhere nobody holds a key for, so the kind travels
 /// alongside the key everywhere in this codebase.
@@ -87,6 +87,22 @@ struct PendingClaim {
     uint64 sourceNonce;
     uint64 createdAt;
     bool settled;
+}
+
+/// @dev Versioned operational result for one requested claim settlement.
+enum ClaimSettlementStatus {
+    Settled,
+    NotFound,
+    AlreadySettled,
+    RecipientRestricted,
+    InsufficientRouterBalance,
+    TokenUnavailable,
+    InvalidTokenPayout
+}
+
+struct ClaimSettlementResult {
+    uint64 id;
+    ClaimSettlementStatus status;
 }
 
 /// @dev Where an inbound delivery says it came from.
@@ -204,4 +220,15 @@ enum QuoteBlocker {
     MuxedNotSupported,
     InvalidDestination,
     ChainNotSupported
+}
+
+// Additive V2 result: the legacy RouteQuote tuple and its selectors remain unchanged.
+struct RouteQuoteV2 {
+    RouteQuote quote;
+    uint256 requestedAmount;
+    uint256 fee;
+    uint256 netAmount;
+    uint256 retainedDust;
+    uint256 actualDebit;
+    bool breakdownKnown;
 }
