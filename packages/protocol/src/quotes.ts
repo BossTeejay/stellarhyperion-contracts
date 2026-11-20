@@ -15,6 +15,12 @@ import { BPS_DENOMINATOR, MAX_DECIMALS, convertDecimals, floorToRepresentable } 
 import { tryParseStellarAddress, AddressKind } from "./addresses.js";
 import type { RouteKind } from "./routes.js";
 import { ROUTE_KINDS, carriesPayload, isCanonical, waitsOnAttestation } from "./routes.js";
+import {
+  resolveProviderAddressPair,
+  type ProviderAddressOverrides,
+  type ProviderAddressPair,
+} from "./registry/assets.js";
+import type { ChainKey } from "./chains.js";
 
 /**
  * Why a rail turned a quote down. Same integers as the Solidity enum and the Soroban one, in
@@ -190,6 +196,42 @@ export interface QuoteRequest {
   /** The destination address, exactly as it was pasted. */
   readonly strkey: string;
   readonly destinationDecimals: number;
+}
+
+/** Explicit provider context for callers that need provider-side token addresses with a quote. */
+export interface ProviderAwareQuoteRequest extends QuoteRequest {
+  readonly sourceChain: ChainKey;
+  readonly destinationChain: ChainKey;
+  readonly symbol: string;
+  readonly providerAddressOverrides: ProviderAddressOverrides;
+}
+
+export interface ProviderAwareQuoteResult {
+  readonly quote: RouteQuote;
+  readonly providerAddresses: ProviderAddressPair;
+}
+
+/**
+ * Quote one route while resolving both explicit provider addresses.
+ *
+ * Chain and precision continue to come from the request and snapshot; provider addresses are
+ * metadata only and cannot silently rewrite either.
+ */
+export function planQuoteWithProviderAddresses(
+  request: ProviderAwareQuoteRequest,
+  snapshot: RouterSnapshot,
+): ProviderAwareQuoteResult {
+  const providerAddresses = resolveProviderAddressPair(
+    request.sourceChain,
+    request.destinationChain,
+    request.symbol,
+    request.route,
+    request.providerAddressOverrides,
+  );
+  return {
+    quote: planQuote(request, snapshot),
+    providerAddresses,
+  };
 }
 
 function blocked(base: RouteQuote, reason: QuoteBlocker): RouteQuote {

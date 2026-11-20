@@ -107,3 +107,27 @@ and Sepolia entries ship as defaults and are marked `confirmed: false`, because 
 everywhere else" is a reasonable inference and not a reading. Stellar's CCTP addresses are absent
 entirely rather than guessed; they come from the deployment record. Shipping a plausible address as
 if it were verified is how somebody loses money to a deploy script that looked fine.
+
+## Provider token addresses
+
+Deployment token records may include an optional `providerAddresses` object keyed by rail slug.
+These addresses are kept separate from the canonical token address and its declared decimals:
+
+```json
+{
+  "address": "0x...",
+  "decimals": 6,
+  "flowLimit": "1000000000",
+  "routes": ["cctp"],
+  "providerAddresses": { "cctp": "0x..." }
+}
+```
+
+`parseProviderAddressOverrides` validates external override data against known chains, asset
+capabilities, provider slugs, and the address format for each chain. Quote callers can use
+`resolveProviderAddressPair`, `planQuoteWithProviderAddresses`, or
+`quoteBatchWithProviderAddresses` to require both ends of a same-network route explicitly. Missing
+pairs and malformed values raise `ProviderAddressError` with the failing field path; canonical
+token addresses, chain identities, and precision are never inferred from or replaced by provider
+overrides. Older deployment records remain valid because the field is optional. Adding overrides
+is therefore data-only and requires no schema-version change.

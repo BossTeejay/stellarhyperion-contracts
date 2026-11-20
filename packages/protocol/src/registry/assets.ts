@@ -11,9 +11,15 @@
  * `decimals()` on chain before registering anything regardless, because an address that is correct
  * today and a token that behaves as expected are two different claims.
  */
-import type { ChainKey } from "../chains.js";
+import { chain, isChainKey, type ChainKey } from "../chains.js";
 import type { Hex } from "../bytes.js";
-import { RouteKind } from "../routes.js";
+import { isStellarAddress } from "../addresses.js";
+import {
+  RouteKind,
+  ROUTE_SLUGS,
+  tryRouteFromSlug,
+  type RouteKind as RouteKindType,
+} from "../routes.js";
 
 /** What every asset entry says about itself, whichever chain it lives on. */
 interface AssetBase {
@@ -51,6 +57,144 @@ export interface StellarAsset extends AssetBase {
 }
 
 export type Asset = EvmAsset | StellarAsset;
+
+/** Explicit provider-side token addresses, kept separate from canonical asset metadata. */
+export type ProviderAddressOverrides = Readonly<
+  Partial<
+    Record<
+      ChainKey,
+      Readonly<Record<string, Partial<Record<RouteKindType, string>>>>
+    >
+  >
+>;
+
+export interface ProviderAddressPair {
+  readonly sourceChain: ChainKey;
+  readonly destinationChain: ChainKey;
+  readonly symbol: string;
+  readonly route: RouteKindType;
+  readonly source: string;
+  readonly destination: string;
+}
+
+/** Field-specific failure while reading or resolving provider address overrides. */
+export class ProviderAddressError extends Error {
+  constructor(
+    readonly path: string,
+    reason: string,
+  ) {
+    super(`provider address invalid at ${path}: ${reason}`);
+    this.name = "ProviderAddressError";
+  }
+}
+
+function providerAddress(value: unknown, path: string, chainKey: ChainKey): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ProviderAddressError(path, "expected a non empty address");
+  }
+  const network = chain(chainKey);
+  if (network.family === "evm" && !/^0x[0-9a-fA-F]{40}$/.test(value)) {
+    throw new ProviderAddressError(path, "expected a 20 byte EVM address");
+  }
+  if (
+    network.family === "stellar" &&
+    (!value.startsWith("C") || !isStellarAddress(value))
+  ) {
+    throw new ProviderAddressError(path, "expected a Stellar contract id");
+  }
+  return value;
+}
+
+/**
+ * Validate address overrides supplied by an external config.
+ *
+ * This only records the addresses that a provider uses. It never writes to the declared asset
+ * address, chain, or precision.
+ */
+export function parseProviderAddressOverrides(value: unknown): ProviderAddressOverrides {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ProviderAddressError("$", "expected an object keyed by chain");
+  }
+  const output: Partial<
+    Record<ChainKey, Record<string, Partial<Record<RouteKindType, string>>>>
+  > = {};
+  for (const [chainName, chainValue] of Object.entries(value)) {
+    const chainPath = `$.${chainName}`;
+    if (!isChainKey(chainName)) throw new ProviderAddressError(chainPath, "unknown chain key");
+    if (typeof chainValue !== "object" || chainValue === null || Array.isArray(chainValue)) {
+      throw new ProviderAddressError(chainPath, "expected an object keyed by asset symbol");
+    }
+    const chainOverrides: Record<string, Partial<Record<RouteKindType, string>>> = {};
+    for (const [symbol, symbolValue] of Object.entries(chainValue)) {
+      const symbolPath = `${chainPath}.${symbol}`;
+      const asset = assetOn(chainName, symbol);
+      if (asset === null) throw new ProviderAddressError(symbolPath, "unknown asset on chain");
+      if (typeof symbolValue !== "object" || symbolValue === null || Array.isArray(symbolValue)) {
+        throw new ProviderAddressError(symbolPath, "expected an object keyed by provider rail");
+      }
+      const routeOverrides: Partial<Record<RouteKindType, string>> = {};
+      for (const [slug, addressValue] of Object.entries(symbolValue)) {
+        const path = `${symbolPath}.${slug}`;
+        const route = tryRouteFromSlug(slug);
+        if (route === null) throw new ProviderAddressError(path, "unknown provider rail slug");
+        if (!asset.routes.includes(route)) {
+          throw new ProviderAddressError(path, "asset does not support this provider rail");
+        }
+        routeOverrides[route] = providerAddress(addressValue, path, chainName);
+      }
+      chainOverrides[symbol] = routeOverrides;
+    }
+    output[chainName] = chainOverrides;
+  }
+  return output;
+}
+
+/**
+ * Require an explicit provider address for both ends of a supported same-network route.
+ *
+ * Provider addresses are deliberately not inferred from canonical token addresses: providers may
+ * represent the same asset differently. The returned pair contains no chain or decimal overrides.
+ */
+export function resolveProviderAddressPair(
+  sourceChain: ChainKey,
+  destinationChain: ChainKey,
+  symbol: string,
+  route: RouteKindType,
+  overrides: ProviderAddressOverrides,
+): ProviderAddressPair {
+  const sourcePath = `providerAddresses.${sourceChain}.${symbol}.${ROUTE_SLUGS[route]}`;
+  const destinationPath = `providerAddresses.${destinationChain}.${symbol}.${ROUTE_SLUGS[route]}`;
+  if (chain(sourceChain).network !== chain(destinationChain).network) {
+    throw new ProviderAddressError(
+      "destinationChain",
+      "source and destination must use the same network",
+    );
+  }
+  const sourceAsset = assetOn(sourceChain, symbol);
+  if (sourceAsset === null || !sourceAsset.routes.includes(route)) {
+    throw new ProviderAddressError("sourceChain", "asset or provider capability is unavailable");
+  }
+  const destinationAsset = assetOn(destinationChain, symbol);
+  if (destinationAsset === null || !destinationAsset.routes.includes(route)) {
+    throw new ProviderAddressError("destinationChain", "asset or provider capability is unavailable");
+  }
+  const source = overrides[sourceChain]?.[symbol]?.[route];
+  if (source === undefined) {
+    throw new ProviderAddressError(sourcePath, "required provider address is missing");
+  }
+  const destination = overrides[destinationChain]?.[symbol]?.[route];
+  if (destination === undefined) {
+    throw new ProviderAddressError(destinationPath, "required provider address is missing");
+  }
+  return {
+    sourceChain,
+    destinationChain,
+    symbol,
+    route,
+    source: providerAddress(source, sourcePath, sourceChain),
+    destination: providerAddress(destination, destinationPath, destinationChain),
+  };
+}
 
 const STELLAR_DOCS = "developers.stellar.org, read during this build";
 const ARC_DOCS = "docs.arc.io, read during this build";

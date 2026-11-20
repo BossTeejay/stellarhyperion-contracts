@@ -13,13 +13,15 @@
  */
 import type { Hex } from "./bytes.js";
 import type { ChainKey } from "./chains.js";
-import { isChainKey } from "./chains.js";
+import { chain, isChainKey } from "./chains.js";
 import type { RouteKind } from "./routes.js";
 import { ROUTE_KINDS, ROUTE_SLUGS, tryRouteFromSlug } from "./routes.js";
 import { isStellarAddress } from "./addresses.js";
+import type { ProviderAddressOverrides } from "./registry/assets.js";
 
 /** The schema version of a deployment file, so an old file fails loudly rather than oddly. */
 export const DEPLOYMENT_SCHEMA_VERSION = 1;
+const MAX_UINT256 = (1n << 256n) - 1n;
 
 export interface DeployedAtEvm {
   /** Block the router landed in, as a string because JSON numbers stop being exact above 2^53. */
@@ -41,6 +43,8 @@ export interface EvmTokenDeployment {
   readonly flowLimit: string;
   /** Which rails this asset is registered for here. */
   readonly routes: readonly RouteKind[];
+  /** Optional provider-side token addresses; these never replace `address` or `decimals`. */
+  readonly providerAddresses?: Readonly<Partial<Record<RouteKind, Hex>>>;
 }
 
 export interface StellarTokenDeployment {
@@ -51,6 +55,8 @@ export interface StellarTokenDeployment {
   readonly decimals: number;
   readonly flowLimit: string;
   readonly routes: readonly RouteKind[];
+  /** Optional provider-side token addresses; these never replace `sacId` or `decimals`. */
+  readonly providerAddresses?: Readonly<Partial<Record<RouteKind, string>>>;
 }
 
 export interface EvmDeployment {
@@ -129,7 +135,7 @@ function asString(value: unknown, path: string): string {
 }
 
 function asInteger(value: unknown, path: string, min = 0): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < min) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min) {
     fail(path, `expected an integer of at least ${String(min)}`);
   }
   return value;
@@ -146,6 +152,8 @@ function asUintString(value: unknown, path: string): string {
     );
   }
   if (!/^\d+$/.test(value)) fail(path, "expected a decimal integer written as a string");
+  if (value.length > 78) fail(path, "expected a uint256 value");
+  if (BigInt(value) > MAX_UINT256) fail(path, "expected a uint256 value");
   return value;
 }
 
@@ -211,21 +219,54 @@ function asAdapters<T>(
   return out;
 }
 
+function asProviderAddresses<T>(
+  value: unknown,
+  path: string,
+  routes: readonly RouteKind[],
+  adapters: Readonly<Partial<Record<RouteKind, unknown>>>,
+  read: (entry: unknown, entryPath: string) => T,
+): Partial<Record<RouteKind, T>> {
+  const addresses = asAdapters(value, path, read);
+  for (const route of ROUTE_KINDS) {
+    if (addresses[route] === undefined) continue;
+    if (!routes.includes(route)) {
+      fail(`${path}.${ROUTE_SLUGS[route]}`, "token does not support this provider rail");
+    }
+    if (adapters[route] === undefined) {
+      fail(`${path}.${ROUTE_SLUGS[route]}`, "deployment has no adapter for this provider rail");
+    }
+  }
+  return addresses;
+}
+
 function readEvmDeployment(
   raw: Record<string, unknown>,
   chain: ChainKey,
   path: string,
 ): EvmDeployment {
+  const adapters = asAdapters(raw.adapters, `${path}.adapters`, asEvmAddress);
   const tokensRaw = asRecord(raw.tokens, `${path}.tokens`);
   const tokens: Record<string, EvmTokenDeployment> = {};
   for (const [symbol, entry] of Object.entries(tokensRaw)) {
     const tokenPath = `${path}.tokens.${symbol}`;
     const token = asRecord(entry, tokenPath);
+    const routes = asRoutes(token.routes, `${tokenPath}.routes`);
+    const providerAddresses =
+      token.providerAddresses === undefined
+        ? undefined
+        : asProviderAddresses(
+            token.providerAddresses,
+            `${tokenPath}.providerAddresses`,
+            routes,
+            adapters,
+            asEvmAddress,
+          );
     tokens[symbol] = {
       address: asEvmAddress(token.address, `${tokenPath}.address`),
       decimals: asInteger(token.decimals, `${tokenPath}.decimals`),
       flowLimit: asUintString(token.flowLimit, `${tokenPath}.flowLimit`),
-      routes: asRoutes(token.routes, `${tokenPath}.routes`),
+      routes,
+      ...(providerAddresses === undefined ? {} : { providerAddresses }),
     };
   }
 
@@ -235,7 +276,7 @@ function readEvmDeployment(
     chain,
     chainId: asInteger(raw.chainId, `${path}.chainId`, 1),
     router: asEvmAddress(raw.router, `${path}.router`),
-    adapters: asAdapters(raw.adapters, `${path}.adapters`, asEvmAddress),
+    adapters,
     tokens,
     treasury: asEvmAddress(raw.treasury, `${path}.treasury`),
     admin: asEvmAddress(raw.admin, `${path}.admin`),
@@ -257,18 +298,31 @@ function readStellarDeployment(
   chain: ChainKey,
   path: string,
 ): StellarDeployment {
+  const adapters = asAdapters(raw.adapters, `${path}.adapters`, asStellarContract);
   const tokensRaw = asRecord(raw.tokens, `${path}.tokens`);
   const tokens: Record<string, StellarTokenDeployment> = {};
   for (const [symbol, entry] of Object.entries(tokensRaw)) {
     const tokenPath = `${path}.tokens.${symbol}`;
     const token = asRecord(entry, tokenPath);
+    const routes = asRoutes(token.routes, `${tokenPath}.routes`);
+    const providerAddresses =
+      token.providerAddresses === undefined
+        ? undefined
+        : asProviderAddresses(
+            token.providerAddresses,
+            `${tokenPath}.providerAddresses`,
+            routes,
+            adapters,
+            asStellarContract,
+          );
     tokens[symbol] = {
       sacId: asStellarContract(token.sacId, `${tokenPath}.sacId`),
       code: asString(token.code, `${tokenPath}.code`),
       issuer: asStellarAccount(token.issuer, `${tokenPath}.issuer`),
       decimals: asInteger(token.decimals, `${tokenPath}.decimals`),
       flowLimit: asUintString(token.flowLimit, `${tokenPath}.flowLimit`),
-      routes: asRoutes(token.routes, `${tokenPath}.routes`),
+      routes,
+      ...(providerAddresses === undefined ? {} : { providerAddresses }),
     };
   }
 
@@ -288,7 +342,7 @@ function readStellarDeployment(
     chain,
     networkPassphrase: asString(raw.networkPassphrase, `${path}.networkPassphrase`),
     router: asStellarContract(raw.router, `${path}.router`),
-    adapters: asAdapters(raw.adapters, `${path}.adapters`, asStellarContract),
+    adapters,
     tokens,
     treasury: asStellarAccount(raw.treasury, `${path}.treasury`),
     admin: asStellarAccount(raw.admin, `${path}.admin`),
@@ -329,8 +383,12 @@ export function parseDeploymentSet(value: unknown): DeploymentSet {
     const record = asRecord(entry, path);
     const family = asString(record.family, `${path}.family`);
     if (family === "evm") {
+      if (chain(key).family !== "evm") fail(`${path}.family`, "does not match the chain family");
       networks[key] = readEvmDeployment(record, key, path);
     } else if (family === "stellar") {
+      if (chain(key).family !== "stellar") {
+        fail(`${path}.family`, "does not match the chain family");
+      }
       networks[key] = readStellarDeployment(record, key, path);
     } else {
       fail(`${path}.family`, `expected "evm" or "stellar", found "${family}"`);
@@ -376,4 +434,22 @@ export function tokenFor(
 /** Every chain in a set that has a router, which is the list a chain picker should offer. */
 export function deployedChains(set: DeploymentSet): readonly ChainKey[] {
   return Object.keys(set.networks).filter(isChainKey);
+}
+
+/** Collect deployment-scoped provider addresses into the endpoint-independent quote shape. */
+export function providerAddressOverridesFromDeploymentSet(
+  set: DeploymentSet,
+): ProviderAddressOverrides {
+  const overrides: Partial<
+    Record<ChainKey, Record<string, Partial<Record<RouteKind, string>>>>
+  > = {};
+  for (const [chainName, deployment] of Object.entries(set.networks)) {
+    if (deployment === undefined || !isChainKey(chainName)) continue;
+    for (const [symbol, token] of Object.entries(deployment.tokens)) {
+      if (token.providerAddresses === undefined) continue;
+      const bySymbol = (overrides[chainName] ??= {});
+      bySymbol[symbol] = token.providerAddresses;
+    }
+  }
+  return overrides;
 }
