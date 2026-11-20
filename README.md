@@ -280,3 +280,5 @@ and does not own them.
 ## License
 
 Apache-2.0 for the contracts, MIT for the protocol package.
+
+Read-only Axelar note/payment tooling and its evidence boundary are documented in [Axelar reconciliation](docs/AXELAR_RECONCILIATION.md).

@@ -31,7 +31,11 @@ pub use amount::{
     convert_decimals, convert_decimals_exact, floor_to_representable, scale_amount, Conversion,
     FeeSplit,
 };
-pub use axelar::{InboundNote, OutboundNote, MIN_PEER_ROTATION_DELAY};
+pub use axelar::{
+    verify_inbound_reconciliation, verify_outbound_reconciliation, CandidateInboundPayment,
+    CandidatePayment, InboundNote, OutboundNote, ReconciliationDiscrepancy,
+    MIN_PEER_ROTATION_DELAY,
+};
 pub use cctp::{
     validate_burn_boundary, ApprovalDiagnostics, ApprovalFinding, BurnMessage, CctpMessage,
     HyperionHook, APPROVAL_DIAGNOSTICS_VERSION, DOCUMENTED_RESIDUAL_ALLOWANCE,
