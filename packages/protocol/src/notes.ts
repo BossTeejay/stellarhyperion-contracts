@@ -26,7 +26,36 @@ import type { Hex } from "./bytes.js";
 import { fail } from "./errors.js";
 
 /** One envelope version across both rails, so nobody has to remember which rail numbers what. */
-export const NOTE_VERSION = 1;
+export const NOTE_VERSION_V1 = 1;
+export const NOTE_VERSION = NOTE_VERSION_V1;
+export const SUPPORTED_NOTE_VERSIONS = [NOTE_VERSION_V1] as const;
+
+/** True only for versions with an implemented codec in this package. */
+export function supportsNoteVersion(version: number): boolean {
+  return version === NOTE_VERSION_V1;
+}
+
+/**
+ * Select the highest common supported version at or above the destination's requirement.
+ * The requirement is a floor, not a preference: negotiation never falls back below it.
+ */
+export function negotiateNoteVersion(
+  requiredVersion: number,
+  localVersions: readonly number[],
+  destinationVersions: readonly number[],
+): number {
+  const common = localVersions.filter(
+    (version) =>
+      version >= requiredVersion &&
+      supportsNoteVersion(version) &&
+      destinationVersions.includes(version),
+  );
+  const selected = Math.max(...common);
+  if (!Number.isSafeInteger(selected) || selected <= 0) {
+    fail("UnsupportedHookVersion", `no common version at or above ${String(requiredVersion)}`);
+  }
+  return selected;
+}
 
 /** Version, twenty byte address, eight byte nonce. */
 export const OUTBOUND_NOTE_LEN = 29;
@@ -64,11 +93,19 @@ export interface InboundNote {
  */
 export function decodeOutboundNote(payload: Uint8Array | Hex): OutboundNote {
   const bytes = typeof payload === "string" ? fromHex(payload) : payload;
+  const version = bytes[0];
+  if (version === undefined) fail("MalformedMessage", "missing note version");
+  switch (version) {
+    case NOTE_VERSION_V1:
+      return decodeOutboundNoteV1(bytes);
+    default:
+      fail("UnsupportedHookVersion", `note version ${String(version)}`);
+  }
+}
+
+function decodeOutboundNoteV1(bytes: Uint8Array): OutboundNote {
   if (bytes.length !== OUTBOUND_NOTE_LEN) {
     fail("MalformedMessage", `an outbound note is ${String(OUTBOUND_NOTE_LEN)} bytes`);
-  }
-  if (bytes[0] !== NOTE_VERSION) {
-    fail("UnsupportedHookVersion", `note version ${String(bytes[0])}`);
   }
 
   const recipient = toHex(bytes.slice(1, 21));
@@ -99,8 +136,18 @@ export function encodeInboundNote(strkey: string, nonce: bigint): Uint8Array {
 /** Read an inbound note back, which is what the Stellar side does with it. */
 export function decodeInboundNote(payload: Uint8Array | Hex): InboundNote {
   const bytes = typeof payload === "string" ? fromHex(payload) : payload;
+  const version = bytes[0];
+  if (version === undefined) fail("MalformedMessage", "missing note version");
+  switch (version) {
+    case NOTE_VERSION_V1:
+      return decodeInboundNoteV1(bytes);
+    default:
+      fail("UnsupportedHookVersion", `note version ${String(version)}`);
+  }
+}
+
+function decodeInboundNoteV1(bytes: Uint8Array): InboundNote {
   if (bytes.length < INBOUND_NOTE_MIN) fail("MalformedMessage", "too short to be a note");
-  if (bytes[0] !== NOTE_VERSION) fail("UnsupportedHookVersion", `note version ${String(bytes[0])}`);
 
   const tag = bytes[1] ?? 0xff;
   if (tag > AddressKind.MuxedAccount) fail("MalformedMessage", `address kind ${String(tag)}`);

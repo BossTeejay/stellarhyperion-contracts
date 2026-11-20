@@ -26,7 +26,29 @@ use crate::strkey::StrkeyDestination;
 ///
 /// Shared with [`crate::cctp::HOOK_VERSION`] on purpose. Two rails, one envelope version, so a
 /// reader never has to remember which rail numbers its payloads differently from the other.
-pub const NOTE_VERSION: u8 = 1;
+pub const NOTE_VERSION_V1: u8 = 1;
+pub const NOTE_VERSION: u8 = NOTE_VERSION_V1;
+pub const SUPPORTED_NOTE_VERSIONS: [u8; 1] = [NOTE_VERSION_V1];
+
+/// Whether this build has a decoder and encoder for a note version.
+pub fn supports_note_version(version: u8) -> bool {
+    matches!(version, NOTE_VERSION_V1)
+}
+
+/// Negotiate a version without falling below the destination's declared minimum.
+pub fn negotiate_note_version(
+    required_version: u8,
+    local_versions: &[u8],
+    destination_versions: &[u8],
+) -> Result<u8, HyperionError> {
+    local_versions
+        .iter()
+        .copied()
+        .filter(|version| *version >= required_version && supports_note_version(*version))
+        .filter(|version| destination_versions.contains(version))
+        .max()
+        .ok_or(HyperionError::UnsupportedHookVersion)
+}
 
 /// Minimum delay required before a proposed peer rotation can become active.
 ///
@@ -79,11 +101,16 @@ impl OutboundNote {
     /// nobody can prove round trips, and this one has to agree with a Solidity reader byte for
     /// byte.
     pub fn decode(env: &Env, raw: &Bytes) -> Result<Self, HyperionError> {
+        let version = raw.get(0).ok_or(HyperionError::MalformedMessage)?;
+        match version {
+            NOTE_VERSION_V1 => Self::decode_v1(env, raw),
+            _ => Err(HyperionError::UnsupportedHookVersion),
+        }
+    }
+
+    fn decode_v1(env: &Env, raw: &Bytes) -> Result<Self, HyperionError> {
         if raw.len() != OUTBOUND_NOTE_LEN {
             return Err(HyperionError::MalformedMessage);
-        }
-        if raw.get(0).ok_or(HyperionError::MalformedMessage)? != NOTE_VERSION {
-            return Err(HyperionError::UnsupportedHookVersion);
         }
         let mut address = [0u8; 20];
         let mut i = 0u32;
@@ -135,11 +162,16 @@ impl InboundNote {
     /// refuses one: a payload we cannot read is a destination we would be guessing at, and
     /// guessing here means paying the wrong person.
     pub fn decode(env: &Env, raw: &Bytes) -> Result<Self, HyperionError> {
+        let version = raw.get(0).ok_or(HyperionError::MalformedMessage)?;
+        match version {
+            NOTE_VERSION_V1 => Self::decode_v1(env, raw),
+            _ => Err(HyperionError::UnsupportedHookVersion),
+        }
+    }
+
+    fn decode_v1(env: &Env, raw: &Bytes) -> Result<Self, HyperionError> {
         if raw.len() < INBOUND_NOTE_MIN {
             return Err(HyperionError::MalformedMessage);
-        }
-        if raw.get(0).ok_or(HyperionError::MalformedMessage)? != NOTE_VERSION {
-            return Err(HyperionError::UnsupportedHookVersion);
         }
         let nonce = read_nonce(raw, raw.len() - NONCE_LEN)?;
         let destination = StrkeyDestination::decode(env, &raw.slice(1..raw.len() - NONCE_LEN))?;
