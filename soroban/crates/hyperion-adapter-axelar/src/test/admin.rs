@@ -193,13 +193,20 @@ fn the_shape_that_carries_a_note_insists_on_knowing_who_may_send_one() {
 }
 
 #[test]
-fn relinking_a_lane_replaces_it_rather_than_stacking_a_second_one() {
+fn relinking_a_lane_cannot_bypass_the_peer_rotation_delay() {
     let w = World::new();
     let moved = BytesN::from_array(&w.env, &[0x5Au8; 20]);
-    // Contracts on the far side get redeployed. The lane has to be able to follow them without
-    // leaving the old address able to send payloads.
+    assert_eq!(
+        w.adapter()
+            .try_link_chain(&w.ethereum(), &w.axelar_ethereum(), &moved),
+        Err(Ok(HyperionError::AlreadyConfigured))
+    );
+    assert_eq!(w.adapter().get_link(&w.ethereum()).peer, w.peer());
     w.adapter()
-        .link_chain(&w.ethereum(), &w.axelar_ethereum(), &moved);
+        .propose_peer_rotation(&w.ethereum(), &moved, &3_600);
+    assert_eq!(w.adapter().get_link(&w.ethereum()).peer, w.peer());
+    w.env.ledger().with_mut(|li| li.timestamp += 3_600);
+    w.adapter().apply_peer_rotation(&w.ethereum());
     assert_eq!(w.adapter().get_link(&w.ethereum()).peer, moved);
     assert_eq!(w.adapter().chain_for(&w.axelar_ethereum()), w.ethereum());
 }
@@ -486,10 +493,7 @@ fn proposing_a_peer_rotation_enforces_minimum_delay() {
 
     let pending = w.adapter().get_pending_rotation(&w.ethereum()).unwrap();
     assert_eq!(pending.new_peer, new_peer);
-    assert_eq!(
-        pending.eta,
-        now + hyperion_core::MIN_PEER_ROTATION_DELAY
-    );
+    assert_eq!(pending.eta, now + hyperion_core::MIN_PEER_ROTATION_DELAY);
     assert_eq!(pending.queued_at, now);
 }
 
@@ -603,4 +607,138 @@ fn unlinking_chain_removes_it_completely() {
         w.adapter().try_get_pending_rotation(&w.ethereum()),
         Err(Ok(HyperionError::UnknownChain))
     );
+}
+
+#[test]
+fn chain_alias_collisions_and_renames_cannot_replace_active_trust() {
+    let w = World::new();
+    let alias = String::from_str(&w.env, "ethereum-alias");
+    let renamed = String::from_str(&w.env, "Ethereum-Renamed");
+    w.its().set_trusted(&renamed, &true);
+    assert_eq!(
+        w.adapter()
+            .try_link_chain(&alias, &w.axelar_ethereum(), &w.peer()),
+        Err(Ok(HyperionError::AlreadyConfigured))
+    );
+    assert_eq!(
+        w.adapter()
+            .try_link_chain(&w.ethereum(), &renamed, &w.peer()),
+        Err(Ok(HyperionError::AlreadyConfigured))
+    );
+    assert_eq!(w.adapter().get_link(&w.ethereum()).peer, w.peer());
+    assert_eq!(w.adapter().chain_for(&w.axelar_ethereum()), w.ethereum());
+    assert_eq!(
+        w.adapter().try_get_link(&alias),
+        Err(Ok(HyperionError::UnknownChain))
+    );
+    assert_eq!(
+        w.adapter().try_chain_for(&renamed),
+        Err(Ok(HyperionError::UnknownChain))
+    );
+}
+
+#[test]
+fn retired_chain_names_cannot_be_relinked_or_reused_under_an_alias() {
+    let w = World::new();
+    let next_peer = BytesN::from_array(&w.env, &[0x99; 20]);
+    w.adapter()
+        .propose_peer_rotation(&w.ethereum(), &next_peer, &3_600);
+    w.adapter().set_chain_enabled(&w.ethereum(), &false);
+    w.adapter().unlink_chain(&w.ethereum());
+    assert_eq!(
+        w.adapter()
+            .try_link_chain(&w.ethereum(), &w.axelar_ethereum(), &next_peer),
+        Err(Ok(HyperionError::AlreadyConfigured))
+    );
+    let alias = String::from_str(&w.env, "alias");
+    assert_eq!(
+        w.adapter()
+            .try_link_chain(&alias, &w.axelar_ethereum(), &next_peer),
+        Err(Ok(HyperionError::AlreadyConfigured))
+    );
+    let other_source = String::from_str(&w.env, "other-source");
+    w.its().set_trusted(&other_source, &true);
+    assert_eq!(
+        w.adapter()
+            .try_link_chain(&w.ethereum(), &other_source, &next_peer),
+        Err(Ok(HyperionError::AlreadyConfigured))
+    );
+    assert_eq!(
+        w.adapter().try_apply_peer_rotation(&w.ethereum()),
+        Err(Ok(HyperionError::UnknownChain))
+    );
+    w.env.as_contract(&w.adapter_id, || {
+        assert!(crate::storage::pending_rotation(&w.env, &w.ethereum()).is_none());
+        assert!(!crate::storage::is_chain_disabled(&w.env, &w.ethereum()));
+    });
+}
+
+#[test]
+fn proposal_requires_explicit_cancellation_and_handles_timestamp_overflow() {
+    let w = World::new();
+    let next_peer = BytesN::from_array(&w.env, &[0x99; 20]);
+    w.adapter()
+        .propose_peer_rotation(&w.ethereum(), &next_peer, &7_200);
+    let original = w.adapter().get_pending_rotation(&w.ethereum());
+    assert_eq!(
+        w.adapter().try_propose_peer_rotation(
+            &w.ethereum(),
+            &BytesN::from_array(&w.env, &[0x88; 20]),
+            &3_600
+        ),
+        Err(Ok(HyperionError::AlreadyConfigured))
+    );
+    w.adapter()
+        .link_chain(&w.ethereum(), &w.axelar_ethereum(), &w.peer());
+    assert_eq!(w.adapter().get_pending_rotation(&w.ethereum()), original);
+    w.adapter().cancel_peer_rotation(&w.ethereum());
+    w.env
+        .ledger()
+        .with_mut(|li| li.timestamp = u64::MAX - 3_599);
+    assert_eq!(
+        w.adapter()
+            .try_propose_peer_rotation(&w.ethereum(), &next_peer, &3_600),
+        Err(Ok(HyperionError::DecimalOverflow))
+    );
+    assert_eq!(w.adapter().get_pending_rotation(&w.ethereum()), None);
+    assert_eq!(w.adapter().get_link(&w.ethereum()).peer, w.peer());
+}
+
+#[test]
+fn applying_a_rotation_never_reenables_a_disabled_chain() {
+    let w = World::new();
+    let next_peer = BytesN::from_array(&w.env, &[0x99; 20]);
+    w.adapter()
+        .propose_peer_rotation(&w.ethereum(), &next_peer, &3_600);
+    w.adapter().set_chain_enabled(&w.ethereum(), &false);
+    w.env.ledger().with_mut(|li| li.timestamp += 3_600);
+    w.adapter().apply_peer_rotation(&w.ethereum());
+    assert!(!w.adapter().is_chain_enabled(&w.ethereum()));
+    assert_eq!(
+        w.router().try_bridge_out(&w.user, &w.request(HUNDRED)),
+        Err(Ok(HyperionError::RouteDisabled))
+    );
+}
+
+#[test]
+fn rotation_and_disable_actions_require_the_current_admin_signature() {
+    let w = World::new();
+    let next_peer = BytesN::from_array(&w.env, &[0x99; 20]);
+    w.adapter()
+        .propose_peer_rotation(&w.ethereum(), &next_peer, &3_600);
+    w.env.set_auths(&[]);
+    assert!(w
+        .adapter()
+        .try_propose_peer_rotation(&w.ethereum(), &next_peer, &3_600)
+        .is_err());
+    assert!(w.adapter().try_apply_peer_rotation(&w.ethereum()).is_err());
+    assert!(w.adapter().try_cancel_peer_rotation(&w.ethereum()).is_err());
+    assert!(w
+        .adapter()
+        .try_set_chain_enabled(&w.ethereum(), &false)
+        .is_err());
+    assert!(w.adapter().try_unlink_chain(&w.ethereum()).is_err());
+    assert_eq!(w.adapter().get_link(&w.ethereum()).peer, w.peer());
+    assert!(w.adapter().get_pending_rotation(&w.ethereum()).is_some());
+    assert!(w.adapter().is_chain_enabled(&w.ethereum()));
 }

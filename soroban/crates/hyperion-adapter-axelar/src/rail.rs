@@ -31,8 +31,12 @@
 //!   closed with `UnexpectedRailContract`.
 //! - **Emergency disable**: `set_chain_enabled(chain, false)` immediately halts all outbound dispatches
 //!   and inbound payload deliveries (`RouteDisabled`), preventing unauthorized message processing.
-//! - **Unlink**: `unlink_chain(chain)` removes the chain mapping entirely, halting inbound deliveries
-//!   with `UnknownChain`.
+//! - **Unlink**: `unlink_chain(chain)` permanently retires both chain names and removes active
+//!   mappings, halting inbound deliveries with `UnknownChain`. Retired names cannot be relinked.
+//! - **Setup safety**: `link_chain` permits initial or identical links, never an immediate peer
+//!   replacement or reverse-name collision. Pending proposals must be cancelled before replacement.
+//! - **Lifetime**: pending, disable and retirement metadata shares the adapter instance lifetime.
+//!   Renewing or restoring peer mappings cannot silently re-enable or change trust.
 //!
 //! # Deployment Gating
 //!

@@ -8,6 +8,7 @@ import {SafeERC20} from "openzeppelin/token/ERC20/utils/SafeERC20.sol";
 
 import {
     AlreadyConfigured,
+    DecimalOverflow,
     InvalidAmount,
     RailNotConfigured,
     RefundFailed,
@@ -88,6 +89,8 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         uint64 queuedAt;
     }
 
+    mapping(string chain => bool retired) private _retiredChains;
+    mapping(string axelarChain => bool retired) private _retiredAxelarNames;
     mapping(string chain => Peer peer) private _peers;
     mapping(string chain => PeerRotation) private _pendingRotations;
 
@@ -278,16 +281,15 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     }
 
     /// @notice Make a chain reachable, and name the contract allowed to speak for it.
-    /// @dev Once only, like the CCTP adapter's lanes. Repointing a live peer would let a different
-    /// contract deliver on a chain people are already using, which is not a configuration change,
-    /// it is a new trust assumption, and those go through the router's timelock by way of a new
-    /// adapter.
+    /// @dev Initial links are once only. Live peer changes use the delayed rotation functions.
+    /// Retired names cannot be relinked to bypass that delay; use a separately governed adapter.
     function setPeer(string calldata chain, string calldata axelarChain, bytes calldata peerAddress)
         external
         onlyOwner
     {
         if (bytes(chain).length == 0 || bytes(axelarChain).length == 0) revert UnknownChain();
-        if (peerAddress.length == 0) revert ZeroAddress();
+        if (!_hasNonzeroByte(peerAddress)) revert ZeroAddress();
+        if (_retiredChains[chain] || _retiredAxelarNames[axelarChain]) revert AlreadyConfigured();
         Peer storage peer = _peers[chain];
         if (peer.configured) revert AlreadyConfigured();
         if (bytes(_byAxelarName[axelarChain]).length != 0) revert AlreadyConfigured();
@@ -320,16 +322,15 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     {
         Peer storage peer = _peers[chain];
         if (!peer.configured) revert UnknownChain();
-        if (newPeer.length == 0) revert ZeroAddress();
+        if (!_hasNonzeroByte(newPeer)) revert ZeroAddress();
         if (keccak256(newPeer) == keccak256(peer.peer)) revert AlreadyConfigured();
         if (delay < MIN_ROTATION_DELAY) revert TimelockDelayOutOfRange();
 
-        uint64 eta = uint64(block.timestamp) + delay;
-        _pendingRotations[chain] = PeerRotation({
-            newPeer: newPeer,
-            eta: eta,
-            queuedAt: uint64(block.timestamp)
-        });
+        if (_pendingRotations[chain].eta != 0) revert AlreadyConfigured();
+        if (block.timestamp > type(uint64).max - delay) revert DecimalOverflow();
+        uint64 nowTime = uint64(block.timestamp);
+        uint64 eta = nowTime + delay;
+        _pendingRotations[chain] = PeerRotation({newPeer: newPeer, eta: eta, queuedAt: nowTime});
 
         emit PeerRotationQueued(chain, peer.peer, newPeer, eta);
     }
@@ -366,13 +367,15 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         emit PeerRotationCancelled(chain, cancelledPeer);
     }
 
-    /// @notice Permanently remove a configured peer and unmap its Axelar chain name.
+    /// @notice Permanently retire both names and remove their active peer/reverse mapping.
     /// @param chain The Hyperion chain name.
     function removePeer(string calldata chain) external onlyOwner {
         Peer storage peer = _peers[chain];
         if (!peer.configured) revert UnknownChain();
 
         string memory axelarChain = peer.axelarChain;
+        _retiredChains[chain] = true;
+        _retiredAxelarNames[axelarChain] = true;
         delete _byAxelarName[axelarChain];
         delete _peers[chain];
         delete _pendingRotations[chain];
@@ -408,6 +411,14 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     /// @notice Hyperion's own name for whatever Axelar calls a chain.
     function chainForAxelarName(string calldata axelarChain) external view returns (string memory) {
         return _byAxelarName[axelarChain];
+    }
+
+    /// @dev Reject empty or all-zero wire addresses without narrowing chain-specific formats.
+    function _hasNonzeroByte(bytes calldata peerAddress) private pure returns (bool) {
+        for (uint256 i; i < peerAddress.length; ++i) {
+            if (peerAddress[i] != bytes1(0)) return true;
+        }
+        return false;
     }
 
     function _refund() private {

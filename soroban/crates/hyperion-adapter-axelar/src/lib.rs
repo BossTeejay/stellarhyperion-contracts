@@ -604,6 +604,20 @@ impl AxelarAdapter {
         if cfg.route == RouteKind::AxelarGmp && peer == BytesN::from_array(&env, &[0u8; 20]) {
             return Err(HyperionError::ZeroAddressKey);
         }
+        if storage::names_retired(&env, &chain, &axelar_chain) {
+            return Err(HyperionError::AlreadyConfigured);
+        }
+        if let Some(existing) = storage::link(&env, &chain) {
+            // Identical deployment reruns are harmless; every trust change uses the delayed path.
+            if existing.axelar_chain != axelar_chain || existing.peer != peer {
+                return Err(HyperionError::AlreadyConfigured);
+            }
+        }
+        if let Some(existing_chain) = storage::chain_of(&env, &axelar_chain) {
+            if existing_chain != chain {
+                return Err(HyperionError::AlreadyConfigured);
+            }
+        }
         let link = ChainLink {
             chain,
             axelar_chain,
@@ -638,6 +652,9 @@ impl AxelarAdapter {
         }
         if delay < MIN_PEER_ROTATION_DELAY {
             return Err(HyperionError::TimelockDelayOutOfRange);
+        }
+        if storage::pending_rotation(&env, &chain).is_some() {
+            return Err(HyperionError::AlreadyConfigured);
         }
         let now = env.ledger().timestamp();
         let eta = now
@@ -711,7 +728,7 @@ impl AxelarAdapter {
         Ok(())
     }
 
-    /// Remove a connected chain and its reverse mapping entirely.
+    /// Permanently retire both chain names and remove the active forward/reverse mapping.
     pub fn unlink_chain(env: Env, chain: String) -> Result<(), HyperionError> {
         require_admin(&env)?;
         let _link = storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;

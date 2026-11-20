@@ -609,3 +609,45 @@ fn unlinked_chain_rejects_inbound_deliveries() {
         Err(Ok(HyperionError::UnknownChain))
     );
 }
+
+#[test]
+fn cutover_keeps_replay_guard_and_recipient_bound_claims_intact() {
+    let w = World::new();
+    let id = message_id(&w.env, "rotation-claim");
+    let claim_id = w.its().deliver(
+        &w.adapter_id,
+        &w.axelar_ethereum(),
+        &id,
+        &w.peer_bytes(),
+        &w.note_to_classic(7),
+        &w.burn_id(),
+        &HUNDRED,
+    );
+    let claim = w.router().get_claim(&claim_id);
+    assert_eq!(claim.recipient, w.classic);
+    let next_peer = BytesN::from_array(&w.env, &[0x99; 20]);
+    w.adapter()
+        .propose_peer_rotation(&w.ethereum(), &next_peer, &3_600);
+    w.env.ledger().with_mut(|li| li.timestamp += 3_600);
+    w.adapter().apply_peer_rotation(&w.ethereum());
+    let source = Bytes::from_array(&w.env, &next_peer.to_array());
+    assert!(w
+        .its()
+        .try_deliver(
+            &w.adapter_id,
+            &w.axelar_ethereum(),
+            &id,
+            &source,
+            &w.note_to_recipient(8),
+            &w.burn_id(),
+            &HUNDRED
+        )
+        .is_err());
+    assert_eq!(w.router().get_claim(&claim_id), claim);
+    assert_eq!(w.token().balance(&w.recipient), 0);
+    assert_eq!(w.token().balance(&w.adapter_id), 0);
+    w.adapter().set_chain_enabled(&w.ethereum(), &false);
+    w.adapter().unlink_chain(&w.ethereum());
+    assert_eq!(w.router().get_claim(&claim_id), claim);
+    assert_eq!(w.token().balance(&w.router_id), HUNDRED);
+}

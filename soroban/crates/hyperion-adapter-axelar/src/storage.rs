@@ -27,6 +27,9 @@ pub enum DataKey {
     PendingRotation(String),
     /// Emergency disable flag for a chain.
     Disabled(String),
+    /// Retired names cannot be reused to bypass a peer rotation delay.
+    RetiredChain(String),
+    RetiredSource(String),
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -136,69 +139,65 @@ pub fn touch_link(env: &Env, chain: &String) -> u32 {
             .extend_ttl(&source, BUMP_THRESHOLD, BUMP_TO);
         touched += 1;
     }
-    let rot = DataKey::PendingRotation(chain.clone());
-    if env.storage().persistent().has(&rot) {
-        env.storage()
-            .persistent()
-            .extend_ttl(&rot, BUMP_THRESHOLD, BUMP_TO);
-    }
-    let dis = DataKey::Disabled(chain.clone());
-    if env.storage().persistent().has(&dis) {
-        env.storage()
-            .persistent()
-            .extend_ttl(&dis, BUMP_THRESHOLD, BUMP_TO);
-    }
     touched
 }
 
+/// New rotation/disable metadata shares the instance lifetime with configuration.
 pub fn pending_rotation(env: &Env, chain: &String) -> Option<PendingRotation> {
-    let key = DataKey::PendingRotation(chain.clone());
-    let found: Option<PendingRotation> = env.storage().persistent().get(&key);
-    if found.is_some() {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
-    }
-    found
+    env.storage()
+        .instance()
+        .get(&DataKey::PendingRotation(chain.clone()))
 }
 
 pub fn set_pending_rotation(env: &Env, chain: &String, rotation: &PendingRotation) {
     env.storage()
-        .persistent()
+        .instance()
         .set(&DataKey::PendingRotation(chain.clone()), rotation);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn clear_pending_rotation(env: &Env, chain: &String) {
     env.storage()
-        .persistent()
+        .instance()
         .remove(&DataKey::PendingRotation(chain.clone()));
 }
 
 pub fn is_chain_disabled(env: &Env, chain: &String) -> bool {
-    let key = DataKey::Disabled(chain.clone());
-    let disabled: bool = env.storage().persistent().get(&key).unwrap_or(false);
-    if disabled {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
-    }
-    disabled
+    env.storage()
+        .instance()
+        .get(&DataKey::Disabled(chain.clone()))
+        .unwrap_or(false)
 }
 
 pub fn set_chain_disabled(env: &Env, chain: &String, disabled: bool) {
+    let key = DataKey::Disabled(chain.clone());
     if disabled {
-        env.storage()
-            .persistent()
-            .set(&DataKey::Disabled(chain.clone()), &true);
+        env.storage().instance().set(&key, &true);
     } else {
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Disabled(chain.clone()));
+        env.storage().instance().remove(&key);
     }
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn names_retired(env: &Env, chain: &String, axelar_chain: &String) -> bool {
+    env.storage()
+        .instance()
+        .has(&DataKey::RetiredChain(chain.clone()))
+        || env
+            .storage()
+            .instance()
+            .has(&DataKey::RetiredSource(axelar_chain.clone()))
 }
 
 pub fn remove_link(env: &Env, chain: &String) {
     if let Some(link) = link(env, chain) {
+        env.storage()
+            .instance()
+            .set(&DataKey::RetiredChain(chain.clone()), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::RetiredSource(link.axelar_chain.clone()), &true);
+        env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
         env.storage()
             .persistent()
             .remove(&DataKey::Source(link.axelar_chain));
@@ -207,6 +206,7 @@ pub fn remove_link(env: &Env, chain: &String) {
         .persistent()
         .remove(&DataKey::Link(chain.clone()));
     clear_pending_rotation(env, chain);
+    set_chain_disabled(env, chain, false);
 }
 
 pub fn touch_token(env: &Env, token: &Address) -> u32 {
