@@ -11,6 +11,10 @@
 # match what phase two reads back, and a hook the far side cannot parse. None of those show up in a
 # compile and all of them show up here, in under a minute, for free.
 #
+# Chain time semantics: this local EVM chain advances time only through evm_increaseTime, so the
+# timelock warp below is explicit and deterministic. The Stellar side (ledger time) is not exercised
+# here and must be validated separately.
+#
 # Usage: script/anvil-e2e.sh
 set -euo pipefail
 

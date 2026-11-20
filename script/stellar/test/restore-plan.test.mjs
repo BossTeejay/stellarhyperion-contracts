@@ -203,3 +203,46 @@ test("rejects malformed automatic restoration indices", async () => {
     );
   }
 });
+
+test("TTL report uses RPC live-until evidence and never fabricates zero for unavailable data", async () => {
+  const report = await planRestoration(
+    request,
+    rpc({
+      transactionData: fp([key(1), key(3)], []),
+      restorePreamble: {
+        transactionData: fp([], [key(2)]),
+        minResourceFee: "1",
+      },
+    }),
+    codec,
+  );
+  assert.deepEqual(
+    report.records.map((r) => r.ttlState),
+    ["live", "archived", "unavailable", "unavailable"],
+  );
+  assert.deepEqual(
+    report.records.map((r) => r.remainingTtl),
+    [50, null, null, null],
+  );
+  assert.equal(report.records[0].liveUntilLedger, 150);
+  for (const ttl of [-1, 4294967296, 1.5])
+    await assert.rejects(
+      planRestoration(
+        request,
+        rpc({}, [{ key: keys[0], liveUntilLedgerSeq: ttl }]),
+        codec,
+      ),
+      /TTL/,
+    );
+  await assert.rejects(
+    planRestoration(
+      request,
+      rpc({}, [
+        { key: keys[0], liveUntilLedgerSeq: 150 },
+        { key: keys[0], liveUntilLedgerSeq: 150 },
+      ]),
+      codec,
+    ),
+    /duplicate/,
+  );
+});

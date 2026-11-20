@@ -5,12 +5,16 @@ import {Ownable} from "openzeppelin/access/Ownable.sol";
 
 import {
     AlreadyConfigured,
+    DecimalOverflow,
     InvalidAmount,
     InvalidDestination,
     MalformedMessage,
     RailNotConfigured,
     RefundFailed,
     ReplayedMessage,
+    TimelockDelayOutOfRange,
+    TimelockNotQueued,
+    TimelockNotReady,
     TokenNotMapped,
     Unauthorized,
     UnexpectedRailContract,
@@ -72,6 +76,10 @@ contract AxelarItsAdapterTest is Fixture {
 
     event PeerConfigured(string chain, string axelarChain, bytes peer);
     event PeerEnabled(string chain, bool enabled);
+    event PeerRotationQueued(string indexed chain, bytes currentPeer, bytes newPeer, uint64 eta);
+    event PeerRotationApplied(string indexed chain, bytes oldPeer, bytes newPeer);
+    event PeerRotationCancelled(string indexed chain, bytes cancelledPeer);
+    event PeerRemoved(string indexed chain, string axelarChain);
     event TokenLinked(address indexed token, bytes32 tokenId);
     event TransferSubmitted(
         string chain, bytes32 tokenId, uint256 amount, uint64 nonce, uint256 gasValue, bytes note
@@ -257,6 +265,282 @@ contract AxelarItsAdapterTest is Fixture {
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
         adapter.setPeerEnabled(STELLAR, false);
+    }
+
+    function test_propose_peer_rotation_enforces_delay() public {
+        bytes memory newPeer = hex"beef";
+        vm.prank(admin);
+        vm.expectRevert(TimelockDelayOutOfRange.selector);
+        adapter.proposePeerRotation(STELLAR, newPeer, 1 hours - 1);
+
+        vm.prank(admin);
+        adapter.proposePeerRotation(STELLAR, newPeer, 1 hours);
+
+        AxelarItsAdapter.PeerRotation memory rot = adapter.pendingRotationOf(STELLAR);
+        assertEq(rot.newPeer, newPeer);
+        assertEq(rot.eta, block.timestamp + 1 hours);
+        assertEq(rot.queuedAt, block.timestamp);
+    }
+
+    function test_propose_peer_rotation_refuses_unknown_or_empty_or_same() public {
+        vm.prank(admin);
+        vm.expectRevert(UnknownChain.selector);
+        adapter.proposePeerRotation("unknown", hex"beef", 1 hours);
+
+        vm.prank(admin);
+        vm.expectRevert(ZeroAddress.selector);
+        adapter.proposePeerRotation(STELLAR, "", 1 hours);
+
+        vm.prank(admin);
+        vm.expectRevert(AlreadyConfigured.selector);
+        adapter.proposePeerRotation(STELLAR, peerAddress, 1 hours);
+    }
+
+    function test_apply_peer_rotation_enforces_timelock_delay() public {
+        bytes memory newPeer = hex"cafe";
+
+        vm.prank(admin);
+        vm.expectRevert(TimelockNotQueued.selector);
+        adapter.applyPeerRotation(STELLAR);
+
+        vm.prank(admin);
+        adapter.proposePeerRotation(STELLAR, newPeer, 1 hours);
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(TimelockNotReady.selector, uint64(block.timestamp + 1 hours)));
+        adapter.applyPeerRotation(STELLAR);
+
+        vm.warp(block.timestamp + 1 hours);
+
+        vm.expectEmit(true, true, true, true, address(adapter));
+        emit PeerRotationApplied(STELLAR, peerAddress, newPeer);
+
+        vm.prank(admin);
+        adapter.applyPeerRotation(STELLAR);
+
+        assertEq(adapter.peerOf(STELLAR).peer, newPeer);
+        assertEq(adapter.pendingRotationOf(STELLAR).eta, 0);
+    }
+
+    function test_cancel_peer_rotation_cancels_pending() public {
+        bytes memory newPeer = hex"cafe";
+
+        vm.prank(admin);
+        adapter.proposePeerRotation(STELLAR, newPeer, 1 hours);
+
+        vm.expectEmit(true, true, true, true, address(adapter));
+        emit PeerRotationCancelled(STELLAR, newPeer);
+
+        vm.prank(admin);
+        adapter.cancelPeerRotation(STELLAR);
+
+        assertEq(adapter.pendingRotationOf(STELLAR).eta, 0);
+
+        vm.prank(admin);
+        vm.expectRevert(TimelockNotQueued.selector);
+        adapter.applyPeerRotation(STELLAR);
+    }
+
+    function test_in_flight_messages_transition_during_and_after_peer_rotation() public {
+        bytes memory newPeer = hex"feed";
+        uint256 recipientBefore = usdc.balanceOf(bob);
+        uint256 itsBefore = usdc.balanceOf(address(its));
+        vm.prank(admin);
+        adapter.proposePeerRotation(STELLAR, newPeer, 1 hours);
+
+        // Only the current peer may deliver during the proposal window.
+        bytes32 res1 = its.deliver(
+            address(adapter),
+            keccak256("cmd1"),
+            AXELAR_STELLAR,
+            peerAddress,
+            _outboundNote(bob, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+        assertEq(res1, adapter.EXECUTE_SUCCESS());
+        assertEq(usdc.balanceOf(bob), recipientBefore + DELIVERY);
+        assertEq(usdc.balanceOf(address(its)), itsBefore - DELIVERY);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+
+        vm.expectRevert(UnexpectedRailContract.selector);
+        its.deliver(
+            address(adapter),
+            keccak256("cmd2"),
+            AXELAR_STELLAR,
+            newPeer,
+            _outboundNote(bob, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+        assertEq(usdc.balanceOf(bob), recipientBefore + DELIVERY);
+        assertEq(usdc.balanceOf(address(its)), itsBefore - DELIVERY);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(admin);
+        adapter.applyPeerRotation(STELLAR);
+        bytes32 res3 = its.deliver(
+            address(adapter),
+            keccak256("cmd3"),
+            AXELAR_STELLAR,
+            newPeer,
+            _outboundNote(bob, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+        assertEq(res3, adapter.EXECUTE_SUCCESS());
+        assertEq(usdc.balanceOf(bob), recipientBefore + 2 * DELIVERY);
+        assertEq(usdc.balanceOf(address(its)), itsBefore - 2 * DELIVERY);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+
+        vm.expectRevert(UnexpectedRailContract.selector);
+        its.deliver(
+            address(adapter),
+            keccak256("cmd4"),
+            AXELAR_STELLAR,
+            peerAddress,
+            _outboundNote(bob, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+        assertEq(usdc.balanceOf(bob), recipientBefore + 2 * DELIVERY);
+        assertEq(usdc.balanceOf(address(its)), itsBefore - 2 * DELIVERY);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+    }
+
+    function test_remove_peer_clears_mappings_and_rejects_deliveries() public {
+        uint256 recipientBefore = usdc.balanceOf(bob);
+        uint256 itsBefore = usdc.balanceOf(address(its));
+        vm.prank(admin);
+        adapter.removePeer(STELLAR);
+        assertFalse(adapter.supportsChain(STELLAR));
+        assertEq(bytes(adapter.chainForAxelarName(AXELAR_STELLAR)).length, 0);
+        vm.expectRevert(RailNotConfigured.selector);
+        its.deliver(
+            address(adapter),
+            keccak256("cmd5"),
+            AXELAR_STELLAR,
+            peerAddress,
+            _outboundNote(bob, SOURCE_NONCE),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+        assertEq(usdc.balanceOf(bob), recipientBefore);
+        assertEq(usdc.balanceOf(address(its)), itsBefore);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+    }
+
+    function test_retired_names_cannot_be_relinked_or_reused_under_an_alias() public {
+        vm.startPrank(admin);
+        adapter.proposePeerRotation(STELLAR, hex"feed", 1 hours);
+        adapter.removePeer(STELLAR);
+        vm.expectRevert(AlreadyConfigured.selector);
+        adapter.setPeer(STELLAR, AXELAR_STELLAR, hex"feed");
+        vm.expectRevert(AlreadyConfigured.selector);
+        adapter.setPeer("alias", AXELAR_STELLAR, hex"feed");
+        vm.expectRevert(AlreadyConfigured.selector);
+        adapter.setPeer(STELLAR, "other-source", hex"feed");
+        vm.expectRevert(UnknownChain.selector);
+        adapter.applyPeerRotation(STELLAR);
+        vm.stopPrank();
+        assertEq(adapter.pendingRotationOf(STELLAR).eta, 0);
+        assertFalse(adapter.supportsChain(STELLAR));
+    }
+
+    function test_zero_wire_peers_and_timestamp_overflow_fail_closed() public {
+        vm.startPrank(admin);
+        vm.expectRevert(ZeroAddress.selector);
+        adapter.setPeer(BNB_CHAIN, AXELAR_BNB, new bytes(20));
+        vm.expectRevert(ZeroAddress.selector);
+        adapter.proposePeerRotation(STELLAR, new bytes(32), 1 hours);
+        vm.warp(uint256(type(uint64).max) - 1 hours + 1);
+        vm.expectRevert(DecimalOverflow.selector);
+        adapter.proposePeerRotation(STELLAR, hex"feed", 1 hours);
+        vm.warp(uint256(type(uint64).max) + 1);
+        vm.expectRevert(DecimalOverflow.selector);
+        adapter.proposePeerRotation(STELLAR, hex"feed", 1 hours);
+        vm.stopPrank();
+        assertEq(adapter.pendingRotationOf(STELLAR).eta, 0);
+        assertEq(adapter.peerOf(STELLAR).peer, peerAddress);
+    }
+
+    function test_proposal_requires_cancellation_and_apply_keeps_emergency_disable() public {
+        vm.startPrank(admin);
+        adapter.proposePeerRotation(STELLAR, hex"feed", 2 hours);
+        uint64 eta = adapter.pendingRotationOf(STELLAR).eta;
+        vm.expectRevert(AlreadyConfigured.selector);
+        adapter.proposePeerRotation(STELLAR, hex"beef", 1 hours);
+        assertEq(adapter.pendingRotationOf(STELLAR).eta, eta);
+        adapter.cancelPeerRotation(STELLAR);
+        adapter.proposePeerRotation(STELLAR, hex"beef", 1 hours);
+        adapter.setPeerEnabled(STELLAR, false);
+        vm.warp(block.timestamp + 1 hours);
+        adapter.applyPeerRotation(STELLAR);
+        vm.stopPrank();
+        assertFalse(adapter.supportsChain(STELLAR));
+        assertEq(adapter.peerOf(STELLAR).peer, hex"beef");
+    }
+
+    function test_all_rotation_actions_are_owner_only() public {
+        vm.prank(admin);
+        adapter.proposePeerRotation(STELLAR, hex"feed", 1 hours);
+        vm.startPrank(alice);
+        bytes memory errorData = abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice);
+        vm.expectRevert(errorData);
+        adapter.proposePeerRotation(STELLAR, hex"beef", 1 hours);
+        vm.expectRevert(errorData);
+        adapter.applyPeerRotation(STELLAR);
+        vm.expectRevert(errorData);
+        adapter.cancelPeerRotation(STELLAR);
+        vm.expectRevert(errorData);
+        adapter.setPeerEnabled(STELLAR, false);
+        vm.expectRevert(errorData);
+        adapter.removePeer(STELLAR);
+        vm.stopPrank();
+        assertTrue(adapter.supportsChain(STELLAR));
+        assertEq(adapter.peerOf(STELLAR).peer, peerAddress);
+        assertEq(adapter.pendingRotationOf(STELLAR).newPeer, hex"feed");
+    }
+
+    function test_rotation_keeps_command_replay_protection_and_recipient_claims() public {
+        usdc.setBlocked(bob, true);
+        _deliver(COMMAND_ID, bob, DELIVERY);
+        uint64 claimId = router.claimCount();
+        assertEq(router.pendingClaim(claimId).recipient, bob);
+        vm.prank(admin);
+        adapter.proposePeerRotation(STELLAR, hex"feed", 1 hours);
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(admin);
+        adapter.applyPeerRotation(STELLAR);
+        uint256 itsBefore = usdc.balanceOf(address(its));
+        vm.expectRevert(ReplayedMessage.selector);
+        its.deliver(
+            address(adapter),
+            COMMAND_ID,
+            AXELAR_STELLAR,
+            hex"feed",
+            _outboundNote(alice, SOURCE_NONCE + 1),
+            TOKEN_ID,
+            address(usdc),
+            DELIVERY
+        );
+        assertEq(usdc.balanceOf(address(its)), itsBefore);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+        assertEq(router.pendingClaim(claimId).recipient, bob);
+        assertEq(router.pendingClaim(claimId).amount, DELIVERY);
+        vm.prank(admin);
+        adapter.removePeer(STELLAR);
+        usdc.setBlocked(bob, false);
+        uint256 before = usdc.balanceOf(bob);
+        router.settleClaim(claimId);
+        assertEq(usdc.balanceOf(bob), before + DELIVERY);
+        assertTrue(router.pendingClaim(claimId).settled);
     }
 
     function test_a_chain_nobody_configured_translates_to_nothing() public view {
@@ -773,6 +1057,33 @@ contract AxelarItsAdapterTest is Fixture {
         vm.prank(stranger);
         vm.expectRevert(ZeroAddress.selector);
         adapter.topUpGas{value: 0.1 ether}(keccak256("x"), 0, address(0));
+    }
+
+    function test_inspect_outbound_note() public view {
+        bytes memory note = _outboundNote(alice, 42);
+        (address recipient, uint64 nonce) = adapter.inspectOutboundNote(note);
+        assertEq(recipient, alice);
+        assertEq(nonce, 42);
+    }
+
+    function test_inspect_inbound_note() public view {
+        bytes memory note = _inboundNote(AddressKind.Account, G_ADDR, 99);
+        (AddressKind kind, string memory strkey, uint64 nonce) = adapter.inspectInboundNote(note);
+        assertEq(uint8(kind), uint8(AddressKind.Account));
+        assertEq(strkey, G_ADDR);
+        assertEq(nonce, 99);
+    }
+
+    function test_inspect_outbound_note_reverts_on_malformed() public {
+        bytes memory badNote = hex"010203";
+        vm.expectRevert(MalformedMessage.selector);
+        adapter.inspectOutboundNote(badNote);
+    }
+
+    function test_inspect_inbound_note_reverts_on_malformed() public {
+        bytes memory badNote = hex"010203";
+        vm.expectRevert(MalformedMessage.selector);
+        adapter.inspectInboundNote(badNote);
     }
 
     // -------------------------------------------------------------------------------------
