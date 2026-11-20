@@ -2,8 +2,10 @@
 pragma solidity 0.8.28;
 
 import {
+    ActionAuditStatus,
     ActionKind,
     AdminAction,
+    CancelReason,
     Destination,
     Origin,
     OutboundRequest,
@@ -11,6 +13,7 @@ import {
     QueuedAction,
     RouteKind,
     RouteQuote,
+    RouteQuoteV2,
     TokenConfig
 } from "../HyperionTypes.sol";
 
@@ -121,6 +124,22 @@ interface IHyperionRouter {
     /// @param by Who dropped it.
     event ActionCancelled(uint64 indexed id, address indexed by);
 
+    /// @notice Emitted on queue, execute, and cancel with bounded audit metadata.
+    /// @param version Audit encoding version, currently one.
+    /// @param id The original action identifier.
+    /// @param status The lifecycle transition.
+    /// @param actor The caller responsible for this transition.
+    /// @param cancelReason Structured cancellation reason, or Unspecified.
+    /// @param reasonNote At most 128 printable ASCII bytes.
+    event ActionAuditUpdated(
+        uint32 version,
+        uint64 indexed id,
+        ActionAuditStatus indexed status,
+        address indexed actor,
+        CancelReason cancelReason,
+        string reasonNote
+    );
+
     /// @notice A token's flow limit was tightened without waiting.
     /// @dev Allowed to skip the timelock precisely because it only ever narrows what the bridge
     /// will do. Raising one is a queued action; lowering one is something you want available at
@@ -139,6 +158,16 @@ interface IHyperionRouter {
     /// @param route The rail.
     /// @param enabled Whether it now accepts departures. Arrivals are never affected.
     event RouteConfigured(RouteKind indexed route, bool enabled);
+
+    /// @notice A rail was paused individually.
+    /// @param route Which rail was paused.
+    /// @param caller Who paused it.
+    event RoutePaused(RouteKind indexed route, address indexed caller);
+
+    /// @notice A rail was unpaused individually.
+    /// @param route Which rail was unpaused.
+    /// @param caller Who unpaused it.
+    event RouteUnpaused(RouteKind indexed route, address indexed caller);
 
     /// @notice The adapter that speaks for a rail was pointed somewhere else.
     /// @param route The rail.
@@ -244,15 +273,33 @@ interface IHyperionRouter {
     /// @param id The action to drop.
     function cancelAction(uint64 id) external;
 
+    /// @notice Drop a proposed change with a structured reason code and bounded audit note.
+    /// @param id The action to drop.
+    /// @param reason Structured cancellation reason.
+    /// @param note Bounded human-readable audit note (max 128 bytes).
+    function cancelActionWithReason(uint64 id, CancelReason reason, string calldata note) external;
+
     /// @notice Tighten a token's flow limit immediately.
     /// @param token The token to tighten.
     /// @param limit The new ceiling, which has to be below the one in force.
     function lowerTokenFlowLimit(address token, uint256 limit) external;
 
+    /// @notice Pause departures for a single rail without affecting other rails.
+    /// @param route The rail to pause.
+    function pauseRoute(RouteKind route) external;
+
+    /// @notice Resume departures for an individually paused rail.
+    /// @param route The rail to unpause.
+    function unpauseRoute(RouteKind route) external;
+
     /// @notice Read a queued change.
     /// @param id The action to read.
     /// @return The action, its timestamps, and whether it has already been executed.
     function queuedAction(uint64 id) external view returns (QueuedAction memory);
+
+    /// @notice Whether the action was cancelled; its original payload remains queryable.
+    /// @param id The action to read.
+    function actionCancelled(uint64 id) external view returns (bool);
 
     /// @notice Read a parked claim.
     /// @param id The claim to read.
@@ -274,4 +321,23 @@ interface IHyperionRouter {
     /// @param route The rail to read.
     /// @return Its adapter, or the zero address when the rail has not been wired up.
     function adapter(RouteKind route) external view returns (address);
+
+    /// @notice Whether an individual rail is currently paused for departures.
+    /// @param route The rail to check.
+    /// @return True if the rail is paused.
+    function routePaused(RouteKind route) external view returns (bool);
+    /// @notice Versioned debit breakdown preserving the legacy quote tuple.
+    /// @param route The rail being priced.
+    /// @param token The registered source asset.
+    /// @param amount Requested source units before fees and flooring.
+    /// @param destination Recipient and destination chain.
+    /// @param destinationDecimals Decimal precision of the destination asset.
+    /// @return The legacy quote with an explicit prospective debit breakdown.
+    function quoteV2(
+        RouteKind route,
+        address token,
+        uint256 amount,
+        Destination calldata destination,
+        uint8 destinationDecimals
+    ) external view returns (RouteQuoteV2 memory);
 }

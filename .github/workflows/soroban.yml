@@ -37,12 +37,36 @@ jobs:
         working-directory: soroban
 
     steps:
+      - name: Restrict build network access
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # verified upstream v2 snapshot
+        with:
+          egress-policy: block
+          disable-sudo-and-containers: true
+          disable-telemetry: true
+          allowed-endpoints: >-
+            github.com:443
+            api.github.com:443
+            raw.githubusercontent.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            registry.npmjs.org:443
+            nodejs.org:443
+            index.crates.io:443
+            static.crates.io:443
+            static.rust-lang.org:443
+            binaries.soliditylang.org:443
+            solc-bin.ethereum.org:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            results-receiver.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+
       - name: Check out
         # Submodules are skipped here. forge-std and OpenZeppelin live under evm/lib and the Rust
         # workspace does not touch either, so pulling them would cost a minute for nothing.
         # persist-credentials is off because no step after this one needs to talk to the remote,
         # and a token left in .git/config is a token a later step can read.
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: false
           persist-credentials: false
@@ -58,17 +82,6 @@ jobs:
           cargo --version
           rustc --version
 
-      - name: Restore the cargo cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          # Named explicitly rather than inferred, because the workspace is not at the repository
-          # root and the action looks there by default. Getting this wrong produces a job that
-          # appears to cache and never hits.
-          workspaces: soroban -> target
-          # Same cache for every job in this file, so the clippy build and the test build share
-          # dependency artifacts instead of compiling soroban-sdk twice.
-          shared-key: soroban
-
       - name: cargo fmt
         # Formatting is checked first because it is the cheapest failure in the job. Finding out
         # about an unformatted file after a twenty minute test run wastes a contributor's
@@ -83,25 +96,21 @@ jobs:
         # -D warnings after the separator applies to the crates in this workspace and not to the
         # dependency graph, which is the behaviour wanted: an upstream warning in soroban-sdk is
         # not something a pull request here can fix, and a gate nobody can clear gets disabled.
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: cargo test
         # The adapters test against the real router rather than a stand in for it, so this runs
         # the whole workspace together. A per crate run would pass while the handover between
         # the router and an adapter was broken, which is the part most worth checking.
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
-      - name: Restore the pinned stellar-cli
-        id: stellar-cli-cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/.local/bin/stellar
-          # Keyed on the version alone, which is correct: the binary for a given release never
-          # changes, so a hit is always valid and a version bump always misses.
-          key: stellar-cli-${{ env.STELLAR_CLI_VERSION }}-x86_64-unknown-linux-gnu
+      - name: Patched native host cryptographic vectors
+        run: |
+          cargo test --manifest-path vendor/soroban-env-host/Cargo.toml --locked \
+            --features testutils --test secp256r1_sig_ver --test ed25519_edge_cases \
+            --test hyperion_crypto_compatibility
 
       - name: Install stellar-cli
-        if: steps.stellar-cli-cache.outputs.cache-hit != 'true'
         working-directory: ${{ runner.temp }}
         run: |
           set -euo pipefail
@@ -121,6 +130,15 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/stellar" --version
 
+      - name: Set up Node for read-only maintenance tool regressions
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Test read-only RPC inspection, discovery and replay journal
+        working-directory: .
+        run: node --test script/stellar/test/*.test.mjs
+
       - name: Build the contracts and hold them to the 64KB ledger limit
         # This runs the repository's own script rather than reimplementing it. The 64KB ceiling and
         # the two thirds warning line live in script/stellar/build.sh, so a contributor running it
@@ -129,6 +147,11 @@ jobs:
         # quietly.
         working-directory: .
         run: script/stellar/build.sh
+
+      - name: Measure actual WASM replay upkeep resources and TTL
+        env:
+          HYPERION_MEASURE_ROUTER_WASM: ${{ github.workspace }}/soroban/target/wasm32v1-none/release/hyperion_router.wasm
+        run: cargo test --locked -p hyperion-router discovery::measure_bounded_replay_upkeep_resources_and_exact_ttl -- --nocapture
 
       - name: Report the wasm sizes
         # Runs even when the build step failed, because the first question after an over limit
@@ -179,7 +202,7 @@ jobs:
         # Useful for two things: diffing a size regression against the previous run, and handing
         # a reviewer the exact bytes a pull request produces without asking them to build it.
         if: success()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: soroban-wasm-${{ github.sha }}
           path: soroban/target/wasm32v1-none/release/hyperion_*.wasm

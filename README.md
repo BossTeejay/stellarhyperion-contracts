@@ -1,28 +1,47 @@
 # Hyperion contracts
 
-The on-chain half of Hyperion: a router on Stellar, a router on the EVM side, and one adapter per
-rail they route over.
+[Use Hyperion on Testnet](https://stellarhyperion.vercel.app/) | [Frontend](https://github.com/StellarHyperion/stellarhyperion-frontend) | [Backend](https://github.com/StellarHyperion/stellarhyperion-backend)
 
-Hyperion is not a bridge. It never decides for itself that a cross-chain message is real. It hands
-transfers to rails that already made that decision and were audited for it, and it keeps the
-bookkeeping, the limits, the fee and the claims. `bridge_in` only ever acts on a call from the
-underlying rail's own verifier, and there is no path in this repository by which Hyperion attests
-anything.
+Soroban and EVM routing contracts, rail adapters and the shared `@hyperion/protocol` TypeScript SDK for Hyperion. The public app uses the active Stellar Testnet deployment.
 
-That is a smaller promise than most bridges make, and it is the reason the code looks the way it
-does. There is no validator set here, no multisig signing messages, no light client. What there is
-instead is a lot of arithmetic that has to be exactly right, four rails that each behave slightly
-differently, and three implementations of the same wire formats that have to agree.
+Hyperion routes transfers through chain-specific adapters and keeps protocol fees, limits and claims.
+CCTP and Axelar paths delegate authenticity checks to their underlying rail contracts. The Allbridge
+inbound adapter verifies a configured Ed25519 validator signature itself; that path has a different
+trust assumption and is not offered by the current testnet app.
+
+The active app sends canonical Stellar USDC through Axelar ITS to its seven-decimal representation on Ethereum Sepolia, or through Circle CCTP to six-decimal native USDC on Ethereum Sepolia, Base Sepolia and Arc Testnet. The frontend can first convert other liquid classic Stellar assets into USDC. ITS's representation differs from Circle's native USDC. Both active rails have real signed source/destination acceptance evidence. EVM router and Allbridge implementations are included for development; they are outside the active app's deployment scope.
+
+## Changes since October 12, 2026
+
+- Implemented authenticated paid dispatch through Axelar ITS and Circle CCTP, retaining atomic protocol fees, precision checks, flow limits and failure rollback.
+- Activated the Stellar router and adapters after the original one-hour timelocks, and recorded signed ITS, XLM conversion and native-USDC CCTP acceptance on all three destination testnets.
+- Expanded contract/protocol regression coverage and remediated npm and native Rust cryptography dependencies, preserving the host patch's upstream source, license, provenance and cryptographic validation.
+
+## Paid Stellar transfers
+
+`HyperionRouter.bridge_out_with_gas(sender, request, gas_amount)` applies the same protocol fee,
+precision, pause and flow controls as `bridge_out`. It then charges only the protocol fee itself and
+calls `AxelarAdapter.dispatch_from`. ITS takes the net token amount and native XLM gas payment
+directly from the user's authenticated account. The wallet signs the simulated authorization tree,
+including ITS's real nested gas-service call. No Hyperion copy of the ITS message payload is needed.
+All token movements, fees, gas and the router nonce unwind together if any call fails.
+
+For CCTP route 0, the same paid router entry point calls the CCTP adapter's `dispatch_from` with the USDC forwarding budget. The adapter uses Circle's `cctp-forward` hook and standard finality; Circle performs the destination mint. The router checks the minimum destination amount after the full forwarding budget. ITS gas is paid in XLM, while CCTP forwarding is deducted from the USDC payout.
+
+The legacy `bridge_out` and `dispatch` interfaces remain compatible and do not attach relay gas. The current app checks the deployed paid-entry methods before signing. A successful source transaction establishes dispatch; destination delivery requires a matching confirmed receipt and token payment.
+
+The current wallet-owned router and adapter expose the paid entry point. Their activation and actual source/destination transactions are recorded in `deployments/evidence/2026-10-28-paid-its.json`. Future router upgrades use the existing timelock; adapter upgrades require its admin.
+See [the exact activation runbook](docs/TESTNET_ACTIVATION.md) for reviewed artifacts, admin commands and the live acceptance test.
 
 ## Organization overview
 
 The StellarHyperion organization divides cross-chain routing across three dedicated repositories:
 
-| Repository | Purpose | Core Technologies |
-|---|---|---|
-| `stellarhyperion-contracts` | On-chain routers, adapters, and shared protocol SDK | Soroban (Rust), EVM (Solidity, Foundry), TypeScript |
-| `stellarhyperion-backend` | Event indexer, rail pollers, keeper upkeep, and REST API | Fastify, Postgres, Redis, BullMQ, viem, stellar-sdk |
-| `stellarhyperion-frontend` | User interface, live switchyard, and transfer tracker | Next.js 16, React 19, CSS modules, wagmi, Stellar Wallets Kit |
+| Repository                                                                                | Purpose                                                        | Core Technologies                                                  |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [stellarhyperion-contracts](https://github.com/StellarHyperion/stellarhyperion-contracts) | On-chain routers, adapters and shared protocol SDK             | Soroban/Rust, EVM/Solidity/Foundry, TypeScript                     |
+| [stellarhyperion-backend](https://github.com/StellarHyperion/stellarhyperion-backend)     | Event indexing, verified payouts, optional keeper and REST API | Fastify, PostgreSQL/Neon, viem, Stellar SDK; optional Redis/BullMQ |
+| [stellarhyperion-frontend](https://github.com/StellarHyperion/stellarhyperion-frontend)   | Stellar asset conversion, paid transfers and verified status   | Next.js 16, React 19, TypeScript, direct Stellar wallet SDKs       |
 
 Each repository maintains independent continuous integration, dependency definitions, and issue governance while sharing protocol constants and wire codecs from `@hyperion/protocol`.
 
@@ -34,7 +53,7 @@ soroban/              Rust workspace, five crates, compiled to wasm32v1-none
   hyperion-router       the router: fees, limits, claims, timelock, adapter dispatch
   hyperion-adapter-cctp      Circle CCTP V2
   hyperion-adapter-axelar    Axelar ITS and GMP
-  hyperion-adapter-allbridge Allbridge Core, outbound only and honest about it
+  hyperion-adapter-allbridge Allbridge pool outbound and configured-validator inbound
 
 evm/                  Foundry project, solc 0.8.28, via_ir
   src/HyperionRouter.sol        the same router, in the shape this chain wants
@@ -51,14 +70,13 @@ docs/                 the architecture document this was built from
 
 ## The test suites
 
-| Tree | Tests | Run it with |
-|---|---|---|
-| Soroban | 380 | `cd soroban && cargo test --workspace` |
-| EVM | 365 | `cd evm && FOUNDRY_PROFILE=ci forge test` |
-| Protocol package | 300 | `cd packages/protocol && npm run check` |
+| Tree             | Tests | Run it with                               |
+| ---------------- | ----- | ----------------------------------------- |
+| Soroban          | 419   | `cd soroban && cargo test --workspace`    |
+| EVM              | 382   | `cd evm && FOUNDRY_PROFILE=ci forge test` |
+| Protocol package | 311   | `cd packages/protocol && npm run check`   |
 
-All 1,045 pass. The EVM suite includes fuzz tests at twenty thousand runs each, which is why it
-takes a minute and a half.
+These counts reflect the verified October 29 suites: 419 owned Soroban tests, 382 EVM tests and 311 protocol tests. The [successful contracts CI run](https://github.com/StellarHyperion/stellarhyperion-contracts/actions/runs/40881361908) includes the EVM suite, protocol/ABI parity, native host cryptographic vectors, Slither, dependency audits and the Anvil deployment rehearsal. EVM tests and generated-ABI parity require Foundry, initialized submodules and a fresh EVM build. Signed testnet acceptance is documented separately below.
 
 The number worth more than the total is in the protocol package: `test/parity.test.ts` reads the
 Rust and the Solidity off disk and fails if the error numbering, the route tags, the address kinds,
@@ -78,7 +96,7 @@ the checksum goes on the wire little endian, a muxed address has one spare bit i
 character that has to be zero, and the ed25519 key comes first with the eight byte sub account id
 last.
 
-**Stellar carries seven decimals and USDC carries six.** Every hop across that boundary either
+**Token representations can have different decimals.** Stellar USDC and its current Sepolia ITS representation use seven; native EVM USDC commonly uses six. A hop across a precision boundary either
 loses a digit or refuses to. This code refuses: the fee is taken on the whole amount, the remainder
 is floored to something the destination can represent, and a transfer whose remainder floors to
 nothing is rejected by name rather than rounded to zero. The fee is charged against the gross and
@@ -112,12 +130,7 @@ deployment is: deploy, configure the adapters, queue the router changes, wait, e
 are built around that rather than against it, and phase two is safe to run twice so a run
 interrupted by a gas spike picks up where it left off.
 
-Linking an adapter to its counterpart on the other chain is a third, separate step. A peer cannot be
-named before it exists, and `link_domain`, `map_asset`, `link_chain` and `map_token` are all once
-only on purpose, because repointing a live lane would let a different contract deliver on a chain
-people are already using. That is a new trust assumption rather than a configuration change. A
-guessed peer address is therefore a mistake no later transaction can undo, and the only safe order
-is to deploy both sides first and link second.
+Linking an adapter to the trusted rail or remote messenger is a separate configuration step. Read the deployed token, domain and peer settings before signing. Mapping and link setters can overwrite existing configuration, so changing a live lane changes its trust assumptions. CCTP uses Circle's published messenger/transmitter pairing; direct ITS sends use the registered ITS token and destination token manager. See `docs/TESTNET_ACTIVATION.md` for the verified active testnet deployment.
 
 ```bash
 # EVM, end to end on a throwaway chain. Deploys stand in rails, runs phase one, proves the
@@ -132,6 +145,7 @@ HYPERION_PEER_CHAIN=arc-testnet script/stellar/deploy.sh
 script/stellar/execute.sh                     # once the hour is up
 script/stellar/link.sh                        # once the far side exists
 script/stellar/verify.sh
+script/stellar/propose.sh                     # unsigned config-diff proposals, read only
 ```
 
 `anvil-e2e.sh` is the highest value check in the repository, and it is in CI for that reason. The
@@ -155,40 +169,43 @@ driver signs through anvil's unlocked accounts and names only a public address, 
 well known development key never had to appear. Grepping the tracked tree for sixty four hex
 characters returns wasm hashes and a tarball checksum and nothing else.
 
-## Currently live
+## Recorded Stellar testnet contracts
 
-Stellar testnet, verified against `deployments/stellar-testnet-phase1.json`:
+`deployments/stellar-testnet-phase1.json` is the canonical active deployment. Its historical filename is retained. Identical copies supply the frontend and backend.
 
-| | |
-|---|---|
-| Router | `CDMOLDF4SJDEDRWTDF7XAYMSRE6L3YEHHIRF57CFWNQYNC6ZOZ5LWCWF` |
-| Axelar ITS adapter | `CBK3TPRQR5A3H2AWESOUX4MVYOP63VNQ5EYHCX26EEJUC5B5FLB4DV5O` |
+| Setting             | Active contract                                            |
+| ------------------- | ---------------------------------------------------------- |
+| Router              | `CCXPCT3YFLVANSF3AQMYCCZVGCMLTURAYQ6O6DYGQJMTKVYQL6NTOC2V` |
+| Axelar ITS adapter  | `CDFYEPIXO676W6E6Z4GOOR33JMRUC6DGUBGO4OWYKTO7HOGRJ6ARNOSJ` |
+| Circle CCTP adapter | `CARH6IA4TA5QAJNQG4B4I7N4336JEBS3GYLPZSEBUCWSNYTDRC7L3AHT` |
 | USDC asset contract | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
 
-There is no CCTP adapter on Stellar yet, and that is a gap rather than a bug. Circle deploys those
-contracts per network from `circlefin/stellar-cctp` and does not publish a fixed address list, so
-there is nothing safe to point an adapter at. The router answers a CCTP transfer with
-`AdapterNotSet`, which is the correct answer. The Axelar adapter is deployed and initialized and
-linked to nothing, for the reason in the section above.
+ITS route 1 delivers the seven-decimal Stellar USDC representation to Ethereum Sepolia. CCTP route 0 delivers six-decimal native Circle USDC to Ethereum Sepolia, Base Sepolia and Arc Testnet using paid automatic forwarding. Both routes are active. Signed source transactions and confirmed destination payments are published in [paid ITS evidence](deployments/evidence/2026-10-28-paid-its.json), [XLM conversion evidence](deployments/evidence/2026-10-29-conversion.json) and [CCTP evidence](deployments/evidence/2026-10-29-cctp.json). A fresh XLM-only wallet also completed actual conversion into USDC followed by an ITS payout. Details and receipt-verification requirements are in [the activation runbook](docs/TESTNET_ACTIVATION.md).
 
-The record is assembled by a script that hands it to the protocol package's own
-`parseDeploymentSet` before writing. That is why it is a node script and not a heredoc: an address
-with a transposed character parses fine as a string and survives a cast, so every contract id in
-the record is checked against the real strkey codec and every rail name against the real route
-list, and a malformed record never reaches disk.
+The older October 1 deployment is archived under `deployments/archive/`. It is not the current app router. Records are validated with the protocol package's `parseDeploymentSet`; activation also reads deployed methods and code hashes rather than treating a JSON address as proof of availability.
+
+## Active fee routing and recovery
+
+The active Stellar router charges 30 basis points (0.3%) on outbound USDC and transfers the protocol fee to its configured treasury atomically with dispatch. Bridge forwarding, relay and Stellar network fees are separate provider/network costs. Other liquid Stellar assets are converted into canonical USDC by a separate frontend-signed transaction before bridging.
+
+The current testnet treasury is `GDXRQQETEZHGRJTE3U7DYGIWGGYGMM6EAS5NWGPGN2WXFXZYZ6QZIANA`, also the deployment admin and guardian. Treasury and fee changes use the existing one-hour admin timelock. Testnet balances have no cash value.
+
+Inbound funds that cannot be paid to their recorded recipient are retained as a numbered claim. `get_claim` reads the record and `settle_claim` retries payment to that same recipient. Anyone may fund settlement, and an already settled claim cannot pay twice. Successful transfers and ordinary outbound bridge delays do not create Stellar recovery claims.
+
+The frontend and backend deploy separately on Vercel. The backend needs persistent PostgreSQL and regular indexer execution; see the linked repositories for hosting configuration. Contract deployment is independent of website deployment. This documentation update and Git push do not redeploy or upgrade the already verified on-chain contracts.
 
 ## Contract sizes
 
 Soroban has a hard 64KB ceiling per contract, enforced by the ledger rather than by politeness.
 
-| Contract | Size | Of the limit |
-|---|---|---|
-| `hyperion_router.wasm` | 51.7 KB | 80% |
-| `hyperion_adapter_cctp.wasm` | 25.2 KB | 39% |
-| `hyperion_adapter_axelar.wasm` | 24.8 KB | 38% |
-| `hyperion_adapter_allbridge.wasm` | 23.7 KB | 37% |
+| Contract                          | Size         | Of the limit |
+| --------------------------------- | ------------ | ------------ |
+| `hyperion_router.wasm`            | 56,031 bytes | 85.5%        |
+| `hyperion_adapter_cctp.wasm`      | 27,357 bytes | 41.7%        |
+| `hyperion_adapter_axelar.wasm`    | 27,287 bytes | 41.6%        |
+| `hyperion_adapter_allbridge.wasm` | 30,135 bytes | 46.0%        |
 
-The router at eighty percent is worth watching. `script/stellar/build.sh` warns past two thirds and
+These are the October 29 local build sizes against the 65,536-byte limit. They describe the current source build; active deployed code hashes are recorded in the activation runbook. The router at about eighty-five percent is worth watching. `script/stellar/build.sh` warns past two thirds and
 fails past the limit, so this stops being a surprise.
 
 ## Working on it
@@ -197,6 +214,7 @@ fails past the limit, so this stops being a surprise.
 cd soroban && cargo test --workspace
 cd evm && forge build && FOUNDRY_PROFILE=ci forge test
 cd packages/protocol && npm install && npm run check
+node --test script/stellar/test/propose.test.mjs
 ```
 
 Three things a newcomer gets wrong, in the order they will hit them.
@@ -215,6 +233,14 @@ pulls `abitype`, whose peer range admits TypeScript 7 while the package pins the
 before writing a single file. Every dependency there is a dev dependency, the lockfile is
 committed, and the flag lives in the repository because an install flag that only exists on one
 machine is a build that only works on one machine.
+
+## Verification status
+
+As of October 29, 2026, local verification passes all 419 Soroban tests, clippy, protocol tests/build/ABI parity and the patched host cryptographic suites. Protocol and Solidity tooling `npm audit` checks report zero known vulnerabilities. Both Rust lockfile audits report zero vulnerabilities, with the existing unmaintained `paste` warning still visible.
+
+The native Soroban host uses a narrowly scoped RustCrypto compatibility patch to resolve [RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html), selecting `crypto-bigint` 0.7.10. Its complete upstream source, license, provenance, source diff and NIST/Wycheproof/Ed25519 plus recovery/malleability regression tests are retained in [soroban/vendor](soroban/vendor/README.md). Native builds require Rust 1.87 or later. The host is absent from the normal contract WASM graph; all four rebuilt WASM artifacts are byte-identical to the saved baseline, including the deployed router and CCTP adapter. The dependency fix requires no on-chain upgrade.
+
+Security gates remain enforced without advisory suppression. See the [CI reports](https://github.com/StellarHyperion/stellarhyperion-contracts/actions/workflows/ci.yml) for hosted results. These checks are dependency and regression validation, not a formal security audit. The deployed contracts remain the separately verified testnet artifacts recorded above.
 
 ## Contributing
 

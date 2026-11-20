@@ -66,6 +66,7 @@ export const SOROBAN_ERROR_NAMES = [
   "UnsupportedRoute",
   "GasFloatTooLow",
   "ProtectedAsset",
+  "ExceedsRouteLimit",
 ] as const;
 
 export type SorobanErrorName = (typeof SOROBAN_ERROR_NAMES)[number];
@@ -77,6 +78,7 @@ export const EVM_ERROR_NAMES = [
   "Unauthorized",
   "NotRailReceiver",
   "RouteDisabled",
+  "RouteIsPaused",
   "AdapterNotSet",
   "InvalidAmount",
   "AmountNotRepresentable",
@@ -181,6 +183,11 @@ const HELP: Record<HyperionErrorName, Omit<ErrorHelp, "sorobanCode">> = {
   RouteDisabled: {
     summary: "That rail is switched off right now. Pick another one.",
     fault: "config",
+    retryable: true,
+  },
+  RouteIsPaused: {
+    summary: "That rail is temporarily paused. Pick another one.",
+    fault: "timing",
     retryable: true,
   },
   AdapterNotSet: {
@@ -425,6 +432,11 @@ const HELP: Record<HyperionErrorName, Omit<ErrorHelp, "sorobanCode">> = {
     summary:
       "Change was owed and the sender would not accept it. A contract that rejects a plain transfer cannot send through Hyperion.",
     fault: "input",
+    retryable: false,
+  },
+  ExceedsRouteLimit: {
+    summary: "That transfer exceeds the maximum single transfer limit configured for this route.",
+    fault: "limit",
     retryable: false,
   },
 };

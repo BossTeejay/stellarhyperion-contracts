@@ -84,6 +84,12 @@ pub fn convert_decimals_exact(amount: i128, from: u32, to: u32) -> Result<i128, 
     Ok(converted.amount)
 }
 
+/// Convenience helper to scale an amount from a `from`-decimal base into a `to`-decimal base,
+/// returning the converted destination amount.
+pub fn scale_amount(amount: i128, from: u32, to: u32) -> Result<i128, HyperionError> {
+    convert_decimals(amount, from, to).map(|c| c.amount)
+}
+
 /// Round `amount` down to the nearest value that survives a `from` to `to` conversion intact.
 ///
 /// This is what the SDK calls to turn "send everything I have" into a number the router will
@@ -135,6 +141,63 @@ pub fn apply_fee(amount: i128, fee_bps: u32) -> Result<FeeSplit, HyperionError> 
         return Err(HyperionError::InvalidAmount);
     }
     Ok(FeeSplit { net, fee })
+}
+
+/// Complete source-debit and dust breakdown for an outbound transfer quote.
+///
+/// Preserves exact integer accounting across fee rounding and destination decimal flooring:
+/// `requested_amount == actual_debit + retained_dust` and `actual_debit == fee + net_amount`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QuoteBreakdown {
+    pub requested_amount: i128,
+    pub fee: i128,
+    pub net_amount: i128,
+    pub retained_dust: i128,
+    pub actual_debit: i128,
+    pub destination_amount: i128,
+}
+
+/// Compute the full source-debit and dust breakdown for `requested_amount`.
+pub fn compute_quote_breakdown(
+    requested_amount: i128,
+    fee_bps: u32,
+    source_decimals: u32,
+    destination_decimals: u32,
+) -> Result<QuoteBreakdown, HyperionError> {
+    let split = apply_fee(requested_amount, fee_bps)?;
+    let net_amount = floor_to_representable(split.net, source_decimals, destination_decimals)?;
+    let retained_dust = split.net - net_amount;
+    let actual_debit = split.fee + net_amount;
+    let destination_amount =
+        convert_decimals_exact(net_amount, source_decimals, destination_decimals)?;
+    Ok(QuoteBreakdown {
+        requested_amount,
+        fee: split.fee,
+        net_amount,
+        retained_dust,
+        actual_debit,
+        destination_amount,
+    })
+}
+
+/// Check that an actual transferred amount matches the expected exact amount,
+/// refusing fee-on-transfer, deflationary, or hostile balance mutations that
+/// violate router accounting assumptions.
+pub fn assert_exact_transfer(
+    balance_before: i128,
+    balance_after: i128,
+    expected_amount: i128,
+) -> Result<(), HyperionError> {
+    if expected_amount < 0 || balance_before < 0 || balance_after < 0 {
+        return Err(HyperionError::InvalidAmount);
+    }
+    let diff = balance_after
+        .checked_sub(balance_before)
+        .ok_or(HyperionError::DecimalOverflow)?;
+    if diff != expected_amount {
+        return Err(HyperionError::InvalidAmount);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -289,6 +352,21 @@ mod tests {
         assert_eq!(apply_fee(-5, 10), Err(HyperionError::InvalidAmount));
     }
 
+    #[test]
+    fn exact_transfer_rejects_negative_balances_and_amounts() {
+        for (before, after, amount) in [(-1, 0, 1), (0, -1, 1), (0, 0, -1)] {
+            assert_eq!(
+                assert_exact_transfer(before, after, amount),
+                Err(HyperionError::InvalidAmount)
+            );
+        }
+        assert_eq!(assert_exact_transfer(i128::MAX - 1, i128::MAX, 1), Ok(()));
+        assert_eq!(
+            assert_exact_transfer(i128::MAX, 0, 1),
+            Err(HyperionError::InvalidAmount)
+        );
+    }
+
     proptest! {
         /// Scaling up then back down is lossless, always.
         #[test]
@@ -330,6 +408,41 @@ mod tests {
             prop_assert!(fee >= 0);
             prop_assert!(net > 0);
             prop_assert!(fee <= amount / 100);
+        }
+
+        #[test]
+        fn exact_transfer_assertions(
+            before in 0i128..1_000_000_000i128,
+            transfer in 0i128..1_000_000_000i128,
+            fee in 1i128..10_000i128,
+        ) {
+            // Exact transfer succeeds
+            prop_assert!(assert_exact_transfer(before, before + transfer, transfer).is_ok());
+            // Fee on transfer (receiving less) fails
+            if transfer > fee {
+                prop_assert_eq!(
+                    assert_exact_transfer(before, before + transfer - fee, transfer),
+                    Err(HyperionError::InvalidAmount)
+                );
+            }
+            // Hostile balance inflation (receiving more) fails
+            prop_assert_eq!(
+                assert_exact_transfer(before, before + transfer + fee, transfer),
+                Err(HyperionError::InvalidAmount)
+            );
+        }
+
+        #[test]
+        fn quote_breakdown_conserves_requested_amount(
+            amount in 100i128..1_000_000_000_000_000i128,
+            bps in 0u32..=MAX_FEE_BPS,
+        ) {
+            let b = compute_quote_breakdown(amount, bps, STELLAR_DECIMALS, EVM_USDC_DECIMALS).unwrap();
+            prop_assert_eq!(b.requested_amount, amount);
+            prop_assert_eq!(b.actual_debit, b.fee + b.net_amount);
+            prop_assert_eq!(b.actual_debit + b.retained_dust, b.requested_amount);
+            prop_assert!(b.retained_dust >= 0 && b.retained_dust < 10);
+            prop_assert_eq!(b.destination_amount * 10, b.net_amount);
         }
     }
 }

@@ -1,7 +1,10 @@
 use hyperion_core::{FlowWindow, HyperionError, RouteKind};
 use soroban_sdk::{contracttype, Address, BytesN, Env};
 
-use crate::types::{Config, PendingClaim, QueuedAction, TokenConfig, TransferRecord};
+use crate::types::{
+    ClaimProvenance, Config, MigrationStatus, PendingClaim, QueuedAction, RouteConfig, TokenConfig,
+    TransferRecord, LEGACY_SCHEMA_VERSION,
+};
 
 /// Ledgers of headroom below which the router tops a key's lifetime back up.
 ///
@@ -12,16 +15,21 @@ use crate::types::{Config, PendingClaim, QueuedAction, TokenConfig, TransferReco
 pub const BUMP_THRESHOLD: u32 = 17_280; // about a day
 pub const BUMP_TO: u32 = 518_400; // about thirty days
 
+pub const REPLAY_BUMP_THRESHOLD: u32 = 518_400;
+pub const REPLAY_BUMP_TO: u32 = 3_110_400; // about 180 days, clamped to the network maximum
+
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Config,
+    LiabilityTracking,
     OutNonce,
     /// Contract the router hands outbound funds to for a given rail.
     Adapter(RouteKind),
     /// The only address allowed to call `bridge_in` for a given rail.
     RailReceiver(RouteKind),
     RouteEnabled(RouteKind),
+    RouteConfig(RouteKind),
     Token(Address),
     /// Per-route ceiling, overriding the token-wide one when present.
     RouteFlowLimit(Address, RouteKind),
@@ -37,9 +45,18 @@ pub enum DataKey {
     /// funds have already been burned on the far side, which is its own kind of loss.
     Processed(RouteKind, BytesN<32>),
     Claim(u64),
+    ClaimProvenance(u64),
+    ClaimLiability(Address),
     ClaimSeq,
     Queued(u64),
     QueueSeq,
+    /// Explicit storage schema version for upgrades and migrations (#46).
+    SchemaVersion,
+    /// Action lifecycle audit metadata (#44).
+    ResolvedAction(u64),
+    MigrationState,
+    ClaimSettledAt(u64),
+    ClaimArchiveWord(u64),
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -56,6 +73,57 @@ pub fn set_config(env: &Env, cfg: &Config) {
 
 pub fn is_initialized(env: &Env) -> bool {
     env.storage().instance().has(&DataKey::Config)
+}
+
+pub fn liability_tracking(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::LiabilityTracking)
+        .unwrap_or(false)
+}
+
+pub fn set_liability_tracking(env: &Env) {
+    env.storage()
+        .instance()
+        .set(&DataKey::LiabilityTracking, &true);
+}
+
+pub fn claim_liability(env: &Env, token: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::ClaimLiability(token.clone()))
+        .unwrap_or(0)
+}
+
+pub fn increase_claim_liability(
+    env: &Env,
+    token: &Address,
+    amount: i128,
+) -> Result<(), HyperionError> {
+    let current = claim_liability(env, token);
+    let next = current
+        .checked_add(amount)
+        .ok_or(HyperionError::InvalidAmount)?;
+    env.storage()
+        .instance()
+        .set(&DataKey::ClaimLiability(token.clone()), &next);
+    Ok(())
+}
+
+pub fn decrease_claim_liability(
+    env: &Env,
+    token: &Address,
+    amount: i128,
+) -> Result<(), HyperionError> {
+    let current = claim_liability(env, token);
+    let next = current
+        .checked_sub(amount)
+        .filter(|next| *next >= 0)
+        .ok_or(HyperionError::InvalidAmount)?;
+    env.storage()
+        .instance()
+        .set(&DataKey::ClaimLiability(token.clone()), &next);
+    Ok(())
 }
 
 pub fn next_out_nonce(env: &Env) -> u64 {
@@ -116,6 +184,25 @@ pub fn set_route_enabled(env: &Env, route: RouteKind, enabled: bool) {
         .instance()
         .set(&DataKey::RouteEnabled(route), &enabled);
     env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn route_config(env: &Env, route: RouteKind) -> Option<RouteConfig> {
+    let key = DataKey::RouteConfig(route);
+    let cfg = env.storage().persistent().get(&key);
+    if cfg.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    }
+    cfg
+}
+
+pub fn set_route_config(env: &Env, route: RouteKind, cfg: &RouteConfig) {
+    let key = DataKey::RouteConfig(route);
+    env.storage().persistent().set(&key, cfg);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn token_config(env: &Env, token: &Address) -> Result<TokenConfig, HyperionError> {
@@ -224,17 +311,42 @@ pub fn set_transfer(env: &Env, record: &TransferRecord) {
 /// Persistent rather than temporary on purpose. A temporary entry that archives is a replay
 /// window, and a replay window on a bridge is a mint-twice bug.
 pub fn is_processed(env: &Env, route: RouteKind, message_id: &BytesN<32>) -> bool {
-    env.storage()
-        .persistent()
-        .has(&DataKey::Processed(route, message_id.clone()))
+    touch_replay(env, route, message_id)
 }
 
 pub fn mark_processed(env: &Env, route: RouteKind, message_id: &BytesN<32>) {
     let key = DataKey::Processed(route, message_id.clone());
     env.storage().persistent().set(&key, &true);
+    extend_replay_ttl(env, &key);
+    crate::events::replay_recorded(env, route, message_id);
+}
+
+fn extend_replay_ttl(env: &Env, key: &DataKey) {
+    let target = REPLAY_BUMP_TO.min(env.storage().max_ttl());
     env.storage()
         .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        .extend_ttl(key, REPLAY_BUMP_THRESHOLD.min(target), target);
+}
+
+pub fn touch_replay(env: &Env, route: RouteKind, message_id: &BytesN<32>) -> bool {
+    let key = DataKey::Processed(route, message_id.clone());
+    if env.storage().persistent().has(&key) {
+        extend_replay_ttl(env, &key);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn assert_liability_migration_not_running(env: &Env) -> Result<(), HyperionError> {
+    if !liability_tracking(env)
+        && migration_state(env)
+            .map(|s| s.migration_pending)
+            .unwrap_or(false)
+    {
+        return Err(HyperionError::TimelockNotReady);
+    }
+    Ok(())
 }
 
 pub fn next_claim_id(env: &Env) -> u64 {
@@ -269,6 +381,31 @@ pub fn claim(env: &Env, id: u64) -> Option<PendingClaim> {
 pub fn set_claim(env: &Env, record: &PendingClaim) {
     let key = DataKey::Claim(record.id);
     env.storage().persistent().set(&key, record);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn migration_state(env: &Env) -> Option<MigrationStatus> {
+    env.storage().instance().get(&DataKey::MigrationState)
+}
+
+pub fn set_migration_state(env: &Env, status: &MigrationStatus) {
+    env.storage()
+        .instance()
+        .set(&DataKey::MigrationState, status);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn claim_provenance(env: &Env, id: u64) -> Option<ClaimProvenance> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ClaimProvenance(id))
+}
+
+pub fn set_claim_provenance(env: &Env, id: u64, value: &ClaimProvenance) {
+    let key = DataKey::ClaimProvenance(id);
+    env.storage().persistent().set(&key, value);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
@@ -320,4 +457,88 @@ pub fn touch_flow(env: &Env, token: &Address, route: RouteKind) {
             .persistent()
             .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
     }
+}
+
+/// Extend TTL on a persistent key if it currently exists in active storage.
+pub fn touch_persistent_key(env: &Env, key: &DataKey) -> bool {
+    if env.storage().persistent().has(key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn schema_version(env: &Env) -> u32 {
+    if let Some(v) = env.storage().instance().get(&DataKey::SchemaVersion) {
+        v
+    } else if is_initialized(env) {
+        LEGACY_SCHEMA_VERSION
+    } else {
+        0
+    }
+}
+
+pub fn set_schema_version(env: &Env, version: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::SchemaVersion, &version);
+}
+
+pub fn retain_action(env: &Env, action: &QueuedAction) {
+    let key = DataKey::ResolvedAction(action.id);
+    env.storage().persistent().set(&key, action);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn action_payload(env: &Env, id: u64) -> Option<QueuedAction> {
+    let key = if env.storage().persistent().has(&DataKey::Queued(id)) {
+        DataKey::Queued(id)
+    } else {
+        DataKey::ResolvedAction(id)
+    };
+    touch_persistent_key(env, &key);
+    env.storage().persistent().get(&key)
+}
+
+pub const MIN_CLAIM_RETENTION_SECONDS: u64 = 2_592_000;
+
+pub fn claim_settled_at(env: &Env, id: u64) -> Option<u64> {
+    env.storage().persistent().get(&DataKey::ClaimSettledAt(id))
+}
+
+pub fn set_claim_settled_at(env: &Env, id: u64, at: u64) {
+    let key = DataKey::ClaimSettledAt(id);
+    env.storage().persistent().set(&key, &at);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+// Compact, nonexpiring instance bitmap: 128 permanent nonpayment markers per word.
+// The archive event contains the exact historical values; bitmap never permits repayment.
+pub fn is_claim_archived(env: &Env, id: u64) -> bool {
+    let word: u128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ClaimArchiveWord(id / 128))
+        .unwrap_or(0);
+    word & (1u128 << (id % 128)) != 0
+}
+
+pub fn archive_claim(env: &Env, id: u64) {
+    let key = DataKey::ClaimArchiveWord(id / 128);
+    let word: u128 = env.storage().instance().get(&key).unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&key, &(word | (1u128 << (id % 128))));
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+    env.storage().persistent().remove(&DataKey::Claim(id));
+    env.storage()
+        .persistent()
+        .remove(&DataKey::ClaimSettledAt(id));
 }

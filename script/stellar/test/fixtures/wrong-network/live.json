@@ -1,0 +1,10 @@
+{
+  "networkPassphrase": "Public Global Stellar Network ; September 2015",
+  "routerCodeHash": "281d946ea78b194c0ef44ad9488ed02b2aa6912fb4f6fbab523ad38f1e0803f1",
+  "adapterCodeHashes": {},
+  "config": {},
+  "tokens": {},
+  "routes": {},
+  "queue": [],
+  "ledgerTimestamp": "1700000000"
+}

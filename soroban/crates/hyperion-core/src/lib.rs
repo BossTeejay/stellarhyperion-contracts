@@ -14,11 +14,15 @@ pub mod codec;
 pub mod error;
 pub mod flow;
 pub mod inbound;
+pub mod maintenance;
 pub mod route;
 pub mod strkey;
 
 pub use address::{AddressKind, StellarDestination};
-pub use amount::{Conversion, FeeSplit};
+pub use amount::{
+    convert_decimals, convert_decimals_exact, floor_to_representable, scale_amount, Conversion,
+    FeeSplit,
+};
 pub use axelar::{InboundNote, OutboundNote};
 pub use cctp::{
     validate_burn_boundary, ApprovalDiagnostics, ApprovalFinding, BurnMessage, CctpMessage,
@@ -27,6 +31,10 @@ pub use cctp::{
 pub use error::HyperionError;
 pub use flow::FlowWindow;
 pub use inbound::{Origin, Recipient, Router, RouterClient};
+pub use maintenance::{
+    AdapterKeyCoverage, AdapterMaintenance, AdapterMaintenanceClient, MaintenanceSummary,
+    MAX_MAINTENANCE_BATCH,
+};
 pub use route::RouteKind;
 pub use strkey::StrkeyDestination;
 

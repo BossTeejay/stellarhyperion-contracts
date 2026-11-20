@@ -1,8 +1,12 @@
+use hyperion_core::amount::MAX_DECIMALS;
 use hyperion_core::{HyperionError, MAX_FEE_BPS};
-use soroban_sdk::{ContractExecutable, Env};
+use soroban_sdk::{Address, ContractExecutable, Env, String};
 
 use crate::storage;
-use crate::types::{AdminAction, Config, QueuedAction, TokenConfig};
+use crate::types::{
+    ActionAuditStatus, AdminAction, CancelReason, Config, MigrationStatus, QueuedAction,
+    RouteConfig, TokenConfig, CURRENT_SCHEMA_VERSION, MAX_REASON_LEN,
+};
 
 /// Shortest and longest delay the router will accept.
 ///
@@ -12,28 +16,48 @@ use crate::types::{AdminAction, Config, QueuedAction, TokenConfig};
 pub const MIN_TIMELOCK_DELAY: u64 = 3_600;
 pub const MAX_TIMELOCK_DELAY: u64 = 2_592_000;
 
+// The configuration-diff command reports these bounds (and GRACE_PERIOD below) with every
+// proposal it emits. It can only describe a change the admin still has to queue and execute after
+// the wait, so there is no tool-side shortcut around the floor or the ceiling.
+
 /// How long a matured action stays executable before it has to be requeued.
 ///
 /// Without this, an action queued and forgotten a year ago is still sitting there ready to fire
 /// the moment somebody calls execute, which is a nasty shape of surprise.
 pub const GRACE_PERIOD: u64 = 604_800;
 
-pub fn queue(env: &Env, cfg: &Config, action: AdminAction) -> Result<QueuedAction, HyperionError> {
+pub fn queue(
+    env: &Env,
+    cfg: &Config,
+    queued_by: &Address,
+    action: AdminAction,
+) -> Result<QueuedAction, HyperionError> {
     validate(&action)?;
+    if let AdminAction::RegisterToken(token, decimals, _) = &action {
+        validate_token_behavior(env, token, *decimals)?;
+    }
     let now = env.ledger().timestamp();
     let id = storage::next_queue_id(env);
     let queued = QueuedAction {
         id,
-        action,
+        action: action.clone(),
         queued_at: now,
         eta: now + cfg.timelock_delay,
         expires_at: now + cfg.timelock_delay + GRACE_PERIOD,
     };
     storage::set_queued(env, &queued);
+    crate::events::action_audit(
+        env,
+        id,
+        ActionAuditStatus::Queued,
+        queued_by,
+        CancelReason::Unspecified,
+        String::from_str(env, ""),
+    );
     Ok(queued)
 }
 
-pub fn take_matured(env: &Env, id: u64) -> Result<QueuedAction, HyperionError> {
+pub fn take_matured(env: &Env, caller: &Address, id: u64) -> Result<QueuedAction, HyperionError> {
     let queued = storage::queued(env, id).ok_or(HyperionError::TimelockNotQueued)?;
     let now = env.ledger().timestamp();
     if now < queued.eta {
@@ -42,8 +66,43 @@ pub fn take_matured(env: &Env, id: u64) -> Result<QueuedAction, HyperionError> {
     if now > queued.expires_at {
         return Err(HyperionError::TimelockExpired);
     }
+    storage::retain_action(env, &queued);
     storage::clear_queued(env, id);
+    crate::events::action_audit(
+        env,
+        id,
+        ActionAuditStatus::Executed,
+        caller,
+        CancelReason::Unspecified,
+        String::from_str(env, ""),
+    );
     Ok(queued)
+}
+
+pub fn cancel(
+    env: &Env,
+    caller: &Address,
+    id: u64,
+    reason: CancelReason,
+    note: String,
+) -> Result<(), HyperionError> {
+    if note.len() > MAX_REASON_LEN {
+        return Err(HyperionError::InvalidLimit);
+    }
+    // Printable ASCII is the deliberately narrow, shared EVM/Soroban wire encoding.
+    if note
+        .to_bytes()
+        .iter()
+        .any(|byte| !(32..=126).contains(&byte))
+    {
+        return Err(HyperionError::InvalidLimit);
+    }
+    let queued = storage::queued(env, id).ok_or(HyperionError::TimelockNotQueued)?;
+    storage::retain_action(env, &queued);
+    storage::clear_queued(env, id);
+    crate::events::action_cancelled(env, id, caller);
+    crate::events::action_audit(env, id, ActionAuditStatus::Cancelled, caller, reason, note);
+    Ok(())
 }
 
 /// Reject a queued action that could never be executed successfully.
@@ -78,11 +137,45 @@ fn validate(action: &AdminAction) -> Result<(), HyperionError> {
         }
         AdminAction::RaiseTokenFlowLimit(_, limit)
         | AdminAction::SetRouteFlowLimit(_, _, limit)
+        | AdminAction::SetRouteMaxSingleTransfer(_, limit)
             if *limit < 0 =>
         {
             return Err(HyperionError::InvalidLimit)
         }
+        AdminAction::SetRouteConfig(_, cfg) if cfg.max_single_transfer < 0 => {
+            return Err(HyperionError::InvalidLimit);
+        }
+        AdminAction::BeginStorageMigration(version) if *version != CURRENT_SCHEMA_VERSION => {
+            return Err(HyperionError::InvalidLimit);
+        }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Validate token admission against router accounting assumptions before activation.
+///
+/// Ensures the token contract exists, correctly implements SEP-41 decimals matching
+/// `decimals`, does not exceed `MAX_DECIMALS`, and responds to standard balance checks.
+pub fn validate_token_behavior(
+    env: &Env,
+    token: &Address,
+    decimals: u32,
+) -> Result<(), HyperionError> {
+    if decimals > MAX_DECIMALS {
+        return Err(HyperionError::InvalidDecimals);
+    }
+    let client = soroban_sdk::token::Client::new(env, token);
+    let onchain_decimals = match client.try_decimals() {
+        Ok(Ok(d)) => d,
+        _ => return Err(HyperionError::InvalidDecimals),
+    };
+    if onchain_decimals != decimals {
+        return Err(HyperionError::InvalidDecimals);
+    }
+    let this = env.current_contract_address();
+    if !matches!(client.try_balance(&this), Ok(Ok(balance)) if balance >= 0) {
+        return Err(HyperionError::InvalidAmount);
     }
     Ok(())
 }
@@ -130,6 +223,7 @@ pub fn apply(env: &Env, action: &AdminAction) -> Result<(), HyperionError> {
             if *decimals > 38 {
                 return Err(HyperionError::InvalidDecimals);
             }
+            validate_token_behavior(env, token, *decimals)?;
             let token_cfg = TokenConfig {
                 decimals: *decimals,
                 flow_limit: *limit,
@@ -172,6 +266,43 @@ pub fn apply(env: &Env, action: &AdminAction) -> Result<(), HyperionError> {
         AdminAction::Upgrade(wasm_hash) => {
             env.deployer()
                 .update_current_contract(ContractExecutable::Wasm(wasm_hash.clone()));
+        }
+        AdminAction::BeginStorageMigration(version) => {
+            // The fixed high-water marks keep concurrent new deliveries from moving the goal.
+            // Repeating a reviewed authorization never resets an interrupted migration.
+            if storage::schema_version(env) < *version
+                && storage::migration_state(env)
+                    .map(|state| !state.migration_pending && state.target_version < *version)
+                    .unwrap_or(true)
+            {
+                storage::set_migration_state(
+                    env,
+                    &MigrationStatus {
+                        current_version: storage::schema_version(env),
+                        target_version: *version,
+                        migration_pending: true,
+                        migrated_transfers: 0,
+                        migrated_claims: 0,
+                        total_transfers: storage::out_nonce(env),
+                        total_claims: storage::claim_count(env),
+                    },
+                );
+            }
+        }
+        AdminAction::SetRouteConfig(route, route_cfg) => {
+            if route_cfg.max_single_transfer < 0 {
+                return Err(HyperionError::InvalidLimit);
+            }
+            storage::set_route_config(env, *route, route_cfg);
+        }
+        AdminAction::SetRouteMaxSingleTransfer(route, limit) => {
+            if *limit < 0 {
+                return Err(HyperionError::InvalidLimit);
+            }
+            let route_cfg = RouteConfig {
+                max_single_transfer: *limit,
+            };
+            storage::set_route_config(env, *route, &route_cfg);
         }
     }
     Ok(())

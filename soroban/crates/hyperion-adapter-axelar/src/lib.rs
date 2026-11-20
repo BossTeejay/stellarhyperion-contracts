@@ -29,23 +29,11 @@
 //! settle themselves once they have opened the trustline. The same argument covers muxed
 //! accounts, which the bare shape has nowhere to put and this one carries fine.
 //!
-//! # Why no gas token
+//! # Relay gas
 //!
-//! Axelar's relayers want paying, and ITS takes a `gas_token` for that. Hyperion always passes
-//! `None`.
-//!
-//! The gas service charges its `spender`, and it does so one frame below ITS. Naming this
-//! adapter as the spender would therefore need an invoker authorisation covering a call this
-//! contract does not make, against a payload ITS computes internally from Axelar's own message
-//! schema. Reproducing that encoding here would mean carrying a copy of somebody else's wire
-//! format that breaks silently rather than loudly, and paying the gas service directly
-//! beforehand does not help either: the gateway credits a payment against the hash of the
-//! message it actually emitted, which does not exist yet.
-//!
-//! Axelar's answer to exactly this is `add_gas`, which tops up a message that has already been
-//! emitted. So Hyperion's keeper watches for the gateway event and pays on it from off chain,
-//! out of its own balance, against the real message id. One fewer authorisation for this
-//! contract to hold, and one less transcription of Axelar's internals to keep in step.
+//! `dispatch_from` takes gas and net tokens from the user's authenticated account through ITS.
+//! The source wallet signs the simulated authorization tree; no copy of Axelar's payload is
+//! needed to authorize its gas service. The legacy `dispatch` interface carries no gas payment.
 //!
 //! # What this contract does not do
 //!
@@ -71,16 +59,16 @@ use hyperion_core::{
     address::{assert_route_supports, bytes32_to_evm, evm_to_bytes32},
     axelar::{InboundNote, OutboundNote},
     inbound::{Origin, Recipient, RouterClient},
-    HyperionError, RouteKind,
+    AdapterKeyCoverage, HyperionError, MaintenanceSummary, RouteKind, MAX_MAINTENANCE_BATCH,
 };
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contractimpl, token, vec,
     xdr::ToXdr,
-    Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
-use rail::{InterchainTokenServiceClient, TokenManagerType};
+use rail::{InterchainTokenServiceClient, Token, TokenManagerType};
 use types::{ChainLink, Config};
 
 #[contract]
@@ -108,6 +96,7 @@ impl AxelarAdapter {
         if !matches!(route, RouteKind::AxelarIts | RouteKind::AxelarGmp) {
             return Err(HyperionError::UnsupportedRoute);
         }
+        admin.require_auth();
         storage::set_config(
             &env,
             &Config {
@@ -173,13 +162,6 @@ impl AxelarAdapter {
         };
         // Nothing wider than that. One contract, one function, one exact argument list, and no
         // sub-invocations underneath it.
-        env.authorize_as_current_contract(vec![
-            &env,
-            InvokerContractAuthEntry::Contract(SubContractInvocation {
-                context,
-                sub_invocations: vec![&env],
-            }),
-        ]);
 
         // On the bare shape ITS delivers to the recipient itself. On the shape that carries a
         // note it delivers to Hyperion's contract over there, and the recipient rides along in
@@ -192,6 +174,27 @@ impl AxelarAdapter {
             _ => (Bytes::from_array(&env, &recipient.to_array()), None),
         };
 
+        let asset = token::Client::new(&env, &token);
+        let sender_before = asset.balance(&this);
+        let manager_type = its.token_manager_type(&token_id);
+        let manager = if manager_type.takes_by_burning() {
+            this.clone()
+        } else {
+            its.deployed_token_manager(&token_id)
+        };
+        let manager_before = if manager_type.takes_by_burning() {
+            0
+        } else {
+            asset.balance(&manager)
+        };
+        env.authorize_as_current_contract(vec![
+            &env,
+            InvokerContractAuthEntry::Contract(SubContractInvocation {
+                context,
+                sub_invocations: vec![&env],
+            }),
+        ]);
+
         its.interchain_transfer(
             &this,
             &token_id,
@@ -203,6 +206,19 @@ impl AxelarAdapter {
             // message once the gateway has emitted it.
             &None,
         );
+        let expected_debit = amount;
+        hyperion_core::amount::assert_exact_transfer(
+            asset.balance(&this),
+            sender_before,
+            expected_debit,
+        )?;
+        if !manager_type.takes_by_burning() {
+            hyperion_core::amount::assert_exact_transfer(
+                manager_before,
+                asset.balance(&manager),
+                amount,
+            )?;
+        }
 
         events::Dispatched {
             token,
@@ -213,6 +229,102 @@ impl AxelarAdapter {
             destination_address,
             token_manager_type: manager_type,
             note,
+            router_nonce: nonce,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// The native token ITS accepts for relay gas.
+    pub fn gas_token(env: Env) -> Result<Address, HyperionError> {
+        let cfg = storage::config(&env)?;
+        Ok(InterchainTokenServiceClient::new(&env, &cfg.its).native_token_address())
+    }
+
+    /// ITS takes net tokens and gas directly from the authenticated sender. This lets the
+    /// source account authorize ITS's actual nested gas call, without duplicating its payload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_from(
+        env: Env,
+        caller: Address,
+        sender: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        nonce: u64,
+        gas_amount: i128,
+    ) -> Result<(), HyperionError> {
+        caller.require_auth();
+        sender.require_auth();
+        let cfg = storage::config(&env)?;
+        if caller != cfg.router {
+            return Err(HyperionError::Unauthorized);
+        }
+        if cfg.route != RouteKind::AxelarIts {
+            return Err(HyperionError::UnsupportedRoute);
+        }
+        if amount <= 0 || gas_amount <= 0 {
+            return Err(HyperionError::InvalidAmount);
+        }
+        let link = storage::link(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
+        let token_id = storage::token_id(&env, &token).ok_or(HyperionError::TokenNotMapped)?;
+        let recipient = bytes32_to_evm(&env, &destination)?;
+        let its = InterchainTokenServiceClient::new(&env, &cfg.its);
+        let destination_address = Bytes::from_array(&env, &recipient.to_array());
+        let asset = token::Client::new(&env, &token);
+        let sender_before = asset.balance(&sender);
+        let manager_type = its.token_manager_type(&token_id);
+        let manager = if manager_type.takes_by_burning() {
+            sender.clone()
+        } else {
+            its.deployed_token_manager(&token_id)
+        };
+        let manager_before = if manager_type.takes_by_burning() {
+            0
+        } else {
+            asset.balance(&manager)
+        };
+        its.interchain_transfer(
+            &sender,
+            &token_id,
+            &link.axelar_chain,
+            &destination_address,
+            &amount,
+            &None,
+            &Some(Token {
+                address: its.native_token_address(),
+                amount: gas_amount,
+            }),
+        );
+        let mut expected_debit = amount;
+        if its.native_token_address() == token {
+            expected_debit = amount
+                .checked_add(gas_amount)
+                .ok_or(HyperionError::DecimalOverflow)?;
+        }
+        hyperion_core::amount::assert_exact_transfer(
+            asset.balance(&sender),
+            sender_before,
+            expected_debit,
+        )?;
+        if !manager_type.takes_by_burning() {
+            hyperion_core::amount::assert_exact_transfer(
+                manager_before,
+                asset.balance(&manager),
+                amount,
+            )?;
+        }
+
+        events::Dispatched {
+            token,
+            destination_chain,
+            amount,
+            token_id: token_id.clone(),
+            axelar_chain: link.axelar_chain,
+            destination_address,
+            token_manager_type: its.token_manager_type(&token_id),
+            note: None,
             router_nonce: nonce,
         }
         .publish(&env);
@@ -381,8 +493,75 @@ impl AxelarAdapter {
         env.storage()
             .instance()
             .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
-        storage::touch_link(&env, &chain);
+        let _ = storage::touch_link(&env, &chain);
         Ok(())
+    }
+
+    /// Bounded storage maintenance for Axelar peer trust (`Link`, `Source`) and token mappings
+    /// (`TokenId`, `Token`).
+    pub fn maintain_storage(
+        env: Env,
+        tokens: Vec<Address>,
+        peer_chains: Vec<String>,
+        peer_domains: Vec<u32>,
+        remote_tokens: Vec<BytesN<32>>,
+        inbound_messages: Vec<BytesN<32>>,
+    ) -> Result<MaintenanceSummary, HyperionError> {
+        let _ = storage::config(&env)?;
+        if tokens.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains.len() > MAX_MAINTENANCE_BATCH
+            || peer_domains.len() > MAX_MAINTENANCE_BATCH
+            || remote_tokens.len() > MAX_MAINTENANCE_BATCH
+            || inbound_messages.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains
+                .len()
+                .saturating_add(tokens.len())
+                .saturating_add(remote_tokens.len())
+                .saturating_mul(2)
+                > MAX_MAINTENANCE_BATCH
+            || !peer_domains.is_empty()
+            || !inbound_messages.is_empty()
+        {
+            return Err(HyperionError::InvalidLimit);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
+
+        let mut peer_trust_touched = 0u32;
+        for chain in peer_chains.iter() {
+            peer_trust_touched += storage::touch_link(&env, &chain);
+        }
+
+        let mut token_mappings_touched = 0u32;
+        for token in tokens.iter() {
+            token_mappings_touched += storage::touch_token(&env, &token);
+        }
+        for token_id in remote_tokens.iter() {
+            token_mappings_touched += storage::touch_remote_token(&env, &token_id);
+        }
+
+        Ok(MaintenanceSummary {
+            instance_extended: true,
+            token_mappings_touched,
+            peer_trust_touched,
+            inbound_records_touched: 0,
+            total_keys_touched: peer_trust_touched + token_mappings_touched,
+        })
+    }
+
+    /// Explicit key coverage for Axelar adapter storage maintenance.
+    pub fn key_coverage(env: Env) -> Result<AdapterKeyCoverage, HyperionError> {
+        let cfg = storage::config(&env)?;
+        Ok(AdapterKeyCoverage {
+            route: cfg.route,
+            has_token_mappings: true,
+            has_peer_trust: true,
+            has_inbound_records: false,
+            token_mapping_keys: 2,
+            peer_trust_keys: 2,
+            inbound_record_keys: 0,
+        })
     }
 
     // ---------------------------------------------------------------------------------------

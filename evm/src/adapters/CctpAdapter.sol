@@ -162,6 +162,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         (AddressKind kind, bytes32 key, uint64 muxedId) = StellarAddress.parse(destination.strkey);
         bytes memory hookData = HyperionNotes.encodeCctpHook(kind, key, muxedId);
 
+        emit BurnSubmitted(destination.chain, lane.domain, amount, lane.mintRecipient, nonce, hookData);
         uint256 allowanceBefore = IERC20(USDC).allowance(address(this), address(TOKEN_MESSENGER));
         IERC20(USDC).forceApprove(address(TOKEN_MESSENGER), amount);
         TOKEN_MESSENGER.depositForBurnWithHook(
@@ -183,7 +184,6 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         IERC20(USDC).forceApprove(address(TOKEN_MESSENGER), 0);
         uint256 allowanceAfter = IERC20(USDC).allowance(address(this), address(TOKEN_MESSENGER));
 
-        emit BurnSubmitted(destination.chain, lane.domain, amount, lane.mintRecipient, nonce, hookData);
         emit ApprovalAudited(
             USDC, address(TOKEN_MESSENGER), allowanceBefore, allowanceAfter, allowanceAfter == 0
         );

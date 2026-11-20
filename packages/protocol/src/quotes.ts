@@ -319,3 +319,58 @@ export function minimumFromTolerance(quote: RouteQuote, toleranceBps: number): b
   const keep = BPS_DENOMINATOR - BigInt(toleranceBps);
   return (quote.destinationAmount * keep) / BPS_DENOMINATOR;
 }
+
+/** Convenience alias for single rail quote planning. */
+export const quoteRoute = planQuote;
+
+/** Convenience alias for all rail quote planning. */
+export const quoteAllRails = planQuotes;
+
+export * from "./quotes/types.js";
+export * from "./quotes/ladder.js";
+
+/** Additive V2 wrapper. `quote`, planQuote and quoteBatch retain their legacy schema. */
+export interface RouteQuoteV2 {
+  readonly quote: RouteQuote;
+  readonly requestedAmount: bigint;
+  readonly fee: bigint;
+  readonly netAmount: bigint;
+  readonly retainedDust: bigint;
+  readonly actualDebit: bigint;
+  readonly breakdownKnown: boolean;
+}
+
+export function planQuoteV2(request: QuoteRequest, snapshot: RouterSnapshot): RouteQuoteV2 {
+  const quote = planQuote(request, snapshot);
+  const base = {
+    quote,
+    requestedAmount: request.amount,
+    fee: 0n,
+    netAmount: 0n,
+    retainedDust: 0n,
+    actualDebit: 0n,
+    breakdownKnown: false,
+  };
+  if (
+    !snapshot.tokenRegistered ||
+    request.amount <= 0n ||
+    request.amount > MAX_QUOTE_AMOUNT ||
+    snapshot.tokenDecimals > MAX_DECIMALS ||
+    request.destinationDecimals > MAX_DECIMALS
+  )
+    return base;
+  const fee = (request.amount * BigInt(snapshot.feeBps)) / BPS_DENOMINATOR;
+  const netAmount = floorToRepresentable(
+    request.amount - fee,
+    snapshot.tokenDecimals,
+    request.destinationDecimals,
+  );
+  return {
+    ...base,
+    fee,
+    netAmount,
+    retainedDust: request.amount - fee - netAmount,
+    actualDebit: fee + netAmount,
+    breakdownKnown: true,
+  };
+}

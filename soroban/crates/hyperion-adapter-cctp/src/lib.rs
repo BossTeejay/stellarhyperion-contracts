@@ -59,11 +59,12 @@ use hyperion_core::{
     cctp::{self, BurnMessage, CctpMessage, HyperionHook},
     codec,
     inbound::{Origin, Recipient, RouterClient},
-    HyperionError, RouteKind, BPS_DENOMINATOR,
+    AdapterKeyCoverage, HyperionError, MaintenanceSummary, RouteKind, BPS_DENOMINATOR,
+    MAX_MAINTENANCE_BATCH,
 };
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contractimpl, token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    contract, contractimpl, token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 use rail::{MessageTransmitterClient, TokenMessengerClient};
@@ -208,6 +209,80 @@ impl CctpAdapter {
     // ---------------------------------------------------------------------------------------
     // Inbound
     // ---------------------------------------------------------------------------------------
+
+    /// Pay Circle's destination forwarding fee from USDC and request automatic minting.
+    /// The caller supplies a live fee budget, in Stellar token base units. No persistent
+    /// allowance or operator fee policy can widen the amount the user authorized.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_from(
+        env: Env,
+        caller: Address,
+        sender: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        nonce: u64,
+        gas_amount: i128,
+    ) -> Result<(), HyperionError> {
+        caller.require_auth();
+        sender.require_auth();
+        let cfg = storage::config(&env)?;
+        if caller != cfg.router {
+            return Err(HyperionError::Unauthorized);
+        }
+        if amount <= 0 || gas_amount <= 0 || gas_amount >= amount {
+            return Err(HyperionError::InvalidAmount);
+        }
+        let domain =
+            storage::domain_of(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
+        if destination == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(HyperionError::InvalidDestination);
+        }
+        let destination_caller = storage::destination_caller(&env, domain);
+        if destination_caller != BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(HyperionError::InvalidDestination);
+        }
+        let this = env.current_contract_address();
+        let asset = token::Client::new(&env, &token);
+        let sender_before = asset.balance(&sender);
+        let before = asset.balance(&this);
+        asset.transfer(&sender, &this, &amount);
+        hyperion_core::amount::assert_exact_transfer(before, asset.balance(&this), amount)?;
+        hyperion_core::amount::assert_exact_transfer(
+            asset.balance(&sender),
+            sender_before,
+            amount,
+        )?;
+        let ledger = env.ledger().sequence();
+        asset.approve(&this, &cfg.token_messenger, &amount, &ledger);
+        // Circle's version-zero forwarding hook: 24-byte magic, version 0, payload length 0.
+        let mut hook = [0u8; 32];
+        hook[..12].copy_from_slice(b"cctp-forward");
+        TokenMessengerClient::new(&env, &cfg.token_messenger).deposit_for_burn_with_hook(
+            &this,
+            &amount,
+            &domain,
+            &destination,
+            &token,
+            &destination_caller,
+            &gas_amount,
+            &cfg.min_finality_threshold,
+            &Bytes::from_array(&env, &hook),
+        );
+        asset.approve(&this, &cfg.token_messenger, &0i128, &ledger);
+        events::Dispatched {
+            token,
+            destination_domain: domain,
+            amount,
+            mint_recipient: destination,
+            max_fee: gas_amount,
+            min_finality_threshold: cfg.min_finality_threshold,
+            router_nonce: nonce,
+        }
+        .publish(&env);
+        Ok(())
+    }
 
     /// Take an attested CCTP message, have Circle mint against it, and pass the funds on.
     ///
@@ -368,8 +443,78 @@ impl CctpAdapter {
         env.storage()
             .instance()
             .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
-        storage::touch_link(&env, domain);
+        let _ = storage::touch_link(&env, domain);
         Ok(())
+    }
+
+    /// Bounded storage maintenance for CCTP peer trust (`Domain`, `Chain`, `Caller`) and
+    /// token mappings (`Asset(domain, remote_token)`).
+    pub fn maintain_storage(
+        env: Env,
+        tokens: Vec<Address>,
+        peer_chains: Vec<String>,
+        peer_domains: Vec<u32>,
+        remote_tokens: Vec<BytesN<32>>,
+        inbound_messages: Vec<BytesN<32>>,
+    ) -> Result<MaintenanceSummary, HyperionError> {
+        let _ = storage::config(&env)?;
+        if tokens.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains.len() > MAX_MAINTENANCE_BATCH
+            || peer_domains.len() > MAX_MAINTENANCE_BATCH
+            || remote_tokens.len() > MAX_MAINTENANCE_BATCH
+            || inbound_messages.len() > MAX_MAINTENANCE_BATCH
+            || peer_chains
+                .len()
+                .saturating_add(peer_domains.len())
+                .saturating_mul(3)
+                .saturating_add(peer_domains.len().saturating_mul(remote_tokens.len()))
+                > MAX_MAINTENANCE_BATCH
+            || !tokens.is_empty()
+            || !inbound_messages.is_empty()
+        {
+            return Err(HyperionError::InvalidLimit);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(storage::BUMP_THRESHOLD, storage::BUMP_TO);
+
+        let mut peer_trust_touched = 0u32;
+        for chain in peer_chains.iter() {
+            peer_trust_touched += storage::touch_link_by_chain(&env, &chain);
+        }
+        for domain in peer_domains.iter() {
+            peer_trust_touched += storage::touch_link(&env, domain);
+        }
+
+        let mut token_mappings_touched = 0u32;
+        for domain in peer_domains.iter() {
+            for burn_token in remote_tokens.iter() {
+                if storage::touch_asset(&env, domain, &burn_token) {
+                    token_mappings_touched += 1;
+                }
+            }
+        }
+
+        Ok(MaintenanceSummary {
+            instance_extended: true,
+            token_mappings_touched,
+            peer_trust_touched,
+            inbound_records_touched: 0,
+            total_keys_touched: peer_trust_touched + token_mappings_touched,
+        })
+    }
+
+    /// Explicit key coverage for CCTP adapter storage maintenance.
+    pub fn key_coverage(_env: Env) -> Result<AdapterKeyCoverage, HyperionError> {
+        Ok(AdapterKeyCoverage {
+            route: RouteKind::Cctp,
+            has_token_mappings: true,
+            has_peer_trust: true,
+            has_inbound_records: false,
+            token_mapping_keys: 1,
+            peer_trust_keys: 3,
+            inbound_record_keys: 0,
+        })
     }
 
     // ---------------------------------------------------------------------------------------

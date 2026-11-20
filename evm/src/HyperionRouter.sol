@@ -25,6 +25,7 @@ import {
     RefundFailed,
     ReplayedMessage,
     RouteDisabled,
+    RouteIsPaused,
     SlippageExceeded,
     TimelockAlreadyExecuted,
     TimelockDelayOutOfRange,
@@ -38,9 +39,11 @@ import {
     ZeroAddress
 } from "./HyperionErrors.sol";
 import {
+    ActionAuditStatus,
     ActionKind,
     AddressKind,
     AdminAction,
+    CancelReason,
     Destination,
     Origin,
     OutboundRequest,
@@ -49,6 +52,7 @@ import {
     QuoteBlocker,
     RouteKind,
     RouteQuote,
+    RouteQuoteV2,
     TokenConfig
 } from "./HyperionTypes.sol";
 import {IHyperionRouter} from "./interfaces/IHyperionRouter.sol";
@@ -98,6 +102,9 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @dev A change approved in March and executed in November is a change nobody reviewed.
     uint64 public constant GRACE_PERIOD = 7 days;
 
+    /// @notice Maximum length in bytes of a timelock cancellation reason note.
+    uint256 public constant MAX_REASON_LEN = 128;
+
     /// @notice The shortest flow window a limit can be measured over, in seconds.
     uint64 public constant MIN_FLOW_WINDOW = 5 minutes;
 
@@ -127,6 +134,8 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @notice Whether a rail is open for new transfers. Deliveries already in flight are not
     /// affected, because a transfer that has left is a transfer that has to be able to land.
     mapping(RouteKind route => bool enabled) public routeEnabled;
+    /// @notice Whether an individual rail is currently paused for departures.
+    mapping(RouteKind route => bool paused) public routePaused;
     mapping(address token => TokenConfig config) private _tokens;
 
     /// @dev Keyed on token and rail together, because a ceiling that makes sense for the rail
@@ -152,6 +161,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
 
     mapping(uint64 claimId => PendingClaim claim) private _claims;
     mapping(uint64 actionId => QueuedAction queued) private _actions;
+    mapping(uint64 actionId => bool cancelled) private _cancelledActions;
 
     /// @param admin Holds every privileged power, all of them behind the timelock.
     /// @notice Wires up the router with its roles, its treasury, and its fee and timing limits.
@@ -215,9 +225,30 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         OutboundPlan memory plan = _planOutbound(request);
 
         IERC20 token = IERC20(request.token);
+        uint256 senderBefore = token.balanceOf(msg.sender);
+        uint256 tokenBalBefore = token.balanceOf(address(this));
         token.safeTransferFrom(msg.sender, address(this), plan.gross);
-        if (plan.fee != 0) token.safeTransfer(treasury, plan.fee);
+        uint256 tokenBalAfter = token.balanceOf(address(this));
+        if (tokenBalAfter < tokenBalBefore || tokenBalAfter - tokenBalBefore != plan.gross) {
+            revert InvalidAmount();
+        }
+        uint256 senderAfter = token.balanceOf(msg.sender);
+        if (senderAfter > senderBefore || senderBefore - senderAfter != plan.gross) revert InvalidAmount();
+
+        if (plan.fee != 0) {
+            uint256 treasuryBefore = token.balanceOf(treasury);
+            token.safeTransfer(treasury, plan.fee);
+            uint256 treasuryAfter = token.balanceOf(treasury);
+            if (treasuryAfter < treasuryBefore || treasuryAfter - treasuryBefore != plan.fee) {
+                revert InvalidAmount();
+            }
+        }
+
+        uint256 adapterBefore = token.balanceOf(plan.adapterAddress);
         token.safeTransfer(plan.adapterAddress, plan.net);
+        uint256 adapterAfter = token.balanceOf(plan.adapterAddress);
+        if (adapterAfter < adapterBefore || adapterAfter - adapterBefore != plan.net) revert InvalidAmount();
+        if (token.balanceOf(address(this)) != tokenBalBefore) revert InvalidAmount();
 
         nonce = ++outboundNonce;
 
@@ -242,6 +273,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// transactions in the same block both pass.
     function _planOutbound(OutboundRequest calldata request) private returns (OutboundPlan memory plan) {
         if (request.amount == 0) revert InvalidAmount();
+        if (routePaused[request.route]) revert RouteIsPaused(request.route);
         if (!routeEnabled[request.route]) revert RouteDisabled();
         if (bytes(request.destination.chain).length == 0) revert UnknownChain();
 
@@ -324,7 +356,17 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         // Pull rather than trust. The receiver approves this transfer before calling in, so if
         // the funds are not actually here the delivery reverts now instead of writing down a
         // claim against money nobody holds.
+        uint256 receiverBefore = IERC20(token).balanceOf(msg.sender);
+        uint256 tokenBalBefore = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 tokenBalAfter = IERC20(token).balanceOf(address(this));
+        if (tokenBalAfter < tokenBalBefore || tokenBalAfter - tokenBalBefore != amount) {
+            revert InvalidAmount();
+        }
+        uint256 receiverAfter = IERC20(token).balanceOf(msg.sender);
+        if (receiverAfter > receiverBefore || receiverBefore - receiverAfter != amount) {
+            revert InvalidAmount();
+        }
 
         if (_tryPay(token, recipient, amount)) {
             emit BridgeIn(route, recipient, token, amount, origin.chain, origin.nonce, origin.messageId);
@@ -374,7 +416,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         view
         returns (QuoteBlocker)
     {
-        if (paused()) return QuoteBlocker.Paused;
+        if (paused() || routePaused[route]) return QuoteBlocker.Paused;
         if (!routeEnabled[route]) return QuoteBlocker.RouteDisabled;
 
         address adapterAddress = _adapters[route];
@@ -460,6 +502,30 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     }
 
     /// @inheritdoc IHyperionRouter
+    /// @notice Quote prospective debit without changing the legacy result schema.
+    /// @dev Unavailable quotes never imply a debit occurred.
+    function quoteV2(
+        RouteKind route,
+        address token,
+        uint256 amount,
+        Destination calldata destination,
+        uint8 destinationDecimals
+    ) public view override returns (RouteQuoteV2 memory v) {
+        v.quote = quote(route, token, amount, destination, destinationDecimals);
+        v.requestedAmount = amount;
+        TokenConfig memory cfg = _tokens[token];
+        if (
+            !cfg.registered || amount == 0 || amount > type(uint128).max
+                || cfg.decimals > AmountMath.MAX_DECIMALS || destinationDecimals > AmountMath.MAX_DECIMALS
+        ) return v;
+        v.fee = (amount * feeBps) / AmountMath.BPS_DENOMINATOR;
+        v.netAmount = AmountMath.floorToRepresentable(amount - v.fee, cfg.decimals, destinationDecimals);
+        v.retainedDust = amount - v.fee - v.netAmount;
+        v.actualDebit = v.fee + v.netAmount;
+        v.breakdownKnown = true;
+    }
+
+    /// @inheritdoc IHyperionRouter
     function quoteAll(
         address token,
         uint256 amount,
@@ -507,6 +573,26 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     }
 
     /// @inheritdoc IHyperionRouter
+    /// @dev Guardian or admin. Other rails and arrivals keep working.
+    function pauseRoute(RouteKind route) external {
+        if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
+            revert Unauthorized();
+        }
+        routePaused[route] = true;
+        emit RoutePaused(route, msg.sender);
+    }
+
+    /// @inheritdoc IHyperionRouter
+    /// @dev Guardian or admin.
+    function unpauseRoute(RouteKind route) external {
+        if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
+            revert Unauthorized();
+        }
+        routePaused[route] = false;
+        emit RouteUnpaused(route, msg.sender);
+    }
+
+    /// @inheritdoc IHyperionRouter
     /// @dev No timelock, because it only ever narrows. Raising one is a queued action.
     function lowerTokenFlowLimit(address token, uint256 limit) external override {
         if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
@@ -524,6 +610,9 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     // Everything else, on a clock
     // -------------------------------------------------------------------------------------
 
+    // Proposal generation is deliberately Stellar-only for now: script/stellar/propose.sh refuses
+    // manifests whose family is not "stellar" and emits the Soroban variant names. Nothing here
+    // assumes an EVM counterpart has been validated, and no tool queues these actions on EVM.
     /// @inheritdoc IHyperionRouter
     function queueAction(AdminAction calldata action)
         external
@@ -544,12 +633,13 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             executed: false
         });
         emit ActionQueued(id, action.kind, eta, expiresAt);
+        emit ActionAuditUpdated(1, id, ActionAuditStatus.Queued, msg.sender, CancelReason.Unspecified, "");
     }
 
     /// @inheritdoc IHyperionRouter
     function executeAction(uint64 id) external override onlyRole(DEFAULT_ADMIN_ROLE) {
         QueuedAction storage queued = _actions[id];
-        if (queued.id == 0) revert TimelockNotQueued();
+        if (queued.id == 0 || _cancelledActions[id]) revert TimelockNotQueued();
         if (queued.executed) revert TimelockAlreadyExecuted();
         if (block.timestamp < queued.eta) revert TimelockNotReady(queued.eta);
         if (block.timestamp > queued.expiresAt) revert TimelockExpired(queued.expiresAt);
@@ -562,20 +652,37 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         _validateAction(action);
         _applyAction(action);
         emit ActionExecuted(id, action.kind);
+        emit ActionAuditUpdated(1, id, ActionAuditStatus.Executed, msg.sender, CancelReason.Unspecified, "");
     }
 
     /// @inheritdoc IHyperionRouter
     /// @dev Guardian can cancel as well as admin. Somebody who can only stop things should be
     /// able to stop a queued change they think is a mistake.
     function cancelAction(uint64 id) external override {
+        _cancelAction(id, CancelReason.Unspecified, "");
+    }
+
+    /// @inheritdoc IHyperionRouter
+    function cancelActionWithReason(uint64 id, CancelReason reason, string calldata note) external override {
+        _cancelAction(id, reason, note);
+    }
+
+    function _cancelAction(uint64 id, CancelReason reason, string memory note) private {
         if (!hasRole(GUARDIAN_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) {
             revert Unauthorized();
         }
+        bytes memory raw = bytes(note);
+        if (raw.length > MAX_REASON_LEN) revert InvalidLimit();
+        for (uint256 i; i < raw.length; ++i) {
+            if (uint8(raw[i]) < 32 || uint8(raw[i]) > 126) revert InvalidLimit();
+        }
         QueuedAction storage queued = _actions[id];
-        if (queued.id == 0) revert TimelockNotQueued();
+        if (queued.id == 0 || _cancelledActions[id]) revert TimelockNotQueued();
         if (queued.executed) revert TimelockAlreadyExecuted();
-        delete _actions[id];
+        _cancelledActions[id] = true;
+        // Retain the canonical payload and schedule. The audit status blocks execution forever.
         emit ActionCancelled(id, msg.sender);
+        emit ActionAuditUpdated(1, id, ActionAuditStatus.Cancelled, msg.sender, reason, note);
     }
 
     /// @notice Role changes go through the timelock like everything else.
@@ -597,6 +704,11 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @inheritdoc IHyperionRouter
     function queuedAction(uint64 id) external view override returns (QueuedAction memory) {
         return _actions[id];
+    }
+
+    /// @inheritdoc IHyperionRouter
+    function actionCancelled(uint64 id) external view override returns (bool) {
+        return _cancelledActions[id];
     }
 
     /// @inheritdoc IHyperionRouter
@@ -662,15 +774,24 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// freezes accounts, and a frozen recipient must not be able to wedge a message the rail has
     /// already attested. So the result is a boolean and the caller decides what to do with it.
     ///
-    /// Tokens are registered by an admin, so a deliberately hostile one is not in the threat
-    /// model here, but a merely badly behaved one is: this tolerates the ones that return nothing
-    /// at all as well as the ones that return a bool.
+    /// A successful token call is insufficient: both balances must change by exactly the
+    /// promised amount. A refusal may park a claim only if it leaves both balances unchanged.
     function _tryPay(address token, address to, uint256 amount) private returns (bool) {
-        (bool ok, bytes memory ret) = token.call(abi.encodeCall(IERC20.transfer, (to, amount)));
-        if (!ok) return false;
-        if (ret.length == 0) return true;
-        if (ret.length < 32) return false;
-        return abi.decode(ret, (bool));
+        IERC20 asset = IERC20(token);
+        uint256 fromBefore = asset.balanceOf(address(this));
+        uint256 toBefore = asset.balanceOf(to);
+        bool delivered = asset.trySafeTransfer(to, amount);
+        uint256 fromAfter = asset.balanceOf(address(this));
+        uint256 toAfter = asset.balanceOf(to);
+        if (delivered) {
+            if (
+                fromAfter > fromBefore || fromBefore - fromAfter != amount || toAfter < toBefore
+                    || toAfter - toBefore != amount
+            ) revert InvalidAmount();
+        } else if (fromAfter != fromBefore || toAfter != toBefore) {
+            revert InvalidAmount();
+        }
+        return delivered;
     }
 
     function _blocked(RouteQuote memory q, QuoteBlocker reason) private pure returns (RouteQuote memory) {
@@ -714,8 +835,18 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             if (action.amount > 1) revert InvalidLimit();
             if (!_tokens[action.subject].registered) revert TokenNotRegistered();
         }
-        if (kind == ActionKind.RegisterToken && action.decimals > AmountMath.MAX_DECIMALS) {
-            revert InvalidDecimals();
+        if (kind == ActionKind.RegisterToken) {
+            if (action.decimals > AmountMath.MAX_DECIMALS) revert InvalidDecimals();
+            (bool okDec, bytes memory retDec) =
+                action.subject.staticcall(abi.encodeWithSignature("decimals()"));
+            if (!okDec || retDec.length != 32 || abi.decode(retDec, (uint8)) != action.decimals) {
+                revert InvalidDecimals();
+            }
+            (bool okBal, bytes memory retBal) =
+                action.subject.staticcall(abi.encodeWithSignature("balanceOf(address)", address(this)));
+            if (!okBal || retBal.length != 32) {
+                revert TokenNotRegistered();
+            }
         }
         if (kind == ActionKind.RaiseTokenFlowLimit) {
             TokenConfig memory cfg = _tokens[action.subject];

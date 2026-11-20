@@ -1,7 +1,7 @@
 name: ci
 
-# The only workflow with real triggers. Everything else in this directory is a reusable workflow
-# that this one calls.
+# Build verification entrypoint. The build and security workflows are reusable workflows
+# called here; pr-assignment.yml separately enforces contribution assignments.
 #
 # Why it is arranged this way. `needs:` cannot reach across workflow files, so a repository with
 # five independent workflow files cannot have one job that waits on all of them, and branch
@@ -14,6 +14,7 @@ name: ci
 # Point branch protection at that and nothing else. It passes only when all five passed.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
   push:
     branches: [main]
   # So the queue runs the same checks as the pull request did, against the merged result. Without
@@ -38,7 +39,19 @@ concurrency:
   # know the status of, and a cancelled run leaves no answer at all.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  NPM_CONFIG_IGNORE_SCRIPTS: "true"
+
 jobs:
+  supply-chain:
+    uses: ./.github/workflows/supply-chain.yml
+
+  source-security:
+    uses: ./.github/workflows/source-security.yml
+
+  pr-description:
+    uses: ./.github/workflows/pr-description.yml
+
   # No path filters on any of these, on purpose, and it is worth saying why because the omission
   # looks like laziness.
   #
@@ -81,6 +94,9 @@ jobs:
       - protocol
       - rehearsal
       - security
+      - supply-chain
+      - source-security
+      - pr-description
     # Without always() this job is skipped the moment any dependency fails, and a skipped required
     # check is indistinguishable from a check that has not reported yet. Branch protection would
     # wait forever instead of refusing the merge.
@@ -106,6 +122,9 @@ jobs:
           PROTOCOL: ${{ needs.protocol.result }}
           REHEARSAL: ${{ needs.rehearsal.result }}
           SECURITY: ${{ needs.security.result }}
+          SUPPLY_CHAIN: ${{ needs.supply-chain.result }}
+          SOURCE_SECURITY: ${{ needs.source-security.result }}
+          PR_DESCRIPTION: ${{ needs.pr-description.result }}
         run: |
           set -uo pipefail
 
@@ -122,6 +141,9 @@ jobs:
           check protocol "${PROTOCOL:-missing}"
           check rehearsal "${REHEARSAL:-missing}"
           check security "${SECURITY:-missing}"
+          check supply-chain "${SUPPLY_CHAIN:-missing}"
+          check source-security "${SOURCE_SECURITY:-missing}"
+          check pr-description "${PR_DESCRIPTION:-missing}"
 
           {
             echo "### Gate"
@@ -133,7 +155,7 @@ jobs:
                 echo "- \`$entry\`"
               done
             else
-              echo "All five check groups passed: soroban, evm, protocol, rehearsal, security."
+              echo "All eight check groups passed: soroban, evm, protocol, rehearsal, security, supply-chain, source-security, pr-description."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

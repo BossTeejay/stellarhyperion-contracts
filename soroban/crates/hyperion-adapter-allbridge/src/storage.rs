@@ -1,7 +1,7 @@
 //! Storage keys and the reads and writes that go with them.
 
 use hyperion_core::HyperionError;
-use soroban_sdk::{contracttype, Address, Env, String};
+use soroban_sdk::{contracttype, Address, BytesN, Env, String};
 
 use crate::types::{AssetLink, ChainLane, Config};
 
@@ -19,6 +19,10 @@ pub enum DataKey {
     Chain(u32),
     /// A local asset plus a lane to the token it becomes at the far end.
     Asset(Address, u32),
+    /// The validator public key that signs incoming messages from Allbridge Core.
+    Validator,
+    /// Inbound message digests that have already been delivered to prevent replays.
+    Processed(BytesN<32>),
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -88,11 +92,85 @@ pub fn set_asset(env: &Env, link: &AssetLink) {
 }
 
 /// Push a lane's expiry out without changing it. No-op when there is no such lane.
-pub fn touch_lane(env: &Env, chain: &String) {
+pub fn touch_lane(env: &Env, chain: &String) -> u32 {
     let key = DataKey::Lane(chain.clone());
+    let Some(lane) = env.storage().persistent().get::<_, ChainLane>(&key) else {
+        return 0;
+    };
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    let mut touched = 1u32;
+    let chain_key = DataKey::Chain(lane.allbridge_chain_id);
+    if env.storage().persistent().has(&chain_key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&chain_key, BUMP_THRESHOLD, BUMP_TO);
+        touched += 1;
+    }
+    touched
+}
+
+pub fn touch_chain_id(env: &Env, allbridge_chain_id: u32) -> bool {
+    let key = DataKey::Chain(allbridge_chain_id);
     if env.storage().persistent().has(&key) {
         env.storage()
             .persistent()
             .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
     }
+}
+
+pub fn touch_asset(env: &Env, token: &Address, allbridge_chain_id: u32) -> bool {
+    let key = DataKey::Asset(token.clone(), allbridge_chain_id);
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn touch_processed(env: &Env, message_id: &BytesN<32>) -> bool {
+    let key = DataKey::Processed(message_id.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn validator(env: &Env) -> Option<BytesN<32>> {
+    env.storage().instance().get(&DataKey::Validator)
+}
+
+pub fn set_validator(env: &Env, val: &BytesN<32>) {
+    env.storage().instance().set(&DataKey::Validator, val);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn is_processed(env: &Env, message_id: &BytesN<32>) -> bool {
+    let key = DataKey::Processed(message_id.clone());
+    let found = env.storage().persistent().has(&key);
+    if found {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    }
+    found
+}
+
+pub fn mark_processed(env: &Env, message_id: &BytesN<32>) {
+    let key = DataKey::Processed(message_id.clone());
+    env.storage().persistent().set(&key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
 }
