@@ -15,6 +15,9 @@
 # timelock warp below is explicit and deterministic. The Stellar side (ledger time) is not exercised
 # here and must be validated separately.
 #
+# This local harness is not activation evidence: the active deployment gate remains Stellar
+# Testnet outbound ITS/CCTP. Adapter-owner controls here are distinct from router timelocks.
+#
 # Usage: script/anvil-e2e.sh
 set -euo pipefail
 
