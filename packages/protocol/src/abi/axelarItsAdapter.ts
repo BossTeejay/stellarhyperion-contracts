@@ -171,6 +171,57 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "dispatchWithSender",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "destination",
+        "type": "tuple",
+        "internalType": "struct Destination",
+        "components": [
+          {
+            "name": "chain",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "strkey",
+            "type": "string",
+            "internalType": "string"
+          }
+        ]
+      },
+      {
+        "name": "nonce",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "sender",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
     "name": "EXECUTE_SUCCESS",
     "inputs": [],
     "outputs": [
@@ -274,6 +325,32 @@ export const axelarItsAdapterAbi = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "MAX_DESTINATION_CHAIN_LENGTH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_DESTINATION_STRKEY_LENGTH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -568,23 +645,151 @@ export const axelarItsAdapterAbi = [
     "name": "topUpGas",
     "inputs": [
       {
-        "name": "txHash",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "logIndex",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "refundAddress",
-        "type": "address",
-        "internalType": "address"
+        "name": "metadata",
+        "type": "tuple",
+        "internalType": "struct AxelarItsAdapter.TopUpMetadata",
+        "components": [
+          {
+            "name": "intentId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "sender",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "txHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "logIndex",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "destinationBinding",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "originalAmount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "refundAddress",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "maxNativeSpend",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "outputs": [],
     "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "topUpIntent",
+    "inputs": [
+      {
+        "name": "intentId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct AxelarItsAdapter.TransferIntent",
+        "components": [
+          {
+            "name": "destinationBinding",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "amount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "nonce",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "sender",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "messageTxHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "messageLogIndex",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "refundAddress",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "maxNativeSpend",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "nativeSpent",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "exists",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "messageBound",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -632,6 +837,68 @@ export const axelarItsAdapterAbi = [
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "GasToppedUp",
+    "inputs": [
+      {
+        "name": "intentId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "totalSpent",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "GasTopUpBound",
+    "inputs": [
+      {
+        "name": "intentId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "txHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "logIndex",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "refundAddress",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "maxNativeSpend",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -833,6 +1100,55 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "event",
+    "name": "TransferIntentRecorded",
+    "inputs": [
+      {
+        "name": "intentId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "destinationBinding",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "tokenId",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "nonce",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "sender",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "TransferSubmitted",
     "inputs": [
       {
@@ -896,6 +1212,11 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "InvalidLimit",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "MalformedMessage",
     "inputs": []
   },
@@ -920,6 +1241,11 @@ export const axelarItsAdapterAbi = [
         "internalType": "address"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "ProviderBudgetExceeded",
+    "inputs": []
   },
   {
     "type": "error",
@@ -966,6 +1292,16 @@ export const axelarItsAdapterAbi = [
   {
     "type": "error",
     "name": "TokenNotMapped",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TopUpBindingMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TopUpIntentNotFound",
     "inputs": []
   },
   {

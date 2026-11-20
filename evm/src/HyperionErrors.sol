@@ -87,3 +87,9 @@ error ProviderBudgetExceeded();
 
 /// @notice The adapter lacks a usable local dispatch validation method.
 error AdapterMethodUnavailable();
+
+/// @notice No outbound ITS transfer is registered for this top-up intent.
+error TopUpIntentNotFound();
+
+/// @notice A top-up changed an intent's bound message, destination, or refund recipient.
+error TopUpBindingMismatch();

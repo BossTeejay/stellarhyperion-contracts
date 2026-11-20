@@ -9,6 +9,8 @@ import {
     InvalidAmount,
     InvalidDestination,
     MalformedMessage,
+    InvalidLimit,
+    ProviderBudgetExceeded,
     RailNotConfigured,
     RefundFailed,
     ReplayedMessage,
@@ -16,6 +18,8 @@ import {
     TimelockNotQueued,
     TimelockNotReady,
     TokenNotMapped,
+    TopUpBindingMismatch,
+    TopUpIntentNotFound,
     Unauthorized,
     UnexpectedRailContract,
     UnknownChain,
@@ -84,6 +88,23 @@ contract AxelarItsAdapterTest is Fixture {
     event TransferSubmitted(
         string chain, bytes32 tokenId, uint256 amount, uint64 nonce, uint256 gasValue, bytes note
     );
+    event TransferIntentRecorded(
+        bytes32 indexed intentId,
+        bytes32 indexed destinationBinding,
+        bytes32 tokenId,
+        address token,
+        uint256 amount,
+        uint64 nonce,
+        address sender
+    );
+    event GasTopUpBound(
+        bytes32 indexed intentId,
+        bytes32 indexed txHash,
+        uint256 logIndex,
+        address refundAddress,
+        uint256 maxNativeSpend
+    );
+    event GasToppedUp(bytes32 indexed intentId, uint256 amount, uint256 totalSpent);
     event DeliveryAccepted(
         string sourceChain,
         bytes32 indexed commandId,
@@ -610,6 +631,10 @@ contract AxelarItsAdapterTest is Fixture {
         vm.prank(stranger);
         vm.expectRevert(Unauthorized.selector);
         adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
+
+        vm.prank(stranger);
+        vm.expectRevert(Unauthorized.selector);
+        adapter.dispatchWithSender(address(usdc), AMOUNT, _dest(G_ADDR), NONCE, alice);
     }
 
     function test_dispatch_refuses_a_zero_amount() public {
@@ -1000,22 +1025,147 @@ contract AxelarItsAdapterTest is Fixture {
     // Gas top ups
     // -------------------------------------------------------------------------------------
 
-    /// @dev Permissionless on purpose. A stuck transfer is somebody's money, and the person most
-    /// motivated to unstick it is not always whoever holds the operator keys.
-    function test_anybody_can_pay_to_unstick_a_delivery() public {
+    /// @dev Only the original sender can bind and pay a top-up against the recorded intent.
+    function test_original_sender_can_pay_a_bounded_top_up_for_a_bound_delivery() public {
+        (bytes32 intentId, bytes32 destinationBinding) = _dispatchIntent();
         bytes32 txHash = keccak256("the.transaction.that.ran.short");
-        vm.deal(stranger, 1 ether);
+        vm.deal(alice, 1 ether);
 
+        AxelarItsAdapter.TopUpMetadata memory metadata = _topUpMetadata(
+            intentId, destinationBinding, txHash, 3, alice, 0.5 ether
+        );
+        vm.deal(stranger, 1 ether);
         vm.prank(stranger);
-        adapter.topUpGas{value: 0.25 ether}(txHash, 3, stranger);
+        vm.expectRevert(Unauthorized.selector);
+        adapter.topUpGas{value: 0.01 ether}(metadata);
+        metadata.sender = stranger;
+        vm.prank(alice);
+        vm.expectRevert(Unauthorized.selector);
+        adapter.topUpGas{value: 0.01 ether}(metadata);
+        metadata.sender = alice;
+        vm.expectEmit(true, true, false, true, address(adapter));
+        emit GasTopUpBound(intentId, txHash, 3, alice, 0.5 ether);
+        vm.expectEmit(true, false, false, true, address(adapter));
+        emit GasToppedUp(intentId, 0.25 ether, 0.25 ether);
+        vm.prank(alice);
+        adapter.topUpGas{value: 0.25 ether}(metadata);
 
         MockGasService.TopUp memory top = gasService.lastTopUp();
         assertEq(gasService.topUpCount(), 1);
         assertEq(top.txHash, txHash);
         assertEq(top.logIndex, 3);
-        assertEq(top.refundAddress, stranger);
+        assertEq(top.refundAddress, alice);
         assertEq(top.value, 0.25 ether, "all of it, with nothing held back");
         assertEq(address(adapter).balance, 0);
+        AxelarItsAdapter.TransferIntent memory intent = adapter.topUpIntent(intentId);
+        assertEq(intent.token, address(usdc));
+        assertEq(intent.tokenId, TOKEN_ID);
+        assertEq(intent.amount, AMOUNT);
+        assertEq(intent.sender, alice);
+        assertEq(intent.destinationBinding, destinationBinding);
+        assertEq(intent.nativeSpent, 0.25 ether);
+    }
+
+    function test_top_ups_may_repeat_only_with_the_same_message_and_refund_binding() public {
+        (bytes32 intentId, bytes32 destinationBinding) = _dispatchIntent();
+        bytes32 txHash = keccak256("the.transaction.that.ran.short");
+        vm.deal(alice, 1 ether);
+        AxelarItsAdapter.TopUpMetadata memory metadata = _topUpMetadata(
+            intentId, destinationBinding, txHash, 3, alice, 0.5 ether
+        );
+
+        vm.prank(alice);
+        adapter.topUpGas{value: 0.2 ether}(metadata);
+        vm.prank(alice);
+        adapter.topUpGas{value: 0.3 ether}(metadata);
+        assertEq(gasService.topUpCount(), 2);
+        assertEq(adapter.topUpIntent(intentId).nativeSpent, 0.5 ether);
+
+        metadata.txHash = keccak256("a different delivery");
+        vm.prank(alice);
+        vm.expectRevert(TopUpBindingMismatch.selector);
+        adapter.topUpGas{value: 0.01 ether}(metadata);
+
+        metadata.txHash = txHash;
+        metadata.refundAddress = bob;
+        vm.prank(alice);
+        vm.expectRevert(TopUpBindingMismatch.selector);
+        adapter.topUpGas{value: 0.01 ether}(metadata);
+        assertEq(gasService.topUpCount(), 2);
+    }
+
+    function test_one_source_message_cannot_be_bound_to_another_destination_intent() public {
+        (bytes32 firstIntent, bytes32 firstDestination) = _dispatchIntent();
+        (bytes32 secondIntent, bytes32 secondDestination) = _dispatchIntentAt(NONCE + 1);
+        bytes32 txHash = keccak256("one Axelar source transaction");
+        vm.deal(alice, 1 ether);
+
+        AxelarItsAdapter.TopUpMetadata memory first = _topUpMetadata(
+            firstIntent, firstDestination, txHash, 3, alice, 1 ether
+        );
+        vm.prank(alice);
+        adapter.topUpGas{value: 0.1 ether}(first);
+
+        AxelarItsAdapter.TopUpMetadata memory second = _topUpMetadata(
+            secondIntent, secondDestination, txHash, 3, alice, 1 ether
+        );
+        vm.prank(alice);
+        vm.expectRevert(TopUpBindingMismatch.selector);
+        adapter.topUpGas{value: 0.1 ether}(second);
+        assertEq(gasService.topUpCount(), 1);
+    }
+
+    function test_top_up_rejects_changed_destination_token_or_original_amount() public {
+        (bytes32 intentId, bytes32 destinationBinding) = _dispatchIntent();
+        vm.deal(alice, 1 ether);
+        AxelarItsAdapter.TopUpMetadata memory metadata = _topUpMetadata(
+            intentId, destinationBinding, keccak256("source transaction"), 0, alice, 1 ether
+        );
+
+        metadata.destinationBinding = keccak256("another destination");
+        vm.prank(alice);
+        vm.expectRevert(TopUpBindingMismatch.selector);
+        adapter.topUpGas{value: 0.1 ether}(metadata);
+
+        metadata.destinationBinding = destinationBinding;
+        metadata.token = address(router);
+        vm.prank(alice);
+        vm.expectRevert(TopUpBindingMismatch.selector);
+        adapter.topUpGas{value: 0.1 ether}(metadata);
+
+        metadata.token = address(usdc);
+        metadata.originalAmount = AMOUNT + 1;
+        vm.prank(alice);
+        vm.expectRevert(TopUpBindingMismatch.selector);
+        adapter.topUpGas{value: 0.1 ether}(metadata);
+        assertEq(gasService.topUpCount(), 0);
+    }
+
+    function test_top_up_requires_a_real_intent_and_enforces_a_cumulative_native_cap() public {
+        vm.deal(alice, 1 ether);
+        AxelarItsAdapter.TopUpMetadata memory missing = _topUpMetadata(
+            keccak256("not an outbound transfer"),
+            bytes32(0),
+            keccak256("source transaction"),
+            0,
+            alice,
+            0.25 ether
+        );
+        vm.prank(alice);
+        vm.expectRevert(TopUpIntentNotFound.selector);
+        adapter.topUpGas{value: 0.1 ether}(missing);
+
+        (bytes32 intentId, bytes32 destinationBinding) = _dispatchIntent();
+        AxelarItsAdapter.TopUpMetadata memory metadata = _topUpMetadata(
+            intentId, destinationBinding, keccak256("source transaction"), 0, alice, 0.25 ether
+        );
+        vm.prank(alice);
+        adapter.topUpGas{value: 0.2 ether}(metadata);
+        vm.prank(alice);
+        vm.expectRevert(ProviderBudgetExceeded.selector);
+        adapter.topUpGas{value: 0.06 ether}(metadata);
+        assertEq(gasService.topUpCount(), 1);
+        assertEq(adapter.topUpIntent(intentId).nativeSpent, 0.2 ether);
     }
 
     /// @dev Axelar's relayer pays the refund back in its own transaction, long after the one
@@ -1045,18 +1195,41 @@ contract AxelarItsAdapterTest is Fixture {
     }
 
     function test_a_top_up_of_nothing_is_refused() public {
-        vm.prank(stranger);
+        (bytes32 intentId, bytes32 destinationBinding) = _dispatchIntent();
+        vm.prank(alice);
         vm.expectRevert(InvalidAmount.selector);
-        adapter.topUpGas(keccak256("x"), 0, stranger);
+        adapter.topUpGas(
+            _topUpMetadata(
+                intentId, destinationBinding, keccak256("source transaction"), 0, alice, 1 ether
+            )
+        );
     }
 
     /// @dev Axelar sends the unspent remainder to the refund address, so a zero one is a way of
     /// burning the difference rather than a way of declining it.
     function test_a_top_up_with_nowhere_to_refund_is_refused() public {
-        vm.deal(stranger, 1 ether);
-        vm.prank(stranger);
+        (bytes32 intentId, bytes32 destinationBinding) = _dispatchIntent();
+        vm.deal(alice, 1 ether);
+        AxelarItsAdapter.TopUpMetadata memory metadata = _topUpMetadata(
+            intentId, destinationBinding, keccak256("source transaction"), 0, address(0), 1 ether
+        );
+        vm.prank(alice);
         vm.expectRevert(ZeroAddress.selector);
-        adapter.topUpGas{value: 0.1 ether}(keccak256("x"), 0, address(0));
+        adapter.topUpGas{value: 0.1 ether}(metadata);
+    }
+
+    function test_dispatch_bounds_destination_metadata_for_top_up_intents() public {
+        string memory tooLongChain =
+            string(new bytes(adapter.MAX_DESTINATION_CHAIN_LENGTH() + 1));
+        vm.prank(address(router));
+        vm.expectRevert(InvalidLimit.selector);
+        adapter.dispatch(address(usdc), AMOUNT, Destination(tooLongChain, G_ADDR), NONCE);
+
+        string memory tooLongAddress =
+            string(new bytes(adapter.MAX_DESTINATION_STRKEY_LENGTH() + 1));
+        vm.prank(address(router));
+        vm.expectRevert(InvalidLimit.selector);
+        adapter.dispatch(address(usdc), AMOUNT, Destination(STELLAR, tooLongAddress), NONCE);
     }
 
     // -------------------------------------------------------------------------------------
@@ -1065,6 +1238,55 @@ contract AxelarItsAdapterTest is Fixture {
 
     function _fund(uint256 amount) internal {
         usdc.mint(address(adapter), amount);
+    }
+
+    function _dispatchIntent() internal returns (bytes32 intentId, bytes32 destinationBinding) {
+        return _dispatchIntentAt(NONCE);
+    }
+
+    function _dispatchIntentAt(uint64 nonce)
+        internal
+        returns (bytes32 intentId, bytes32 destinationBinding)
+    {
+        _fund(AMOUNT);
+        AxelarItsAdapter.Peer memory peer = adapter.peerOf(STELLAR);
+        destinationBinding = keccak256(abi.encode(STELLAR, G_ADDR, peer.axelarChain, peer.peer));
+        intentId = keccak256(
+            abi.encode(
+                block.chainid,
+                address(adapter),
+                nonce,
+                destinationBinding,
+                TOKEN_ID,
+                address(usdc),
+                AMOUNT,
+                alice
+            )
+        );
+        vm.prank(address(router));
+        adapter.dispatchWithSender(address(usdc), AMOUNT, _dest(G_ADDR), nonce, alice);
+    }
+
+    function _topUpMetadata(
+        bytes32 intentId,
+        bytes32 destinationBinding,
+        bytes32 txHash,
+        uint256 logIndex,
+        address refundAddress,
+        uint256 maxNativeSpend
+    ) internal view returns (AxelarItsAdapter.TopUpMetadata memory) {
+        return AxelarItsAdapter.TopUpMetadata({
+            intentId: intentId,
+            sender: alice,
+            txHash: txHash,
+            logIndex: logIndex,
+            destinationBinding: destinationBinding,
+            tokenId: TOKEN_ID,
+            token: address(usdc),
+            originalAmount: AMOUNT,
+            refundAddress: refundAddress,
+            maxNativeSpend: maxNativeSpend
+        });
     }
 
     function _deliver(bytes32 commandId, address recipient, uint256 amount) internal returns (bytes32) {
