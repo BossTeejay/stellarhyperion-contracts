@@ -30,6 +30,16 @@
 //! happens inside `message-transmitter-v2`, which is Circle's contract, audited by Circle's
 //! auditors, and Hyperion's security depends on that being true rather than on anything written
 //! here.
+//!
+//! # Approval lifecycle observability and reconciliation
+//!
+//! Circle's `deposit_and_burn` pulls with `transfer_from`, requiring an allowance before the call.
+//! Successful dispatch leaves only the documented allowance state (zero residual allowance).
+//! The contract provides a read-only allowance auditor (`audit_allowance`) producing versioned
+//! diagnostics (`ApprovalDiagnostics`). Unexpected residual approvals produce findings
+//! (`ApprovalFinding::UnexpectedResidual`); unreadable amounts report `Unavailable`. Neither
+//! finding triggers automatic mutation, ensuring observational
+//! integrity. Reverting messenger fixtures preserve source atomicity by unwinding the transaction.
 
 #![no_std]
 
@@ -109,6 +119,27 @@ impl CctpAdapter {
     // Outbound
     // ---------------------------------------------------------------------------------------
 
+    // Shares all local dispatch checks; provider execution/balances still require simulation.
+    pub fn check_dispatch(
+        env: Env,
+        caller: Address,
+        _token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        gas_amount: Option<i128>,
+    ) -> Result<(), HyperionError> {
+        validate_dispatch(
+            &env,
+            &caller,
+            amount,
+            &destination_chain,
+            &destination,
+            gas_amount,
+        )?;
+        Ok(())
+    }
+
     /// Hand funds the router has already transferred here to Circle for burning.
     ///
     /// The router is the only caller. It has already taken its fee, floored the amount to
@@ -124,21 +155,14 @@ impl CctpAdapter {
         nonce: u64,
     ) -> Result<(), HyperionError> {
         caller.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.router {
-            return Err(HyperionError::Unauthorized);
-        }
-        if amount <= 0 {
-            return Err(HyperionError::InvalidAmount);
-        }
-        let domain =
-            storage::domain_of(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
-        // Circle rejects an all zero mint recipient too, with its own error. Catching it here
-        // means the refusal names Hyperion's reason rather than surfacing as a panic from two
-        // contracts away.
-        if destination == BytesN::from_array(&env, &[0u8; 32]) {
-            return Err(HyperionError::InvalidDestination);
-        }
+        let (cfg, domain, _) = validate_dispatch(
+            &env,
+            &caller,
+            amount,
+            &destination_chain,
+            &destination,
+            None,
+        )?;
 
         let max_fee = amount
             .checked_mul(i128::from(cfg.max_fee_bps))
@@ -147,13 +171,7 @@ impl CctpAdapter {
 
         let this = env.current_contract_address();
         let asset = token::Client::new(&env, &token);
-
-        // Circle's `deposit_and_burn` pulls with `transfer_from`, so an allowance has to exist
-        // before the call and should not exist after it. The expiration is this ledger and no
-        // further: the allowance is consumed inside this same transaction, so there is no reason
-        // to leave one lying around that a later ledger could still draw on.
-        let this_ledger = env.ledger().sequence();
-        asset.approve(&this, &cfg.token_messenger, &amount, &this_ledger);
+        let allowance_before = open_approval(&env, &asset, &this, &cfg.token_messenger, amount)?;
 
         TokenMessengerClient::new(&env, &cfg.token_messenger).deposit_for_burn(
             &this,
@@ -166,10 +184,14 @@ impl CctpAdapter {
             &cfg.min_finality_threshold,
         );
 
-        // Circle strips anything below its own smallest representable unit before burning and
-        // leaves the remainder where it found it, so the allowance can come back unspent in part.
-        // Closing it is one storage write and removes the question entirely.
-        asset.approve(&this, &cfg.token_messenger, &0i128, &this_ledger);
+        close_approval(
+            &env,
+            &asset,
+            &token,
+            &this,
+            &cfg.token_messenger,
+            allowance_before,
+        )?;
 
         events::Dispatched {
             token,
@@ -205,22 +227,14 @@ impl CctpAdapter {
     ) -> Result<(), HyperionError> {
         caller.require_auth();
         sender.require_auth();
-        let cfg = storage::config(&env)?;
-        if caller != cfg.router {
-            return Err(HyperionError::Unauthorized);
-        }
-        if amount <= 0 || gas_amount <= 0 || gas_amount >= amount {
-            return Err(HyperionError::InvalidAmount);
-        }
-        let domain =
-            storage::domain_of(&env, &destination_chain).ok_or(HyperionError::UnknownChain)?;
-        if destination == BytesN::from_array(&env, &[0u8; 32]) {
-            return Err(HyperionError::InvalidDestination);
-        }
-        let destination_caller = storage::destination_caller(&env, domain);
-        if destination_caller != BytesN::from_array(&env, &[0u8; 32]) {
-            return Err(HyperionError::InvalidDestination);
-        }
+        let (cfg, domain, destination_caller) = validate_dispatch(
+            &env,
+            &caller,
+            amount,
+            &destination_chain,
+            &destination,
+            Some(gas_amount),
+        )?;
         let this = env.current_contract_address();
         let asset = token::Client::new(&env, &token);
         let sender_before = asset.balance(&sender);
@@ -232,8 +246,7 @@ impl CctpAdapter {
             sender_before,
             amount,
         )?;
-        let ledger = env.ledger().sequence();
-        asset.approve(&this, &cfg.token_messenger, &amount, &ledger);
+        let allowance_before = open_approval(&env, &asset, &this, &cfg.token_messenger, amount)?;
         // Circle's version-zero forwarding hook: 24-byte magic, version 0, payload length 0.
         let mut hook = [0u8; 32];
         hook[..12].copy_from_slice(b"cctp-forward");
@@ -248,7 +261,14 @@ impl CctpAdapter {
             &cfg.min_finality_threshold,
             &Bytes::from_array(&env, &hook),
         );
-        asset.approve(&this, &cfg.token_messenger, &0i128, &ledger);
+        close_approval(
+            &env,
+            &asset,
+            &token,
+            &this,
+            &cfg.token_messenger,
+            allowance_before,
+        )?;
         events::Dispatched {
             token,
             destination_domain: domain,
@@ -643,6 +663,68 @@ impl CctpAdapter {
             .ok_or(HyperionError::DecimalOverflow)?
             / BPS_DENOMINATOR)
     }
+
+    /// Read-only allowance auditor for the adapter and token messenger.
+    ///
+    /// Produces a versioned diagnostics snapshot (`ApprovalDiagnostics`).
+    /// Unexpected residual approvals produce findings without automatic mutation:
+    /// this function is strictly read-only and never modifies allowances or balances.
+    pub fn audit_allowance(
+        env: Env,
+        token: Address,
+    ) -> Result<cctp::ApprovalDiagnostics, HyperionError> {
+        let cfg = storage::config(&env)?;
+        let this = env.current_contract_address();
+        let asset = token::Client::new(&env, &token);
+        Ok(match asset.try_allowance(&this, &cfg.token_messenger) {
+            Ok(Ok(allowance)) => cctp::ApprovalDiagnostics::audit(allowance),
+            _ => cctp::ApprovalDiagnostics::unavailable(),
+        })
+    }
+}
+
+/// Approval is exact and expires in this ledger; inconsistent token accounting aborts the burn.
+fn open_approval(
+    env: &Env,
+    asset: &token::Client,
+    owner: &Address,
+    spender: &Address,
+    amount: i128,
+) -> Result<i128, HyperionError> {
+    let before = asset.allowance(owner, spender);
+    if before < 0 {
+        return Err(HyperionError::InvalidAmount);
+    }
+    asset.approve(owner, spender, &amount, &env.ledger().sequence());
+    if asset.allowance(owner, spender) != amount {
+        return Err(HyperionError::InvalidAmount);
+    }
+    Ok(before)
+}
+
+/// Circle may leave dust unspent. Successful cleanup must observe exactly zero, on both paths.
+fn close_approval(
+    env: &Env,
+    asset: &token::Client,
+    token: &Address,
+    owner: &Address,
+    spender: &Address,
+    allowance_before: i128,
+) -> Result<(), HyperionError> {
+    asset.approve(owner, spender, &0, &env.ledger().sequence());
+    let allowance_after = asset.allowance(owner, spender);
+    if allowance_after != cctp::DOCUMENTED_RESIDUAL_ALLOWANCE {
+        return Err(HyperionError::InvalidAmount);
+    }
+    events::ApprovalAudited {
+        token: token.clone(),
+        spender: spender.clone(),
+        allowance_before,
+        allowance_after,
+        is_clean: true,
+    }
+    .publish(env);
+    Ok(())
 }
 
 /// Read the config and insist the admin signed for whatever is about to happen.
@@ -660,4 +742,41 @@ fn require_admin(env: &Env) -> Result<Config, HyperionError> {
 /// cheapest way to compare it against an `Address` without inventing a second address format.
 fn contract_at(env: &Env, raw: &BytesN<32>) -> Address {
     Address::from_string(&codec::contract_strkey(env, &raw.to_array()))
+}
+
+fn validate_dispatch(
+    env: &Env,
+    caller: &Address,
+    amount: i128,
+    chain: &String,
+    destination: &BytesN<32>,
+    gas_amount: Option<i128>,
+) -> Result<(Config, u32, BytesN<32>), HyperionError> {
+    let cfg = storage::config(env)?;
+    if caller != &cfg.router {
+        return Err(HyperionError::Unauthorized);
+    }
+    if amount <= 0 || gas_amount.is_some_and(|gas| gas <= 0 || gas >= amount) {
+        return Err(HyperionError::InvalidAmount);
+    }
+    let domain = storage::domain_of(env, chain).ok_or(HyperionError::UnknownChain)?;
+    let zero = BytesN::from_array(env, &[0u8; 32]);
+    if destination == &zero {
+        return Err(HyperionError::InvalidDestination);
+    }
+    let destination_caller = storage::destination_caller(env, domain);
+    if gas_amount.is_some() && destination_caller != zero {
+        return Err(HyperionError::InvalidDestination);
+    }
+    let max_fee = match gas_amount {
+        Some(gas) => gas,
+        None => {
+            amount
+                .checked_mul(i128::from(cfg.max_fee_bps))
+                .ok_or(HyperionError::DecimalOverflow)?
+                / BPS_DENOMINATOR
+        }
+    };
+    cctp::validate_burn_boundary(amount, destination, max_fee, cfg.min_finality_threshold)?;
+    Ok((cfg, domain, destination_caller))
 }
