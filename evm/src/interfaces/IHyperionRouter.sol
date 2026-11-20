@@ -6,6 +6,7 @@ import {
     ActionKind,
     AdminAction,
     CancelReason,
+    ClaimSettlementResult,
     Destination,
     Origin,
     OutboundRequest,
@@ -106,6 +107,15 @@ interface IHyperionRouter {
     event ClaimSettled(
         uint64 indexed id, address indexed recipient, address token, uint256 amount, address settledBy
     );
+
+    /// @notice Version 1 diagnostic for a claim payout that remains outstanding.
+    /// @dev The claim amount and fixed recipient remain in `pendingClaim`; this event adds only
+    /// the bounded reason so existing claim/indexing records remain valid.
+    /// @param id The parked claim ID.
+    /// @param reason Version 1 refusal, shortage, unreadable-token or inexact-payout code.
+    /// @param outstandingAmount The full amount still owed to the recorded recipient.
+    /// @param recipient The recorded payout recipient.
+    event ClaimPayoutFailureV1(uint64 indexed id, uint8 reason, uint256 outstandingAmount, address recipient);
 
     /// @notice A privileged change was proposed, and the clock started.
     /// @param id The action's id.
@@ -228,6 +238,33 @@ interface IHyperionRouter {
     /// @dev Permissionless. The funds go to the claim's recipient no matter who calls.
     /// @param claimId The claim to clear.
     function settleClaim(uint64 claimId) external;
+
+    /// @notice Attempt a bounded set of claims independently, returning one outcome per input.
+    /// @param claimIds At most 50 stored claim IDs, including duplicates if desired.
+    /// @return results Confirmed outcome for each input ID, in input order.
+    function settleClaims(uint64[] calldata claimIds)
+        external
+        returns (ClaimSettlementResult[] memory results);
+
+    /// @notice Dispatch with a native provider cap while preserving legacy request fields.
+    /// @param request The legacy outbound request.
+    /// @param maxProviderBudget Maximum msg.value passed to the provider, in native-currency wei.
+    /// @return nonce The outbound nonce.
+    function bridgeOutBounded(OutboundRequest calldata request, uint256 maxProviderBudget)
+        external
+        payable
+        returns (uint64 nonce);
+
+    /// @notice Return zero for passing local bounded checks, otherwise the earliest error selector.
+    /// @param request The legacy outbound request.
+    /// @param providerPayment Prospective native payment in wei.
+    /// @param maxProviderBudget Maximum native payment in wei.
+    /// @return blocker Zero or the earliest error selector; provider execution still needs simulation.
+    function explainOutbound(
+        OutboundRequest calldata request,
+        uint256 providerPayment,
+        uint256 maxProviderBudget
+    ) external view returns (bytes4 blocker);
 
     /// @notice What a transfer would cost and whether it would go through, without sending it.
     /// @dev Never reverts for a blocked route. It returns a reason instead, because the app has
