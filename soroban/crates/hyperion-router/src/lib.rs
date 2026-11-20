@@ -271,7 +271,40 @@ impl HyperionRouter {
     ) -> Result<Vec<ClaimSettlementResult>, HyperionError> {
         settler.require_auth();
         storage::assert_liability_migration_not_running(&env)?;
-        settle_claims_inner(&env, &settler, &ids)
+        if ids.is_empty() || ids.len() > MAX_CLAIMS_PER_BATCH {
+            return Err(HyperionError::InvalidAmount);
+        }
+        let this = env.current_contract_address();
+        let mut results = vec![&env];
+        for id in ids.iter() {
+            let status = if storage::is_claim_archived(&env, id) {
+                2
+            } else if let Some(mut claim) = storage::claim(&env, id) {
+                if claim.settled {
+                    2
+                } else {
+                    let client = token::Client::new(&env, &claim.token);
+                    let reason = attempt_payout(&client, &this, &claim.recipient, claim.amount)?;
+                    if reason == 0 {
+                        mark_claim_settled(&env, &mut claim)?;
+                        record_claim_settlement(&env, &claim, &settler);
+                        0
+                    } else {
+                        storage::set_claim_failure(&env, id, reason);
+                        events::claim_payout_failure_v1(&env, &claim, reason);
+                        match reason {
+                            1 => 3,
+                            2 => 4,
+                            _ => 5,
+                        }
+                    }
+                }
+            } else {
+                1
+            };
+            results.push_back(ClaimSettlementResult { id, status });
+        }
+        Ok(results)
     }
 
     pub fn claim_failure_reason(env: Env, id: u64) -> Result<u32, HyperionError> {
@@ -363,22 +396,9 @@ impl HyperionRouter {
                 })
             })
             .unwrap_or(DebitBreakdown::Unavailable);
+        let quotes = Self::quote_routes(env.clone(), token, amount, destination_decimals);
         let mut out = vec![&env];
-        let ledger = env.ledger().sequence();
-        for route in ALL_ROUTES {
-            let quote = match &cfg {
-                Ok(cfg) => quote_one(
-                    &env,
-                    cfg,
-                    &token,
-                    token_cfg.as_ref(),
-                    route,
-                    amount,
-                    destination_decimals,
-                    ledger,
-                ),
-                Err(error) => unavailable(route, amount, *error),
-            };
+        for quote in quotes.iter() {
             out.push_back(RouteQuoteV2 {
                 quote,
                 breakdown: breakdown.clone(),
@@ -393,20 +413,12 @@ impl HyperionRouter {
 
     // Stop new departures. Either key can do it, immediately, with no delay to sit through.
     pub fn pause(env: Env, caller: Address) -> Result<(), HyperionError> {
-        let mut cfg = require_authority(&env, &caller, true)?;
-        cfg.paused = true;
-        storage::set_config(&env, &cfg);
-        events::paused(&env, &caller, true);
-        Ok(())
+        set_pause_state(&env, &caller, true)
     }
 
     // Start again. Admin only, because deciding an incident is over is not a safety action.
     pub fn unpause(env: Env, caller: Address) -> Result<(), HyperionError> {
-        let mut cfg = require_authority(&env, &caller, false)?;
-        cfg.paused = false;
-        storage::set_config(&env, &cfg);
-        events::paused(&env, &caller, false);
-        Ok(())
+        set_pause_state(&env, &caller, false)
     }
 
     // Turn a rail off. No timelock: closing a lane only ever narrows what the bridge will do.
@@ -567,7 +579,72 @@ impl HyperionRouter {
         max_steps: u32,
     ) -> Result<MigrationStatus, HyperionError> {
         require_authority(&env, &caller, false)?;
-        migrate_storage_inner(&env, &caller, target_version, max_steps)
+        if max_steps == 0 || max_steps > MAX_MAINTENANCE_BATCH {
+            return Err(HyperionError::InvalidLimit);
+        }
+        let state = storage::migration_state(&env);
+        // An already authorized v2 snapshot may be completed after upgrading to v3.
+        // Its earlier claim cursor did not count liabilities; v3 must scan all claims anew.
+        if target_version != CURRENT_SCHEMA_VERSION
+            && !(target_version == 2
+                && state
+                    .as_ref()
+                    .map(|s| s.target_version == 2)
+                    .unwrap_or(false))
+        {
+            return Err(HyperionError::InvalidLimit);
+        }
+        let current = storage::schema_version(&env);
+        if current == target_version {
+            return Ok(Self::get_migration_status(env));
+        }
+        let mut status = state.ok_or(HyperionError::TimelockNotQueued)?;
+        if status.target_version != target_version {
+            return Err(HyperionError::InvalidLimit);
+        }
+        let mut remaining = max_steps;
+        while remaining > 0 && status.migrated_transfers < status.total_transfers {
+            let nonce = status.migrated_transfers + 1;
+            let record = storage::transfer(&env, nonce).ok_or(HyperionError::UnknownNonce)?;
+            // Typed read/write canonicalizes the legacy payload; fixed cursors record its version.
+            // A missing/archived record aborts this transaction: restoration must precede migration.
+            storage::set_transfer(&env, &record);
+            status.migrated_transfers = nonce;
+            remaining -= 1;
+        }
+        while remaining > 0 && status.migrated_claims < status.total_claims {
+            let id = status.migrated_claims + 1;
+            if storage::is_claim_archived(&env, id) {
+                status.migrated_claims = id;
+                remaining -= 1;
+                continue;
+            }
+            let record = storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)?;
+            if target_version == CURRENT_SCHEMA_VERSION
+                && !storage::liability_tracking(&env)
+                && !record.settled
+            {
+                if record.amount <= 0 {
+                    return Err(HyperionError::InvalidAmount);
+                }
+                storage::increase_claim_liability(&env, &record.token, record.amount)?;
+            }
+            storage::set_claim(&env, &record);
+            status.migrated_claims = id;
+            remaining -= 1;
+        }
+        status.migration_pending = status.migrated_transfers < status.total_transfers
+            || status.migrated_claims < status.total_claims;
+        if !status.migration_pending {
+            if target_version == CURRENT_SCHEMA_VERSION {
+                storage::set_liability_tracking(&env);
+            }
+            storage::set_schema_version(&env, target_version);
+            status.current_version = target_version;
+        }
+        storage::set_migration_state(&env, &status);
+        events::storage_migrated(&env, &caller, &status);
+        Ok(status)
     }
 
     // Extend the long retention policy for at most 32 exact, route-scoped replay keys.
@@ -626,7 +703,30 @@ impl HyperionRouter {
             return Err(HyperionError::InvalidLimit);
         }
         storage::assert_liability_migration_not_running(&env)?;
-        archive_settled_claims_inner(&env, after, limit)
+        let end = after
+            .saturating_add(limit as u64)
+            .min(storage::claim_count(&env));
+        let now = env.ledger().timestamp();
+        for id in after.saturating_add(1)..=end {
+            if storage::is_claim_archived(&env, id) {
+                continue;
+            }
+            let Some(claim) = storage::claim(&env, id) else {
+                continue;
+            };
+            if !claim.settled {
+                continue;
+            }
+            let Some(at) = storage::claim_settled_at(&env, id) else {
+                continue;
+            };
+            if now.saturating_sub(at) < storage::MIN_CLAIM_RETENTION_SECONDS {
+                continue;
+            }
+            events::claim_archived(&env, &claim, at, now);
+            storage::archive_claim(&env, id);
+        }
+        Ok(end.max(after))
     }
 
     // Full source provenance for claims created after this view was introduced.
@@ -666,7 +766,23 @@ impl HyperionRouter {
         env: Env,
         id: u64,
     ) -> Result<RecipientEligibility, HyperionError> {
-        preview_claim_recipient_inner(&env, id)
+        let claim = storage::claim(&env, id).ok_or(HyperionError::ClaimNotFound)?;
+        let client = token::Client::new(&env, &claim.token);
+        match client.try_balance(&claim.recipient) {
+            Ok(Ok(_))
+                if client.address.executable() == Some(soroban_sdk::Executable::StellarAsset) =>
+            {
+                if token::StellarAssetClient::new(&env, &claim.token).authorized(&claim.recipient) {
+                    Ok(RecipientEligibility::Eligible)
+                } else {
+                    Ok(RecipientEligibility::Unauthorized)
+                }
+            }
+            Err(Ok(error)) if is_missing_trustline(&client, error) => {
+                Ok(RecipientEligibility::MissingTrustline)
+            }
+            _ => Ok(RecipientEligibility::Unknown),
+        }
     }
 
     pub fn get_queued(env: Env, id: u64) -> Result<QueuedAction, HyperionError> {
@@ -769,6 +885,14 @@ fn require_authority(
         return Err(HyperionError::Unauthorized);
     }
     Ok(cfg)
+}
+
+fn set_pause_state(env: &Env, caller: &Address, state: bool) -> Result<(), HyperionError> {
+    let mut cfg = require_authority(env, caller, state)?;
+    cfg.paused = state;
+    storage::set_config(env, &cfg);
+    events::paused(env, caller, state);
+    Ok(())
 }
 
 // A quote for a route that cannot be used, carrying the reason it cannot.
@@ -880,7 +1004,6 @@ struct OutboundPlan {
     adapter_addr: Address,
 }
 
-#[inline(never)]
 fn plan_outbound(
     env: &Env,
     request: &OutboundRequest,
@@ -975,7 +1098,6 @@ fn plan_outbound(
     })
 }
 
-#[inline(never)]
 fn bounded_plan(
     env: &Env,
     request: &OutboundRequest,
@@ -1024,7 +1146,6 @@ fn bounded_plan(
     }
 }
 
-#[inline(never)]
 fn bridge_out_inner(
     env: Env,
     sender: Address,
@@ -1118,7 +1239,6 @@ fn bridge_out_inner(
     Ok(nonce)
 }
 
-#[inline(never)]
 fn settle_claim_inner(env: &Env, settler: &Address, id: u64) -> Result<(), HyperionError> {
     if storage::is_claim_archived(env, id) {
         return Err(HyperionError::ClaimAlreadySettled);
@@ -1143,185 +1263,6 @@ fn settle_claim_inner(env: &Env, settler: &Address, id: u64) -> Result<(), Hyper
     Ok(())
 }
 
-#[inline(never)]
-fn settle_claims_inner(
-    env: &Env,
-    settler: &Address,
-    ids: &Vec<u64>,
-) -> Result<Vec<ClaimSettlementResult>, HyperionError> {
-    if ids.is_empty() || ids.len() > MAX_CLAIMS_PER_BATCH {
-        return Err(HyperionError::InvalidAmount);
-    }
-    let this = env.current_contract_address();
-    let mut results = vec![env];
-    for id in ids.iter() {
-        if storage::is_claim_archived(env, id) {
-            results.push_back(ClaimSettlementResult { id, status: 2 });
-            continue;
-        }
-        let Some(claim) = storage::claim(env, id) else {
-            results.push_back(ClaimSettlementResult { id, status: 1 });
-            continue;
-        };
-        if claim.settled {
-            results.push_back(ClaimSettlementResult { id, status: 2 });
-            continue;
-        }
-        let client = token::Client::new(env, &claim.token);
-        let reason = attempt_payout(&client, &this, &claim.recipient, claim.amount)?;
-        if reason == 0 {
-            let mut claim = claim;
-            mark_claim_settled(env, &mut claim)?;
-            record_claim_settlement(env, &claim, settler);
-            results.push_back(ClaimSettlementResult { id, status: 0 });
-            continue;
-        }
-        storage::set_claim_failure(env, id, reason);
-        events::claim_payout_failure_v1(env, &claim, reason);
-        results.push_back(ClaimSettlementResult {
-            id,
-            status: match reason {
-                1 => 3,
-                2 => 4,
-                _ => 5,
-            },
-        });
-    }
-    Ok(results)
-}
-
-#[inline(never)]
-fn migrate_storage_inner(
-    env: &Env,
-    caller: &Address,
-    target_version: u32,
-    max_steps: u32,
-) -> Result<MigrationStatus, HyperionError> {
-    if max_steps == 0 || max_steps > MAX_MAINTENANCE_BATCH {
-        return Err(HyperionError::InvalidLimit);
-    }
-    let state = storage::migration_state(env);
-    // An already authorized v2 snapshot may be completed after upgrading to v3.
-    // Its earlier claim cursor did not count liabilities; v3 must scan all claims anew.
-    if target_version != CURRENT_SCHEMA_VERSION
-        && !(target_version == 2
-            && state
-                .as_ref()
-                .map(|s| s.target_version == 2)
-                .unwrap_or(false))
-    {
-        return Err(HyperionError::InvalidLimit);
-    }
-    let current = storage::schema_version(env);
-    if current == target_version {
-        return Ok(HyperionRouter::get_migration_status(env.clone()));
-    }
-    let mut status = state.ok_or(HyperionError::TimelockNotQueued)?;
-    if status.target_version != target_version {
-        return Err(HyperionError::InvalidLimit);
-    }
-    let mut remaining = max_steps;
-    while remaining > 0 && status.migrated_transfers < status.total_transfers {
-        let nonce = status.migrated_transfers + 1;
-        let record = storage::transfer(env, nonce).ok_or(HyperionError::UnknownNonce)?;
-        // Typed read/write canonicalizes the legacy payload; fixed cursors record its version.
-        // A missing/archived record aborts this transaction: restoration must precede migration.
-        storage::set_transfer(env, &record);
-        status.migrated_transfers = nonce;
-        remaining -= 1;
-    }
-    while remaining > 0 && status.migrated_claims < status.total_claims {
-        let id = status.migrated_claims + 1;
-        if storage::is_claim_archived(env, id) {
-            status.migrated_claims = id;
-            remaining -= 1;
-            continue;
-        }
-        let record = storage::claim(env, id).ok_or(HyperionError::ClaimNotFound)?;
-        if target_version == CURRENT_SCHEMA_VERSION
-            && !storage::liability_tracking(env)
-            && !record.settled
-        {
-            if record.amount <= 0 {
-                return Err(HyperionError::InvalidAmount);
-            }
-            storage::increase_claim_liability(env, &record.token, record.amount)?;
-        }
-        storage::set_claim(env, &record);
-        status.migrated_claims = id;
-        remaining -= 1;
-    }
-    status.migration_pending = status.migrated_transfers < status.total_transfers
-        || status.migrated_claims < status.total_claims;
-    if !status.migration_pending {
-        if target_version == CURRENT_SCHEMA_VERSION {
-            storage::set_liability_tracking(env);
-        }
-        storage::set_schema_version(env, target_version);
-        status.current_version = target_version;
-    }
-    storage::set_migration_state(env, &status);
-    events::storage_migrated(env, caller, &status);
-    Ok(status)
-}
-
-#[inline(never)]
-fn archive_settled_claims_inner(env: &Env, after: u64, limit: u32) -> Result<u64, HyperionError> {
-    let end = after
-        .saturating_add(limit as u64)
-        .min(storage::claim_count(env));
-    let now = env.ledger().timestamp();
-    for id in after.saturating_add(1)..=end {
-        if storage::is_claim_archived(env, id) {
-            continue;
-        }
-        let Some(claim) = storage::claim(env, id) else {
-            continue;
-        };
-        if !claim.settled {
-            continue;
-        }
-        let Some(at) = storage::claim_settled_at(env, id) else {
-            continue;
-        };
-        if now.saturating_sub(at) < storage::MIN_CLAIM_RETENTION_SECONDS {
-            continue;
-        }
-        events::claim_archived(env, &claim, at, now);
-        storage::archive_claim(env, id);
-    }
-    Ok(end.max(after))
-}
-
-#[inline(never)]
-fn preview_claim_recipient_inner(
-    env: &Env,
-    id: u64,
-) -> Result<RecipientEligibility, HyperionError> {
-    let claim = storage::claim(env, id).ok_or(HyperionError::ClaimNotFound)?;
-    let client = token::Client::new(env, &claim.token);
-    match client.try_balance(&claim.recipient) {
-        Ok(Ok(_)) if client.address.executable() == Some(soroban_sdk::Executable::StellarAsset) => {
-            if token::StellarAssetClient::new(env, &claim.token).authorized(&claim.recipient) {
-                Ok(RecipientEligibility::Eligible)
-            } else {
-                Ok(RecipientEligibility::Unauthorized)
-            }
-        }
-        Err(Ok(error)) if is_missing_trustline(&client, error) => {
-            Ok(RecipientEligibility::MissingTrustline)
-        }
-        _ => Ok(RecipientEligibility::Unknown),
-    }
-}
-
-#[inline(never)]
-fn is_missing_trustline(client: &token::Client, error: soroban_sdk::Error) -> bool {
-    error == soroban_sdk::Error::from_contract_error(13)
-        && client.address.executable() == Some(soroban_sdk::Executable::StellarAsset)
-}
-
-#[inline(never)]
 fn mark_claim_settled(env: &Env, claim: &mut PendingClaim) -> Result<(), HyperionError> {
     claim.settled = true;
     storage::set_claim(env, claim);
@@ -1331,7 +1272,6 @@ fn mark_claim_settled(env: &Env, claim: &mut PendingClaim) -> Result<(), Hyperio
     Ok(())
 }
 
-#[inline(never)]
 fn record_claim_settlement(env: &Env, claim: &PendingClaim, settler: &Address) {
     storage::set_claim_settled_at(env, claim.id, env.ledger().timestamp());
     storage::set_claim_failure(env, claim.id, 0);
@@ -1339,7 +1279,6 @@ fn record_claim_settlement(env: &Env, claim: &PendingClaim, settler: &Address) {
 }
 
 // Recipient refusals are safe to park only when no token balance moved.
-#[inline(never)]
 fn transfer_exact(
     client: &token::Client,
     from: &Address,
@@ -1361,7 +1300,6 @@ fn transfer_exact(
 
 // Batch preflight and ordinary transfers share the same exact post-transfer checks.
 // A successful inexact transfer or unreadable post-transfer balance reverts the invocation.
-#[inline(never)]
 fn transfer_from_snapshot(
     client: &token::Client,
     from: &Address,
@@ -1389,7 +1327,6 @@ fn transfer_from_snapshot(
 }
 
 // V1 codes: 0 delivered, 1 refused unchanged payout, 2 custody short, 3 unreadable.
-#[inline(never)]
 fn attempt_payout(
     client: &token::Client,
     from: &Address,
@@ -1409,7 +1346,6 @@ fn attempt_payout(
 }
 
 // V1 codes: 1 refused unchanged payout, 2 custody short, 3 token/accounting unavailable.
-#[inline(never)]
 fn payout_failure_reason(client: &token::Client, router: &Address, amount: i128) -> u32 {
     match client.try_balance(router) {
         Ok(Ok(balance)) if balance >= amount => 1,
@@ -1418,9 +1354,13 @@ fn payout_failure_reason(client: &token::Client, router: &Address, amount: i128)
     }
 }
 
+fn is_missing_trustline(client: &token::Client, error: soroban_sdk::Error) -> bool {
+    error == soroban_sdk::Error::from_contract_error(13)
+        && client.address.executable() == Some(soroban_sdk::Executable::StellarAsset)
+}
+
 // A built-in SAC reports contract error 13 for an absent account trustline.
 // Its balance is zero; arbitrary token balance errors are not trusted as zero.
-#[inline(never)]
 fn payout_balance(client: &token::Client, to: &Address) -> Result<i128, HyperionError> {
     match client.try_balance(to) {
         Ok(Ok(balance)) if balance >= 0 => Ok(balance),

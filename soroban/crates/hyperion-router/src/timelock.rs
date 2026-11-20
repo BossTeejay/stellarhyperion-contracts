@@ -110,7 +110,6 @@ pub fn cancel(
 /// Catching this at queue time rather than at execute time matters: a bad parameter that only
 /// fails after the delay has elapsed costs another full delay to fix, and during an incident
 /// that is the difference between a bad afternoon and a bad week.
-#[inline(never)]
 fn validate(action: &AdminAction) -> Result<(), HyperionError> {
     match action {
         AdminAction::SetFeeBps(bps) => {
@@ -158,7 +157,6 @@ fn validate(action: &AdminAction) -> Result<(), HyperionError> {
 ///
 /// Ensures the token contract exists, correctly implements SEP-41 decimals matching
 /// `decimals`, does not exceed `MAX_DECIMALS`, and responds to standard balance checks.
-#[inline(never)]
 pub fn validate_token_behavior(
     env: &Env,
     token: &Address,
@@ -182,7 +180,6 @@ pub fn validate_token_behavior(
     Ok(())
 }
 
-#[inline(never)]
 pub fn apply(env: &Env, action: &AdminAction) -> Result<(), HyperionError> {
     let mut cfg = storage::config(env)?;
     match action {

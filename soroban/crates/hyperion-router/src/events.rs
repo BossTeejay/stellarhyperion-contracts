@@ -176,7 +176,6 @@ pub struct FlowLimitLowered {
     pub limit: i128,
 }
 
-#[inline(never)]
 pub fn bridge_out(env: &Env, record: &TransferRecord) {
     BridgeOut {
         route: record.route,
@@ -186,7 +185,6 @@ pub fn bridge_out(env: &Env, record: &TransferRecord) {
     .publish(env);
 }
 
-#[inline(never)]
 pub fn bridge_in(env: &Env, record: &InboundRecord) {
     BridgeIn {
         route: record.route,
@@ -196,7 +194,6 @@ pub fn bridge_in(env: &Env, record: &InboundRecord) {
     .publish(env);
 }
 
-#[inline(never)]
 pub fn claim_parked(env: &Env, claim: &PendingClaim) {
     ClaimParked {
         recipient: claim.recipient.clone(),
@@ -206,7 +203,6 @@ pub fn claim_parked(env: &Env, claim: &PendingClaim) {
     .publish(env);
 }
 
-#[inline(never)]
 pub fn claim_settled(env: &Env, claim: &PendingClaim, settled_by: &Address) {
     ClaimSettled {
         recipient: claim.recipient.clone(),
@@ -218,7 +214,6 @@ pub fn claim_settled(env: &Env, claim: &PendingClaim, settled_by: &Address) {
     .publish(env);
 }
 
-#[inline(never)]
 pub fn claim_payout_failure_v1(env: &Env, claim: &PendingClaim, reason: u32) {
     ClaimPayoutFailureV1 {
         claim_id: claim.id,
@@ -229,7 +224,6 @@ pub fn claim_payout_failure_v1(env: &Env, claim: &PendingClaim, reason: u32) {
     .publish(env);
 }
 
-#[inline(never)]
 pub fn claim_archived(env: &Env, claim: &PendingClaim, settled_at: u64, archived_at: u64) {
     ClaimArchived {
         recipient: claim.recipient.clone(),
@@ -276,7 +270,6 @@ pub fn action_cancelled(env: &Env, id: u64, by: &Address) {
     ActionCancelled { by: by.clone(), id }.publish(env);
 }
 
-#[inline(never)]
 pub fn action_audit(
     env: &Env,
     id: u64,
