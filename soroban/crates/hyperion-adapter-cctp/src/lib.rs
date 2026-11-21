@@ -681,6 +681,70 @@ impl CctpAdapter {
             _ => cctp::ApprovalDiagnostics::unavailable(),
         })
     }
+
+    /// Read-only provider lane readiness. Unknown reads are never inferred as usable.
+    pub fn lane_readiness(env: Env) -> cctp::LaneReadiness {
+        let cfg = match storage::config(&env) {
+            Ok(cfg) => cfg,
+            Err(_) => {
+                return cctp::LaneReadiness {
+                    version: cctp::LANE_READINESS_VERSION,
+                    router_paused: true,
+                    messenger: cctp::ProviderReadStatus::Unknown,
+                    transmitter: cctp::ProviderReadStatus::Unknown,
+                    messenger_contract: env.current_contract_address(),
+                    transmitter_contract: env.current_contract_address(),
+                    lane_available: false,
+                }
+            }
+        };
+        let messenger = match TokenMessengerClient::new(&env, &cfg.token_messenger).try_paused() {
+            Ok(Ok(true)) => cctp::ProviderReadStatus::Paused,
+            Ok(Ok(false)) => cctp::ProviderReadStatus::Usable,
+            _ => cctp::ProviderReadStatus::Unknown,
+        };
+        let transmitter =
+            match MessageTransmitterClient::new(&env, &cfg.message_transmitter).try_paused() {
+                Ok(Ok(true)) => cctp::ProviderReadStatus::Paused,
+                Ok(Ok(false)) => cctp::ProviderReadStatus::Usable,
+                _ => cctp::ProviderReadStatus::Unknown,
+            };
+        let router_paused = match RouterClient::new(&env, &cfg.router).try_is_paused() {
+            Ok(Ok(paused)) => paused,
+            _ => true,
+        };
+        let lane_available = !router_paused
+            && messenger == cctp::ProviderReadStatus::Usable
+            && transmitter == cctp::ProviderReadStatus::Usable;
+        cctp::LaneReadiness {
+            version: cctp::LANE_READINESS_VERSION,
+            router_paused,
+            messenger,
+            transmitter,
+            messenger_contract: cfg.token_messenger,
+            transmitter_contract: cfg.message_transmitter,
+            lane_available,
+        }
+    }
+
+    /// Classify attestation evidence without minting or mutating replay state.
+    pub fn prepare_renewal(
+        env: Env,
+        source_message_id: BytesN<32>,
+        payout_intent: BytesN<32>,
+        expires_at: i128,
+        has_verified_attestation: bool,
+        recovery_supported: bool,
+    ) -> cctp::RenewalPlan {
+        cctp::RenewalPlan::classify(
+            source_message_id,
+            payout_intent,
+            expires_at,
+            env.ledger().timestamp() as i128,
+            has_verified_attestation,
+            recovery_supported,
+        )
+    }
 }
 
 /// Approval is exact and expires in this ledger; inconsistent token accounting aborts the burn.

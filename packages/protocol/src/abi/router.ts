@@ -748,6 +748,19 @@ export const hyperionRouterAbi = [
   },
   {
     "type": "function",
+    "name": "MAX_SUPPORTED_INBOUND_AMOUNT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_TIMELOCK_DELAY",
     "inputs": [],
     "outputs": [
