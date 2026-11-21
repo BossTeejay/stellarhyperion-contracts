@@ -377,6 +377,59 @@ Both programs route contributors to repos that already do something real — nei
 - Official Stellar dev-agent skills — `github.com/stellar/stellar-dev-skill`
 - For grant-application support specifically, Stellar Nigeria's Builder's Circle community runs sessions on exactly this
 
+## Appendix C: Allbridge admission addendum (implementation note)
+
+This appendix records what the adapter actually enforces for Allbridge. It does not change the
+design above: the active deployment remains Stellar Testnet outbound ITS/CCTP, Allbridge stays a
+development-only rail, and EVM and other rails remain explicitly gated.
+
+### Authority model
+
+A lane is usable only when Allbridge's own views agree about it. Before a mapping is written and
+again before every dispatch or inbound delivery, the adapter reads:
+
+- `BridgeConfig.pools` and `get_pool_address(token)` for the local token key. Both must name the
+  same pool.
+- The pool's `get_bridge()` and `get_pool().token`; both must name this bridge and this token.
+- The token's own `decimals()`, the pool's recorded `decimals`, and the factors Allbridge derived
+  when it added the pool:
+  `from_gas_oracle_factor = 10^(18 - decimals)` and
+  `bridging_fee_conversion_factor = 10^(18 + 7 - decimals)`.
+  `ORACLE_PRECISION = 18` and `CHAIN_PRECISION = 7` are upstream constants (`common/shared`).
+- The far bridge's `get_another_bridge(chain).tokens[receive_token]`, after the receive word is
+  checked as a left-zero-padded EVM address.
+
+A disagreement is refused with an existing `HyperionError`; no new error numbers were introduced.
+
+### Compatibility and preserved behaviour
+
+- Integer amounts are still carried as `i128` at the router boundary and converted exactly once to
+  `u128` after the positive check. No rounding or rescale was added.
+- Dispatch is still callable only by the router. Admission runs before any sub-invocation is
+  authorised, so a wrong pool or precision cannot move user funds.
+- Inbound processing still verifies the validator signature and marks the message processed only
+  once; pool validation was inserted before the top-up and before the replay marker.
+- Claims remain bound to the signed recipient and nonce.
+- Muxed recipients remain refused: `assert_route_supports(Allbridge, MuxedAccount)` returns
+  `MuxedNotSupported` before a claim is opened. The 32-byte Allbridge recipient word has no room
+  for a muxed id.
+- No wire format, event, or storage key changed. The new `revalidate_asset` view is additive and
+  read-only.
+
+### Migration and operations
+
+- Existing correct lane and asset mappings keep working unchanged. Re-running `link_chain` or
+  `link_asset` with identical values is an idempotent no-op.
+- Re-running with different values now returns `AlreadyConfigured`; revalidation never silently
+  overwrites a live mapping. Repointing a lane or asset is a deliberate migration, not a side
+  effect of a health check.
+- If Allbridge repoints a token at another pool, changes a pool's asset or precision, or removes a
+  far-side receive token, outbound and inbound calls fail closed. A new mapping must be deployed
+  and reviewed rather than written through `revalidate_asset` or an opportunistic relink.
+- `revalidate_asset(token, chain)` lets an operator verify a mapping without changing it. It
+  returns the admitted pool, decimals, Allbridge chain id, and receive word, or the same error a
+  dispatch would return.
+
 ---
 
 *This is a v0.1 planning document, not a security review. Treat every contract address, chain ID, and audit status above as something to re-verify against the linked sources at implementation time — this is a fast-moving part of the ecosystem, and Arc in particular is days old as of this writing.*
