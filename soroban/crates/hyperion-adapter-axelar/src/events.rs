@@ -141,6 +141,14 @@ pub struct ChainStatusChanged {
 
 #[contractevent(topics = ["hyperion", "axl_cfg"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoteVersionRequired {
+    #[topic]
+    pub chain: String,
+    pub version: u32,
+}
+
+#[contractevent(topics = ["hyperion", "axl_cfg"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkRemoved {
     #[topic]
     pub chain: String,
