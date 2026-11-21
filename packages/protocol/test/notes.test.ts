@@ -12,12 +12,24 @@ import {
   encodeCctpHook,
   encodeInboundNote,
   encodeOutboundNote,
+  negotiateNoteVersion,
+  SUPPORTED_NOTE_VERSIONS,
   toEvmAddress,
   toWord,
 } from "../src/notes.js";
 import { C_ADDR, EVM_RECIPIENT, G_ADDR, G_KEY, MUXED_ID, M_ADDR } from "./fixtures.js";
 
 const NONCE = 0x0102030405060708n;
+
+describe("note version negotiation", () => {
+  it("uses the highest supported common version at or above the requirement", () => {
+    expect(negotiateNoteVersion(1, SUPPORTED_NOTE_VERSIONS, [1, 2])).toBe(1);
+  });
+
+  it("does not downgrade when the destination requires an unavailable version", () => {
+    expect(() => negotiateNoteVersion(2, [1], [1, 2])).toThrow(/UnsupportedHookVersion/);
+  });
+});
 
 /**
  * Payloads are built here by hand rather than by calling the encoder.

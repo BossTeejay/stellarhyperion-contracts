@@ -704,6 +704,10 @@ impl HyperionRouter {
         storage::config(&env)
     }
 
+    pub fn is_paused(env: Env) -> bool {
+        storage::config(&env).map(|cfg| cfg.paused).unwrap_or(true)
+    }
+
     pub fn get_transfer(env: Env, nonce: u64) -> Result<TransferRecord, HyperionError> {
         storage::transfer(&env, nonce).ok_or(HyperionError::UnknownNonce)
     }
