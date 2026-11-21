@@ -17,6 +17,35 @@ The wallet-owned router and ITS adapter were deployed with the dedicated `hyperi
 
 The received asset is the ITS representation of Stellar USDC, not Circle's native Sepolia USDC. Route 1 sends directly to the recipient through ITS and needs no EVM Hyperion adapter.
 
+## Axelar capability admission and upgrade compatibility
+
+The adapter now stores an explicit capability for each `(Hyperion chain, ITS token id)` pair. A
+record captures the current Axelar chain name, peer address, and locally reported ITS token-manager
+type. The capability is either `DirectItsTransfer` (recipient address, empty metadata) or
+`GmpPayload` (Hyperion peer address plus an authenticated note); a route instance cannot use the
+other shape. Dispatch and GMP callback acceptance fail closed if the record is missing, the manager
+type has changed, or the lane no longer matches the recorded peer. Soroban keeps these records in
+instance storage so the existing bounded instance-TTL maintenance keeps admission alive alongside
+the adapter configuration. Exact integer amounts,
+authenticated ITS calls, router replay protection and recipient-bound claims are unchanged.
+
+The active Sepolia source route is the bare `AxelarIts` shape. Its existing link and token mappings
+are not overwritten by admission, but the new capability key does not exist in older adapter state.
+When upgrading that adapter, retain the existing trusted link and USDC token mapping, then call
+`set_destination_capability` for the `sepolia` / existing ITS-USDC pair with
+`DirectItsTransfer`. Until this admission is written, the new implementation refuses dispatch;
+perform the upgrade and admission as one planned maintenance window, or configure a replacement
+adapter and switch the router through its normal timelock. Do not select `GmpPayload` for the
+active direct-transfer lane. CCTP configuration and delivery are unaffected.
+
+GMP instances need their own `GmpPayload` admission for each chain/token pair and still require
+the exact peer trust check. Repointing a chain or changing its token-manager type invalidates the
+old record and requires a fresh admin admission. The EVM Axelar adapter is separately gated:
+`developmentGateOpen` is false by default, and its GMP pair records and nonzero validation evidence
+must only be configured after independent EVM/destination validation. The evidence hash is an
+operator reference, not an on-chain proof. EVM and other unvalidated rail development must not be
+activated as part of the current Stellar Testnet rollout.
+
 ## Deployment evidence
 
 `deployments/stellar-testnet-phase1.json` is the canonical app/indexer record, retaining its historical filename. `deployments/evidence/2026-10-28-paid-its.json` records actual transaction hashes, ledgers, artifact hashes, token mapping, lane link, queued actions, execution and transfer acceptance status. Check that evidence for the latest source/destination verification result.

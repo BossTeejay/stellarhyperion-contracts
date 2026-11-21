@@ -35,6 +35,14 @@ interface IInterchainTokenService {
     /// @param tokenId ITS's identifier for the token.
     /// @return The local ERC20, or the zero address when ITS has no record of that id here.
     function registeredTokenAddress(bytes32 tokenId) external view returns (address);
+
+    /// @notice The deployed manager for this token id.
+    function tokenManagerAddress(bytes32 tokenId) external view returns (address);
+}
+
+interface IInterchainTokenManager {
+    /// @notice The ITS manager implementation discriminator (0 through 4).
+    function implementationType() external view returns (uint256);
 }
 
 /// @title What ITS calls on the receiving contract

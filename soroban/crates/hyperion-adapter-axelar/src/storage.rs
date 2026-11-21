@@ -1,4 +1,4 @@
-use hyperion_core::HyperionError;
+use hyperion_core::{axelar::DestinationCapabilityRecord, HyperionError};
 use soroban_sdk::{contracttype, Address, BytesN, Env, String};
 
 use crate::types::{ChainLink, Config, PendingRotation};
@@ -119,6 +119,26 @@ pub fn set_token(env: &Env, token: &Address, token_id: &BytesN<32>) {
     env.storage()
         .persistent()
         .extend_ttl(&tok_key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn destination_capability(
+    env: &Env,
+    chain: &String,
+    token_id: &BytesN<32>,
+) -> Option<DestinationCapabilityRecord> {
+    let key = DataKey::DestinationCapability(chain.clone(), token_id.clone());
+    env.storage().instance().get(&key)
+}
+
+pub fn set_destination_capability(env: &Env, record: &DestinationCapabilityRecord) {
+    let key = DataKey::DestinationCapability(record.chain.clone(), record.token_id.clone());
+    // Instance storage shares the configuration's TTL, which is already extended by bounded
+    // maintenance. Keeping admission with the instance prevents it expiring independently and
+    // silently disabling a still-active chain/token pair.
+    env.storage().instance().set(&key, record);
+    env.storage()
+        .instance()
+        .extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
 /// Top a lane's lifetime back up without changing it.

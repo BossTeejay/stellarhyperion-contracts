@@ -11,6 +11,13 @@ trust assumption and is not offered by the current testnet app.
 
 The active app sends canonical Stellar USDC through Axelar ITS to its seven-decimal representation on Ethereum Sepolia, or through Circle CCTP to six-decimal native USDC on Ethereum Sepolia, Base Sepolia and Arc Testnet. The frontend can first convert other liquid classic Stellar assets into USDC. ITS's representation differs from Circle's native USDC. Both active rails have real signed source/destination acceptance evidence. EVM router and Allbridge implementations are included for development; they are outside the active app's deployment scope.
 
+Axelar dispatch now requires an explicit chain/token capability admission bound to the current
+ITS token-manager type and peer. Bare ITS transfers and GMP payload transfers are distinct
+capabilities. Existing chain links and token mappings are retained, but a Soroban adapter upgrade
+must admit its existing Sepolia ITS pair before dispatch resumes. The EVM Axelar adapter is
+development-only: its global activation gate is closed by default and must remain closed until the
+EVM lane has been independently validated.
+
 ## Changes since October 12, 2026
 
 - Implemented authenticated paid dispatch through Axelar ITS and Circle CCTP, retaining atomic protocol fees, precision checks, flow limits and failure rollback.
