@@ -3,7 +3,7 @@ import {
   createPublicKey,
   verify as verifySignature,
 } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const MAX_FILE_BYTES = 1_048_576;
@@ -378,10 +378,26 @@ function usage() {
   ].join("\n");
 }
 
-function readBoundedFile(file, limit) {
-  const size = statSync(file).size;
-  if (size > limit) throw new Error(`Input file exceeds ${limit} bytes`);
-  return readFileSync(file);
+export function readBoundedFile(file, limit) {
+  const fd = openSync(file, "r");
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("Input must be a regular file");
+    if (stat.size > limit) throw new Error(`Input file exceeds ${limit} bytes`);
+
+    // Read the same descriptor we checked, with one extra byte to detect growth.
+    const buffer = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const bytes = readSync(fd, buffer, length, buffer.length - length, null);
+      if (bytes === 0) break;
+      length += bytes;
+    }
+    if (length > limit) throw new Error(`Input file exceeds ${limit} bytes`);
+    return buffer.subarray(0, length);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function runCli(args) {

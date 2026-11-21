@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -8,6 +9,7 @@ import test from "node:test";
 import {
   acceptancePayload,
   evaluateActivation,
+  readBoundedFile,
 } from "../check-allbridge-activation.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -17,6 +19,19 @@ const FIXTURE = path.join(
   "allbridge-development-only.json",
 );
 const NOW = Date.parse("2026-11-20T01:00:00Z");
+
+test("bounded evidence reads reject oversized and non-file inputs", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "allbridge-evidence-"));
+  try {
+    const file = path.join(directory, "evidence.json");
+    writeFileSync(file, "1234");
+    assert.equal(readBoundedFile(file, 4).toString(), "1234");
+    assert.throws(() => readBoundedFile(file, 3), /exceeds 3 bytes/);
+    assert.throws(() => readBoundedFile(directory, 4), /regular file/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function signedManifest() {
   const manifest = JSON.parse(readFileSync(FIXTURE, "utf8"));

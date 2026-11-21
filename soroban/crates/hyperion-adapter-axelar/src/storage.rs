@@ -28,6 +28,7 @@ pub enum DataKey {
     /// Minimum note version required by the configured destination. Missing means v1 for
     /// installations predating version negotiation.
     RequiredNoteVersion(String),
+    DestinationCapability(String, BytesN<32>),
     /// Emergency disable flag for a chain.
     Disabled(String),
     /// Retired names cannot be reused to bypass a peer rotation delay.
@@ -154,9 +155,7 @@ pub fn set_destination_capability(env: &Env, record: &DestinationCapabilityRecor
     // maintenance. Keeping admission with the instance prevents it expiring independently and
     // silently disabling a still-active chain/token pair.
     env.storage().instance().set(&key, record);
-    env.storage()
-        .instance()
-        .extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
 /// Top a lane's lifetime back up without changing it.

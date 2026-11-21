@@ -34,6 +34,6 @@ export function deprecationWarningFor(
     code: "RETIRED_ROUTER",
     recordId,
     message: `Deployment "${recordId}" is archived and must not be activated or monitored.${successorHint}`,
-    successorId: meta.successorId,
+    ...(meta.successorId === undefined ? {} : { successorId: meta.successorId }),
   };
 }

@@ -147,10 +147,7 @@ fn capability_admission_is_explicit_and_records_the_live_manager_shape() {
             DestinationCapability::GmpPayload,
         )
     );
-    assert_eq!(
-        direct.capability,
-        DestinationCapability::DirectItsTransfer
-    );
+    assert_eq!(direct.capability, DestinationCapability::DirectItsTransfer);
 }
 
 #[test]

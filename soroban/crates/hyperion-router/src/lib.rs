@@ -396,9 +396,22 @@ impl HyperionRouter {
                 })
             })
             .unwrap_or(DebitBreakdown::Unavailable);
-        let quotes = Self::quote_routes(env.clone(), token, amount, destination_decimals);
         let mut out = vec![&env];
-        for quote in quotes.iter() {
+        let ledger = env.ledger().sequence();
+        for route in ALL_ROUTES {
+            let quote = match &cfg {
+                Ok(cfg) => quote_one(
+                    &env,
+                    cfg,
+                    &token,
+                    token_cfg.as_ref(),
+                    route,
+                    amount,
+                    destination_decimals,
+                    ledger,
+                ),
+                Err(error) => unavailable(route, amount, *error),
+            };
             out.push_back(RouteQuoteV2 {
                 quote,
                 breakdown: breakdown.clone(),
@@ -1008,6 +1021,7 @@ struct OutboundPlan {
     adapter_addr: Address,
 }
 
+#[inline(never)]
 fn plan_outbound(
     env: &Env,
     request: &OutboundRequest,
@@ -1102,6 +1116,7 @@ fn plan_outbound(
     })
 }
 
+#[inline(never)]
 fn bounded_plan(
     env: &Env,
     request: &OutboundRequest,
@@ -1150,6 +1165,7 @@ fn bounded_plan(
     }
 }
 
+#[inline(never)]
 fn bridge_out_inner(
     env: Env,
     sender: Address,

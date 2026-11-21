@@ -177,7 +177,7 @@ fn in_flight_messages_accepted_during_overlap_window_and_refused_after_expiratio
 
     // 1. In-flight message with old peer A arrives during overlap window
     let mut spec_a = w.spec(ARRIVING, 101, w.hook_to_recipient());
-    spec_a.message_sender = peer_a;
+    spec_a.sender = peer_a;
     let msg_a = spec_a.encode(&w.env);
 
     let claim_id = w.adapter().receive(&w.relayer, &msg_a, &w.attestation());
@@ -186,7 +186,7 @@ fn in_flight_messages_accepted_during_overlap_window_and_refused_after_expiratio
 
     // 2. Message from new peer B also succeeds
     let mut spec_b = w.spec(ARRIVING, 102, w.hook_to_recipient());
-    spec_b.message_sender = peer_b;
+    spec_b.sender = peer_b;
     let msg_b = spec_b.encode(&w.env);
 
     let claim_id_b = w.adapter().receive(&w.relayer, &msg_b, &w.attestation());
@@ -200,7 +200,7 @@ fn in_flight_messages_accepted_during_overlap_window_and_refused_after_expiratio
 
     // In-flight message with retired old peer A now expires and is refused!
     let mut spec_a_late = w.spec(ARRIVING, 103, w.hook_to_recipient());
-    spec_a_late.message_sender = peer_a;
+    spec_a_late.sender = peer_a;
     let msg_a_late = spec_a_late.encode(&w.env);
 
     assert_eq!(
@@ -342,4 +342,30 @@ fn emergency_disable_controls_halt_custody_immediately() {
             .receive(&w.relayer, &w.inbound(ARRIVING, 403), &w.attestation());
     assert_eq!(claim_id_restored, 0);
     assert_eq!(w.token().balance(&w.recipient), ARRIVING * 2);
+}
+
+#[test]
+fn burn_sender_cannot_impersonate_active_or_historical_envelope_peer() {
+    let w = World::new();
+    let old = BytesN::from_array(&w.env, &[0xaa; 32]);
+    let active = BytesN::from_array(&w.env, &[0xbb; 32]);
+    w.adapter().set_peer_messenger(&ETHEREUM_DOMAIN, &old);
+    w.adapter()
+        .propose_peer_rotation(&ETHEREUM_DOMAIN, &active, &MIN_PEER_ROTATION_DELAY);
+    w.env
+        .ledger()
+        .with_mut(|li| li.timestamp += MIN_PEER_ROTATION_DELAY);
+    w.adapter().apply_peer_rotation(&ETHEREUM_DOMAIN);
+    for (nonce, claimed_burn_sender) in [(701, [0xaa; 32]), (702, [0xbb; 32])] {
+        let mut spec = w.spec(ARRIVING, nonce, w.hook_to_recipient());
+        spec.sender = [0xee; 32];
+        spec.message_sender = claimed_burn_sender;
+        assert_eq!(
+            w.adapter()
+                .try_receive(&w.relayer, &spec.encode(&w.env), &w.attestation()),
+            Err(Ok(HyperionError::UnexpectedRailContract))
+        );
+        assert_eq!(w.token().balance(&w.recipient), 0);
+        assert_eq!(w.token().balance(&w.adapter_id), 0);
+    }
 }

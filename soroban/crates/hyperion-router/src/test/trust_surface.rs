@@ -19,6 +19,10 @@ impl Router for RouterInterfaceFixture {
         Err(HyperionError::InvalidAmount)
     }
 
+    fn is_paused(_env: Env) -> bool {
+        true
+    }
+
     fn treasury(_env: Env) -> Result<Address, HyperionError> {
         Err(HyperionError::InvalidAmount)
     }
