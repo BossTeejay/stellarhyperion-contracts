@@ -209,3 +209,26 @@ export function routesForPair(from: ChainKey, to: ChainKey, symbol: string): rea
   if (source === null || destination === null) return [];
   return source.routes.filter((route) => destination.routes.includes(route));
 }
+
+/**
+ * Independently validated outbound routes for the current launch scope.
+ *
+ * Stellar Testnet CCTP has delivered to Sepolia, Base Sepolia and Arc Testnet. ITS has validated
+ * delivery only to Sepolia. This allowlist is deliberately narrower than `routesForPair`, which
+ * reports configured metadata and is not evidence that an outbound route has been validated.
+ */
+export function validatedOutboundRoutesForPair(
+  from: ChainKey,
+  to: ChainKey,
+  symbol: string,
+): readonly RouteKind[] {
+  if (from !== "stellar-testnet" || symbol !== "USDC") return [];
+  const validated: readonly RouteKind[] =
+    to === "sepolia"
+      ? [RouteKind.Cctp, RouteKind.AxelarIts]
+      : to === "base-sepolia" || to === "arc-testnet"
+        ? [RouteKind.Cctp]
+        : [];
+  const configured = routesForPair(from, to, symbol);
+  return validated.filter((route) => configured.includes(route));
+}

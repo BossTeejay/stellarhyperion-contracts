@@ -7,8 +7,13 @@ import {
 import { tryParseStellarAddress, AddressKind } from "../addresses.js";
 import type { RouteKind } from "../routes.js";
 import { ROUTE_KINDS, carriesPayload, isCanonical, waitsOnAttestation } from "../routes.js";
-import { MAX_QUOTE_AMOUNT, QuoteBlocker, bestQuote } from "../quotes.js";
-import type { RouteQuote } from "../quotes.js";
+import {
+  MAX_QUOTE_AMOUNT,
+  QuoteBlocker,
+  bestQuote,
+  planInverseQuote,
+} from "../quotes.js";
+import type { InverseQuotePlan, InverseQuoteRequest, RouteQuote } from "../quotes.js";
 import {
   RAIL_DESTINATION_GAS_ESTIMATES,
   type BatchQuoteResult,
@@ -166,4 +171,21 @@ export function quoteBatch(
       quotes,
     };
   });
+}
+
+/**
+ * Invert a batch of destination minimums using one shared route snapshot and budget assumption.
+ *
+ * This intentionally returns one exact plan per requested minimum; it does not interpolate
+ * between tiers because fees and representability are integer floors.
+ */
+export function quoteMinimumBatch(
+  minimums: readonly bigint[],
+  params: Omit<InverseQuoteRequest, "minimumDestinationAmount"> & {
+    readonly snapshot: QuoteParams["snapshot"];
+  },
+): readonly InverseQuotePlan[] {
+  return minimums.map((minimumDestinationAmount) =>
+    planInverseQuote({ ...params, minimumDestinationAmount }, params.snapshot),
+  );
 }

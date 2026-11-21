@@ -14,7 +14,7 @@
 import type { Hex } from "./bytes.js";
 import type { ChainKey } from "./chains.js";
 import { isChainKey } from "./chains.js";
-import type { RouteKind } from "./routes.js";
+import { RouteKind } from "./routes.js";
 import { ROUTE_KINDS, ROUTE_SLUGS, tryRouteFromSlug } from "./routes.js";
 import { isStellarAddress } from "./addresses.js";
 
@@ -376,4 +376,34 @@ export function tokenFor(
 /** Every chain in a set that has a router, which is the list a chain picker should offer. */
 export function deployedChains(set: DeploymentSet): readonly ChainKey[] {
   return Object.keys(set.networks).filter(isChainKey);
+}
+
+/**
+ * Whether the supplied deployment has the narrowly validated source-side wiring for outbound
+ * destination-minimum planning.
+ *
+ * This is intentionally not a general rail capability check: only Stellar Testnet CCTP and ITS
+ * have independent outbound validation today. A configured adapter and token route are both
+ * required, and merely adding another route to a deployment record does not enable this feature.
+ */
+export function hasValidatedOutboundQuoteWiring(
+  set: DeploymentSet,
+  chain: ChainKey,
+  symbol: string,
+  route: RouteKind,
+): boolean {
+  if (
+    chain !== "stellar-testnet" ||
+    (route !== RouteKind.Cctp && route !== RouteKind.AxelarIts)
+  ) {
+    return false;
+  }
+  const deployment = set.networks[chain];
+  if (deployment === undefined || deployment.family !== "stellar") return false;
+  const token = deployment.tokens[symbol];
+  return (
+    deployment.adapters[route] !== undefined &&
+    token !== undefined &&
+    token.routes.includes(route)
+  );
 }
