@@ -87,3 +87,10 @@ error ProviderBudgetExceeded();
 
 /// @notice The adapter lacks a usable local dispatch validation method.
 error AdapterMethodUnavailable();
+
+// Messenger rotation.
+error RotationAlreadyPending();
+error RotationNotPending();
+error RotationNotReady();
+error MessengerUnchanged();
+error OldMessengerExpired();

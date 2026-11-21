@@ -1,7 +1,10 @@
 use hyperion_core::HyperionError;
 use soroban_sdk::{contracttype, Address, BytesN, Env, String};
 
-use crate::types::Config;
+use crate::types::{
+    Config, HistoricalMessengerWindow, HistoricalTokenMessengerWindow, MessengerRotation,
+    PeerMessengerRotation,
+};
 
 pub const BUMP_THRESHOLD: u32 = 17_280;
 pub const BUMP_TO: u32 = 518_400;
@@ -22,6 +25,18 @@ pub enum DataKey {
     /// This doubles as the inbound allowlist. An unmapped pair is refused, which is the correct
     /// behaviour on the day Circle adds a token pair nobody here has looked at yet.
     Asset(u32, BytesN<32>),
+    /// Emergency disable flag for a domain.
+    Disabled(u32),
+    /// Active remote peer messenger for a domain.
+    PeerMessenger(u32),
+    /// Pending remote peer rotation for a domain.
+    PendingPeerRotation(u32),
+    /// Historical remote peer messenger overlap window for a domain.
+    OldPeerMessenger(u32),
+    /// Pending local TokenMessenger rotation.
+    PendingMessengerRotation,
+    /// Historical local TokenMessenger overlap window.
+    OldTokenMessenger,
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -106,6 +121,127 @@ pub fn set_asset(env: &Env, domain: u32, burn_token: &BytesN<32>, local: &Addres
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
 }
 
+// ------------------------------------------------------------------------------------------
+// Emergency disable controls
+// ------------------------------------------------------------------------------------------
+
+pub fn is_domain_disabled(env: &Env, domain: u32) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Disabled(domain))
+        .unwrap_or(false)
+}
+
+pub fn set_domain_disabled(env: &Env, domain: u32, disabled: bool) {
+    if disabled {
+        env.storage()
+            .instance()
+            .set(&DataKey::Disabled(domain), &true);
+    } else {
+        env.storage().instance().remove(&DataKey::Disabled(domain));
+    }
+}
+
+// ------------------------------------------------------------------------------------------
+// Remote peer messenger
+// ------------------------------------------------------------------------------------------
+
+pub fn peer_messenger(env: &Env, domain: u32) -> Option<BytesN<32>> {
+    env.storage()
+        .instance()
+        .get(&DataKey::PeerMessenger(domain))
+}
+
+pub fn set_peer_messenger(env: &Env, domain: u32, messenger: &BytesN<32>) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PeerMessenger(domain), messenger);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn pending_peer_rotation(env: &Env, domain: u32) -> Option<PeerMessengerRotation> {
+    env.storage()
+        .instance()
+        .get(&DataKey::PendingPeerRotation(domain))
+}
+
+pub fn set_pending_peer_rotation(env: &Env, domain: u32, rotation: &PeerMessengerRotation) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingPeerRotation(domain), rotation);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn clear_pending_peer_rotation(env: &Env, domain: u32) {
+    env.storage()
+        .instance()
+        .remove(&DataKey::PendingPeerRotation(domain));
+}
+
+pub fn old_peer_messenger(env: &Env, domain: u32) -> Option<HistoricalMessengerWindow> {
+    env.storage()
+        .instance()
+        .get(&DataKey::OldPeerMessenger(domain))
+}
+
+pub fn set_old_peer_messenger(
+    env: &Env,
+    domain: u32,
+    old_messenger: &BytesN<32>,
+    valid_until: u64,
+) {
+    env.storage().instance().set(
+        &DataKey::OldPeerMessenger(domain),
+        &HistoricalMessengerWindow {
+            old_messenger: old_messenger.clone(),
+            valid_until,
+        },
+    );
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+// ------------------------------------------------------------------------------------------
+// Local TokenMessenger rotation
+// ------------------------------------------------------------------------------------------
+
+pub fn pending_messenger_rotation(env: &Env) -> Option<MessengerRotation> {
+    env.storage()
+        .instance()
+        .get(&DataKey::PendingMessengerRotation)
+}
+
+pub fn set_pending_messenger_rotation(env: &Env, rotation: &MessengerRotation) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingMessengerRotation, rotation);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn clear_pending_messenger_rotation(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&DataKey::PendingMessengerRotation);
+}
+
+pub fn old_token_messenger(env: &Env) -> Option<HistoricalTokenMessengerWindow> {
+    env.storage().instance().get(&DataKey::OldTokenMessenger)
+}
+
+pub fn set_old_token_messenger(env: &Env, addr: &Address, valid_until: u64) {
+    env.storage().instance().set(
+        &DataKey::OldTokenMessenger,
+        &HistoricalTokenMessengerWindow {
+            old_messenger: addr.clone(),
+            valid_until,
+        },
+    );
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+// ------------------------------------------------------------------------------------------
+// Storage maintenance & keep-alive
+// ------------------------------------------------------------------------------------------
+
 fn touch_key(env: &Env, key: &DataKey) -> bool {
     if env.storage().persistent().has(key) {
         env.storage()
@@ -117,11 +253,6 @@ fn touch_key(env: &Env, key: &DataKey) -> bool {
     }
 }
 
-/// Top a link's lifetime back up without changing it.
-///
-/// Soroban archives storage nobody reads, and a lane that stays quiet for a month is exactly the
-/// lane somebody will try to use on the day it has expired. The read paths above bump as they go,
-/// so this only matters for a lane with no traffic at all, which is why it is permissionless.
 pub fn touch_link(env: &Env, domain: u32) -> u32 {
     let mut touched = 0u32;
     let chain_key = DataKey::Chain(domain);
