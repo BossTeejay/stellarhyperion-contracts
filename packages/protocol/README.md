@@ -131,3 +131,54 @@ and Sepolia entries ship as defaults and are marked `confirmed: false`, because 
 everywhere else" is a reasonable inference and not a reading. Stellar's CCTP addresses are absent
 entirely rather than guessed; they come from the deployment record. Shipping a plausible address as
 if it were verified is how somebody loses money to a deploy script that looked fine.
+
+## Compare dated router snapshots
+
+`compareSnapshots` compares an explicitly dated collection using one source amount and destination.
+Each row includes a deterministic all-rail ladder and its best available quote. Rows sort by timestamp
+and ID; ties between rails use the existing canonical-asset/attestation policy in route enum order.
+Supply `route` only when comparing the same single rail over time; the complete ladder remains available.
+All amounts stay `bigint` throughout the comparison.
+
+```ts
+import { compareSnapshots } from "@hyperion/protocol";
+
+const representation = {
+  tokenDecimals: 6,
+  destinationNetwork: "stellar-testnet",
+  destinationTokenId: destinationSacId,
+  destinationDecimals: 7,
+};
+const comparisons = compareSnapshots(
+  { amount: 1_000_000n, strkey: recipient, destinationDecimals: 7 },
+  observations.map(({ id, takenAt, snapshot }) => ({
+    id,
+    takenAt,
+    snapshot,
+    network: "sepolia",
+    tokenId: sourceTokenAddress,
+    representation,
+  })),
+  { now: observedUnixSeconds, network: "sepolia", tokenId: sourceTokenAddress, representation },
+  60,
+);
+```
+
+Snapshot timestamps, the reference clock and maximum age are non-negative safe integer Unix seconds.
+The exact maximum-age boundary is fresh; future observations and malformed/duplicate IDs are separate
+statuses. An old observation is `stale`; a fresh snapshot whose rails refuse the request is `unavailable`.
+Invalid fee/precision/flow data is reported as `invalid`, rather than used in arithmetic.
+
+Compatibility binds source chain, source token contract and precision, destination chain, destination
+SAC/token contract and precision. Chain keys must be known and both ends must use the same network mode.
+EVM contract IDs normalize address case; Stellar SAC IDs require valid checksums. Tickers such as `USDC`
+are insufficient. Older unqualified `DatedSnapshot` inputs return `incompatible`; migrate by adding the
+concrete `representation` to both each observation and the reference. The existing quote, amount and
+SDK deployment lookup APIs remain intact.
+
+Every result is `planningOnly: true`. Caller-supplied snapshots are read-only planning evidence, not
+verified live state or an activation decision. This existing local quote engine accepts Stellar recipient
+strkeys and is suitable for EVM-to-Stellar development comparisons; it does not implement the active
+Stellar-to-EVM outbound quote interface. The active deployment remains Stellar Testnet outbound ITS/CCTP;
+EVM and other rail execution stays gated until independently validated. Confirm actual router quotes,
+network/token identities and provider costs through the applicable chain integration before execution.

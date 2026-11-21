@@ -602,9 +602,9 @@ export function wouldSlip(quote: RouteQuote, minDestinationAmount: bigint): bool
   return quote.available && quote.destinationAmount < minDestinationAmount;
 }
 
+export * from "./quotes/snapshots.js";
+
 /**
- * A sane minimum from a quote and a tolerance in basis points.
- *
  * Rounds the floor down, so the guard is never tighter than the tolerance somebody chose. On a
  * rail with a fixed rate this is theatre, and on one that skims a variable fee it is the
  * difference between a transfer and a surprise.
