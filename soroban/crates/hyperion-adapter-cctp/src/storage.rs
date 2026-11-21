@@ -1,6 +1,7 @@
 use hyperion_core::HyperionError;
 use soroban_sdk::{contracttype, Address, BytesN, Env, String};
 
+use crate::types::FinalityPolicy;
 use crate::types::{
     Config, HistoricalMessengerWindow, HistoricalTokenMessengerWindow, MessengerRotation,
     PeerMessengerRotation,
@@ -37,6 +38,8 @@ pub enum DataKey {
     PendingMessengerRotation,
     /// Historical local TokenMessenger overlap window.
     OldTokenMessenger,
+    /// Finality selection for the outbound lane; missing entries default to finalized.
+    Finality(u32),
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -82,6 +85,26 @@ pub fn destination_caller(env: &Env, domain: u32) -> BytesN<32> {
         .persistent()
         .get(&DataKey::Caller(domain))
         .unwrap_or_else(|| BytesN::from_array(env, &[0u8; 32]))
+}
+
+pub fn finality_policy(env: &Env, domain: u32) -> FinalityPolicy {
+    let key = DataKey::Finality(domain);
+    if let Some(policy) = env.storage().persistent().get(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        policy
+    } else {
+        FinalityPolicy::Finalized
+    }
+}
+
+pub fn set_finality_policy(env: &Env, domain: u32, policy: &FinalityPolicy) {
+    let key = DataKey::Finality(domain);
+    env.storage().persistent().set(&key, policy);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn set_link(env: &Env, chain: &String, domain: u32, caller: &BytesN<32>) {
@@ -268,6 +291,9 @@ pub fn touch_link(env: &Env, domain: u32) -> u32 {
     if touch_key(env, &DataKey::Caller(domain)) {
         touched += 1;
     }
+    if touch_key(env, &DataKey::Finality(domain)) {
+        touched += 1;
+    }
     touched
 }
 
@@ -284,6 +310,9 @@ pub fn touch_link_by_chain(env: &Env, chain: &String) -> u32 {
         touched += 1;
     }
     if touch_key(env, &DataKey::Caller(domain)) {
+        touched += 1;
+    }
+    if touch_key(env, &DataKey::Finality(domain)) {
         touched += 1;
     }
     touched

@@ -178,6 +178,9 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         string chain, uint32 domain, uint256 amount, bytes32 mintRecipient, uint64 nonce, bytes hookData
     );
 
+    /// @notice Effective finality policy applied to a submitted burn.
+    event FinalityPolicyUsed(string chain, uint32 indexed domain, uint32 minFinalityThreshold);
+
     /// @notice Diagnostics announced for CCTP approval lifecycle during dispatch.
     event ApprovalAudited(
         address indexed token,
@@ -227,6 +230,15 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         _dispatchPlan(token, amount, destination);
     }
 
+    /// @notice Quote the effective policy for a configured and enabled lane.
+    /// @dev This development adapter supports finalized transfers only.
+    function quoteFinalityPolicy(string calldata chain) external view returns (uint32) {
+        Lane storage lane = _lanes[chain];
+        if (!lane.configured) revert UnknownChain();
+        if (!lane.enabled) revert RailNotConfigured();
+        return FINALITY_THRESHOLD_FINALIZED;
+    }
+
     function _dispatchPlan(address token, uint256 amount, Destination calldata destination)
         private
         view
@@ -253,6 +265,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         if (msg.sender != ROUTER) revert Unauthorized();
         (Lane memory lane, bytes memory hookData) = _dispatchPlan(token, amount, destination);
         emit BurnSubmitted(destination.chain, lane.domain, amount, lane.mintRecipient, nonce, hookData);
+        emit FinalityPolicyUsed(destination.chain, lane.domain, FINALITY_THRESHOLD_FINALIZED);
         uint256 allowanceBefore = IERC20(USDC).allowance(address(this), address(TOKEN_MESSENGER));
         IERC20(USDC).forceApprove(address(TOKEN_MESSENGER), amount);
         if (IERC20(USDC).allowance(address(this), address(TOKEN_MESSENGER)) != amount) {

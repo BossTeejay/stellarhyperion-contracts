@@ -97,6 +97,14 @@ pub struct FeePolicySet {
 
 #[contractevent(topics = ["hyperion", "cctp_cfg"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneFinalityPolicySet {
+    #[topic]
+    pub domain: u32,
+    pub min_finality_threshold: u32,
+}
+
+#[contractevent(topics = ["hyperion", "cctp_cfg"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdminChanged {
     #[topic]
     pub old: Address,

@@ -94,3 +94,8 @@ error RotationNotPending();
 error RotationNotReady();
 error MessengerUnchanged();
 error OldMessengerExpired();
+/// @notice No outbound ITS transfer is registered for this top-up intent.
+error TopUpIntentNotFound();
+
+/// @notice A top-up changed an intent's bound message, destination, or refund recipient.
+error TopUpBindingMismatch();

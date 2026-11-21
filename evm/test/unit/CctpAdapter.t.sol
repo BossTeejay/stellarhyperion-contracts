@@ -84,6 +84,7 @@ contract CctpAdapterTest is Fixture {
     event PeerRotationQueued(string indexed chain, bytes32 currentPeer, bytes32 newPeer, uint64 eta);
     event PeerRotationApplied(string indexed chain, bytes32 oldPeer, bytes32 newPeer, uint64 overlapDeadline);
     event PeerRotationCancelled(string indexed chain, bytes32 cancelledPeer);
+    event FinalityPolicyUsed(string chain, uint32 indexed domain, uint32 minFinalityThreshold);
 
     function setUp() public override {
         super.setUp();
@@ -128,6 +129,17 @@ contract CctpAdapterTest is Fixture {
     /// sender who was quoted a fee of zero would find one had appeared by the time it landed.
     function test_the_finality_tier_is_the_one_that_costs_nothing() public view {
         assertEq(adapter.FINALITY_THRESHOLD_FINALIZED(), 2000);
+        assertEq(adapter.quoteFinalityPolicy(STELLAR), 2000);
+    }
+
+    function test_finality_quote_rejects_unknown_or_disabled_lanes() public {
+        vm.expectRevert(UnknownChain.selector);
+        adapter.quoteFinalityPolicy("unknown");
+
+        vm.prank(admin);
+        adapter.setLaneEnabled(STELLAR, false);
+        vm.expectRevert(RailNotConfigured.selector);
+        adapter.quoteFinalityPolicy(STELLAR);
     }
 
     /// @dev Not "zero for now". CCTP bills nothing at send time on this tier, so there is no
@@ -415,6 +427,8 @@ contract CctpAdapterTest is Fixture {
         emit BurnSubmitted(
             STELLAR, STELLAR_DOMAIN, AMOUNT, MINT_RECIPIENT, NONCE, _hook(AddressKind.Account, G_KEY, 0)
         );
+        vm.expectEmit(false, true, false, true, address(adapter));
+        emit FinalityPolicyUsed(STELLAR, STELLAR_DOMAIN, 2000);
         vm.prank(address(router));
         adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
     }

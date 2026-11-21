@@ -136,6 +136,8 @@ export const EVM_ERROR_NAMES = [
   "RotationNotReady",
   "MessengerUnchanged",
   "OldMessengerExpired",
+  "TopUpIntentNotFound",
+  "TopUpBindingMismatch",
 ] as const;
 
 export type EvmErrorName = (typeof EVM_ERROR_NAMES)[number];
@@ -457,6 +459,17 @@ const HELP: Record<HyperionErrorName, Omit<ErrorHelp, "sorobanCode">> = {
     summary:
       "This adapter cannot validate the requested dispatch locally. Update the adapter or use a supported deployment.",
     fault: "config",
+    retryable: false,
+  },
+  TopUpIntentNotFound: {
+    summary: "This gas top-up does not match an outbound transfer recorded by the adapter.",
+    fault: "input",
+    retryable: false,
+  },
+  TopUpBindingMismatch: {
+    summary:
+      "The gas top-up changes the sender, destination, token, amount, or message already bound to this transfer.",
+    fault: "input",
     retryable: false,
   },
   ExceedsRouteLimit: {

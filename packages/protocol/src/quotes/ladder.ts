@@ -7,19 +7,19 @@ import {
 import { tryParseStellarAddress, AddressKind } from "../addresses.js";
 import type { RouteKind } from "../routes.js";
 import { ROUTE_KINDS, carriesPayload, isCanonical, waitsOnAttestation } from "../routes.js";
-import {
-  MAX_QUOTE_AMOUNT,
-  QuoteBlocker,
-  bestQuote,
-  planInverseQuote,
-} from "../quotes.js";
+import { MAX_QUOTE_AMOUNT, QuoteBlocker, bestQuote, planInverseQuote } from "../quotes.js";
 import type { InverseQuotePlan, InverseQuoteRequest, RouteQuote } from "../quotes.js";
+import {
+  resolveProviderAddressPair,
+  type ProviderAddressOverrides,
+  type ProviderAddressPair,
+} from "../registry/assets.js";
+import type { ChainKey } from "../chains.js";
 import {
   RAIL_DESTINATION_GAS_ESTIMATES,
   type BatchQuoteResult,
   type QuoteParams,
 } from "./types.js";
-
 
 interface PrecomputedRailContext {
   readonly route: RouteKind;
@@ -33,7 +33,7 @@ interface PrecomputedRailContext {
  * Price multiple amount tiers simultaneously across all rails without redundant recalculations.
  *
  * Designed for fee curve rendering, client UI ladders, and routing aggregators pricing
- * amount ladders (e.g. [100 USDC, 500 USDC, 1,000 USDC]) on a single call.
+ * amount ladders (e.g. [100 USDC, 500 USDC, 1,000 USDC]) in a single call.
  *
  * Optimizations:
  * - Pre-validates destination address formatting and checksum once for the entire batch.
@@ -189,4 +189,43 @@ export function quoteMinimumBatch(
   return minimums.map((minimumDestinationAmount) =>
     planInverseQuote({ ...params, minimumDestinationAmount }, params.snapshot),
   );
+}
+
+/** Provider address context for a batch quote; token decimals remain part of the quote inputs. */
+export interface ProviderAwareQuoteParams extends QuoteParams {
+  readonly sourceChain: ChainKey;
+  readonly destinationChain: ChainKey;
+  readonly symbol: string;
+  readonly providerAddressOverrides: ProviderAddressOverrides;
+}
+
+export interface ProviderAwareBatchQuoteResult {
+  readonly quotes: readonly BatchQuoteResult[];
+  readonly providerAddresses: Readonly<Partial<Record<RouteKind, ProviderAddressPair>>>;
+}
+
+/**
+ * Quote a ladder and resolve explicit provider address pairs for each snapshot-supported route.
+ *
+ * The pair metadata is returned separately so existing quote result schemas remain unchanged.
+ */
+export function quoteBatchWithProviderAddresses(
+  tiers: readonly bigint[],
+  params: ProviderAwareQuoteParams,
+): ProviderAwareBatchQuoteResult {
+  const providerAddresses: Partial<Record<RouteKind, ProviderAddressPair>> = {};
+  for (const route of ROUTE_KINDS) {
+    if (params.snapshot.chainSupported[route] !== true) continue;
+    providerAddresses[route] = resolveProviderAddressPair(
+      params.sourceChain,
+      params.destinationChain,
+      params.symbol,
+      route,
+      params.providerAddressOverrides,
+    );
+  }
+  return {
+    quotes: quoteBatch(tiers, params),
+    providerAddresses: Object.freeze(providerAddresses),
+  };
 }

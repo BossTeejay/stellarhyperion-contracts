@@ -212,6 +212,8 @@ ITS route 1 delivers the seven-decimal Stellar USDC representation to Ethereum S
 
 The older October 1 deployment is archived under `deployments/archive/`. It is not the current app router. Records are validated with the protocol package's `parseDeploymentSet`; activation also reads deployed methods and code hashes rather than treating a JSON address as proof of availability.
 
+Provider token addresses can be recorded separately from an asset's canonical `address`/`sacId` and `decimals`. An optional token-level `providerAddresses` map in a deployment record is keyed by rail slug; its values are validated against that chain's address format, the token's enabled rails, and configured adapters. Existing canonical records need no changes. `providerAddressOverridesFromDeploymentSet` exposes those records in the endpoint-independent form; `parseProviderAddressOverrides` validates external chain → symbol → rail maps, and `resolveProviderAddressPair` requires an explicit address on both same-network endpoints with that provider capability. Quote helpers `planQuoteWithProviderAddresses` and `quoteBatchWithProviderAddresses` return the address metadata separately from quote amounts, so provider overrides never alter a declared chain or token precision. The protocol package continues to have zero runtime dependencies.
+
 ## Active fee routing and recovery
 
 The active Stellar router charges 30 basis points (0.3%) on outbound USDC and transfers the protocol fee to its configured treasury atomically with dispatch. Bridge forwarding, relay and Stellar network fees are separate provider/network costs. Other liquid Stellar assets are converted into canonical USDC by a separate frontend-signed transaction before bridging.

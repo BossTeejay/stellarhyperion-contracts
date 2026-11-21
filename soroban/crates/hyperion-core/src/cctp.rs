@@ -24,6 +24,16 @@ pub const BURN_MESSAGE_VERSION: u32 = 1;
 
 /// Finality threshold at or above which Circle considers a message finalised.
 pub const FINALITY_THRESHOLD_FINALIZED: u32 = 2000;
+/// The supported fast-transfer threshold. Selecting this requires a lane-level admin action.
+pub const FINALITY_THRESHOLD_FAST: u32 = 1000;
+
+/// Whether Circle must attest a finalized burn or may attest a fast burn.
+pub fn is_supported_finality_threshold(threshold: u32) -> bool {
+    matches!(
+        threshold,
+        FINALITY_THRESHOLD_FAST | FINALITY_THRESHOLD_FINALIZED
+    )
+}
 
 /// Minimum delay required before a proposed CCTP peer messenger rotation can become active (1 hour).
 ///
@@ -449,7 +459,7 @@ pub fn validate_burn_boundary(
     if max_fee < 0 || max_fee >= amount {
         return Err(HyperionError::FeeTooHigh);
     }
-    if min_finality_threshold == 0 || min_finality_threshold > FINALITY_THRESHOLD_FINALIZED {
+    if !is_supported_finality_threshold(min_finality_threshold) {
         return Err(HyperionError::InvalidLimit);
     }
     Ok(())
@@ -756,6 +766,11 @@ mod tests {
             validate_burn_boundary(1000, &dest, 10, 0),
             Err(HyperionError::InvalidLimit)
         );
+        assert_eq!(
+            validate_burn_boundary(1000, &dest, 10, 999),
+            Err(HyperionError::InvalidLimit)
+        );
+        assert!(validate_burn_boundary(1000, &dest, 10, FINALITY_THRESHOLD_FAST).is_ok());
     }
 
     #[test]

@@ -182,3 +182,27 @@ strkeys and is suitable for EVM-to-Stellar development comparisons; it does not 
 Stellar-to-EVM outbound quote interface. The active deployment remains Stellar Testnet outbound ITS/CCTP;
 EVM and other rail execution stays gated until independently validated. Confirm actual router quotes,
 network/token identities and provider costs through the applicable chain integration before execution.
+
+## Provider token addresses
+
+Deployment token records may include an optional `providerAddresses` object keyed by rail slug.
+These addresses are kept separate from the canonical token address and its declared decimals:
+
+```json
+{
+  "address": "0x...",
+  "decimals": 6,
+  "flowLimit": "1000000000",
+  "routes": ["cctp"],
+  "providerAddresses": { "cctp": "0x..." }
+}
+```
+
+`parseProviderAddressOverrides` validates external override data against known chains, asset
+capabilities, provider slugs, and the address format for each chain. Quote callers can use
+`resolveProviderAddressPair`, `planQuoteWithProviderAddresses`, or
+`quoteBatchWithProviderAddresses` to require both ends of a same-network route explicitly. Missing
+pairs and malformed values raise `ProviderAddressError` with the failing field path; canonical
+token addresses, chain identities, and precision are never inferred from or replaced by provider
+overrides. Older deployment records remain valid because the field is optional. Adding overrides
+is therefore data-only and requires no schema-version change.

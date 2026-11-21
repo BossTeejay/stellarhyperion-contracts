@@ -76,6 +76,7 @@ use types::{
     Config, DomainLink, HistoricalMessengerWindow, HistoricalTokenMessengerWindow,
     MessengerRotation, PeerMessengerRotation,
 };
+pub use types::{DispatchQuote, FinalityPolicy};
 
 /// Ceiling on `max_fee_bps`.
 ///
@@ -161,7 +162,7 @@ impl CctpAdapter {
         nonce: u64,
     ) -> Result<(), HyperionError> {
         caller.require_auth();
-        let (cfg, domain, _) = validate_dispatch(
+        let (cfg, domain, _, finality_threshold) = validate_dispatch(
             &env,
             &caller,
             amount,
@@ -170,11 +171,14 @@ impl CctpAdapter {
             None,
         )?;
 
-        let max_fee = amount
-            .checked_mul(i128::from(cfg.max_fee_bps))
-            .ok_or(HyperionError::DecimalOverflow)?
-            / BPS_DENOMINATOR;
-
+        let max_fee = if finality_threshold == cctp::FINALITY_THRESHOLD_FINALIZED {
+            0
+        } else {
+            amount
+                .checked_mul(i128::from(cfg.max_fee_bps))
+                .ok_or(HyperionError::DecimalOverflow)?
+                / BPS_DENOMINATOR
+        };
         let this = env.current_contract_address();
         let asset = token::Client::new(&env, &token);
         let allowance_before = open_approval(&env, &asset, &this, &cfg.token_messenger, amount)?;
@@ -187,7 +191,7 @@ impl CctpAdapter {
             &token,
             &storage::destination_caller(&env, domain),
             &max_fee,
-            &cfg.min_finality_threshold,
+            &finality_threshold,
         );
 
         close_approval(
@@ -205,7 +209,7 @@ impl CctpAdapter {
             amount,
             mint_recipient: destination,
             max_fee,
-            min_finality_threshold: cfg.min_finality_threshold,
+            min_finality_threshold: finality_threshold,
             router_nonce: nonce,
         }
         .publish(&env);
@@ -233,7 +237,7 @@ impl CctpAdapter {
     ) -> Result<(), HyperionError> {
         caller.require_auth();
         sender.require_auth();
-        let (cfg, domain, destination_caller) = validate_dispatch(
+        let (cfg, domain, destination_caller, finality_threshold) = validate_dispatch(
             &env,
             &caller,
             amount,
@@ -264,7 +268,7 @@ impl CctpAdapter {
             &token,
             &destination_caller,
             &gas_amount,
-            &cfg.min_finality_threshold,
+            &finality_threshold,
             &Bytes::from_array(&env, &hook),
         );
         close_approval(
@@ -281,7 +285,7 @@ impl CctpAdapter {
             amount,
             mint_recipient: destination,
             max_fee: gas_amount,
-            min_finality_threshold: cfg.min_finality_threshold,
+            min_finality_threshold: finality_threshold,
             router_nonce: nonce,
         }
         .publish(&env);
@@ -368,20 +372,18 @@ impl CctpAdapter {
 
         // Peer messenger validation on the source domain
         if let Some(active_peer) = storage::peer_messenger(&env, msg.source_domain) {
-            let is_current = burn.message_sender == active_peer || msg.sender == active_peer;
+            let is_current = msg.sender == active_peer;
             if !is_current {
                 let accepted_as_old = storage::old_peer_messenger(&env, msg.source_domain)
                     .map(|old_window| {
-                        (burn.message_sender == old_window.old_messenger
-                            || msg.sender == old_window.old_messenger)
+                        msg.sender == old_window.old_messenger
                             && env.ledger().timestamp() <= old_window.valid_until
                     })
                     .unwrap_or(false);
                 if !accepted_as_old {
                     if storage::old_peer_messenger(&env, msg.source_domain)
                         .map(|old_window| {
-                            (burn.message_sender == old_window.old_messenger
-                                || msg.sender == old_window.old_messenger)
+                            msg.sender == old_window.old_messenger
                                 && env.ledger().timestamp() > old_window.valid_until
                         })
                         .unwrap_or(false)
@@ -839,6 +841,9 @@ impl CctpAdapter {
     }
 
     /// Change how much Circle may charge and how final the source has to be.
+    /// Set the maximum fee budget and retain the finalized-only legacy policy.
+    ///
+    /// Fast finality is configured separately and explicitly for each linked lane.
     pub fn set_fee_policy(
         env: Env,
         max_fee_bps: u32,
@@ -848,17 +853,38 @@ impl CctpAdapter {
         if max_fee_bps > MAX_FEE_BPS_CEILING {
             return Err(HyperionError::FeeTooHigh);
         }
-        if min_finality_threshold == 0
-            || min_finality_threshold > cctp::FINALITY_THRESHOLD_FINALIZED
-        {
+        if min_finality_threshold != cctp::FINALITY_THRESHOLD_FINALIZED {
             return Err(HyperionError::InvalidLimit);
         }
         cfg.max_fee_bps = max_fee_bps;
-        cfg.min_finality_threshold = min_finality_threshold;
+        // Retain the legacy field at its safe value. Finality is selected per lane below.
+        cfg.min_finality_threshold = cctp::FINALITY_THRESHOLD_FINALIZED;
         storage::set_config(&env, &cfg);
         events::FeePolicySet {
             max_fee_bps,
             min_finality_threshold,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Explicitly select a supported finality level for a linked destination lane.
+    pub fn set_lane_finality_policy(
+        env: Env,
+        domain: u32,
+        policy: FinalityPolicy,
+    ) -> Result<(), HyperionError> {
+        let cfg = require_admin(&env)?;
+        if storage::chain_of(&env, domain).is_none() {
+            return Err(HyperionError::UnknownChain);
+        }
+        if policy == FinalityPolicy::Fast && cfg.max_fee_bps == 0 {
+            return Err(HyperionError::InvalidLimit);
+        }
+        storage::set_finality_policy(&env, domain, &policy);
+        events::LaneFinalityPolicySet {
+            domain,
+            min_finality_threshold: policy.threshold(),
         }
         .publish(&env);
         Ok(())
@@ -900,6 +926,43 @@ impl CctpAdapter {
             chain,
             domain,
             destination_caller: storage::destination_caller(&env, domain),
+        })
+    }
+
+    /// Report the effective fee and finality policy for a destination quote.
+    pub fn quote_dispatch(
+        env: Env,
+        chain: String,
+        amount: i128,
+    ) -> Result<DispatchQuote, HyperionError> {
+        if amount <= 0 {
+            return Err(HyperionError::InvalidAmount);
+        }
+        let cfg = storage::config(&env)?;
+        if cfg.max_fee_bps > MAX_FEE_BPS_CEILING {
+            return Err(HyperionError::FeeTooHigh);
+        }
+        let destination_domain =
+            storage::domain_of(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        let min_finality_threshold = storage::finality_policy(&env, destination_domain).threshold();
+        if min_finality_threshold == cctp::FINALITY_THRESHOLD_FAST && cfg.max_fee_bps == 0 {
+            return Err(HyperionError::InvalidLimit);
+        }
+        let max_fee = if min_finality_threshold == cctp::FINALITY_THRESHOLD_FINALIZED {
+            0
+        } else {
+            amount
+                .checked_mul(i128::from(cfg.max_fee_bps))
+                .ok_or(HyperionError::DecimalOverflow)?
+                / BPS_DENOMINATOR
+        };
+        if min_finality_threshold == cctp::FINALITY_THRESHOLD_FAST && max_fee == 0 {
+            return Err(HyperionError::InvalidLimit);
+        }
+        Ok(DispatchQuote {
+            destination_domain,
+            max_fee,
+            min_finality_threshold,
         })
     }
 
@@ -956,10 +1019,14 @@ impl CctpAdapter {
     }
 
     /// What Circle would be allowed to charge for a transfer of this size right now.
+    /// Generic fee-budget calculation. Prefer `quote_dispatch` for a lane-aware quote.
     pub fn quote_max_fee(env: Env, amount: i128) -> Result<i128, HyperionError> {
         let cfg = storage::config(&env)?;
         if amount <= 0 {
             return Err(HyperionError::InvalidAmount);
+        }
+        if cfg.max_fee_bps > MAX_FEE_BPS_CEILING {
+            return Err(HyperionError::FeeTooHigh);
         }
         Ok(amount
             .checked_mul(i128::from(cfg.max_fee_bps))
@@ -1109,10 +1176,13 @@ fn validate_dispatch(
     chain: &String,
     destination: &BytesN<32>,
     gas_amount: Option<i128>,
-) -> Result<(Config, u32, BytesN<32>), HyperionError> {
+) -> Result<(Config, u32, BytesN<32>, u32), HyperionError> {
     let cfg = storage::config(env)?;
     if caller != &cfg.router {
         return Err(HyperionError::Unauthorized);
+    }
+    if cfg.max_fee_bps > MAX_FEE_BPS_CEILING {
+        return Err(HyperionError::FeeTooHigh);
     }
     if amount <= 0 || gas_amount.is_some_and(|gas| gas <= 0 || gas >= amount) {
         return Err(HyperionError::InvalidAmount);
@@ -1120,6 +1190,10 @@ fn validate_dispatch(
     let domain = storage::domain_of(env, chain).ok_or(HyperionError::UnknownChain)?;
     if storage::is_domain_disabled(env, domain) {
         return Err(HyperionError::RouteDisabled);
+    }
+    let finality_threshold = storage::finality_policy(env, domain).threshold();
+    if finality_threshold == cctp::FINALITY_THRESHOLD_FAST && cfg.max_fee_bps == 0 {
+        return Err(HyperionError::InvalidLimit);
     }
     let zero = BytesN::from_array(env, &[0u8; 32]);
     if destination == &zero {
@@ -1131,6 +1205,7 @@ fn validate_dispatch(
     }
     let max_fee = match gas_amount {
         Some(gas) => gas,
+        None if finality_threshold == cctp::FINALITY_THRESHOLD_FINALIZED => 0,
         None => {
             amount
                 .checked_mul(i128::from(cfg.max_fee_bps))
@@ -1138,6 +1213,9 @@ fn validate_dispatch(
                 / BPS_DENOMINATOR
         }
     };
-    cctp::validate_burn_boundary(amount, destination, max_fee, cfg.min_finality_threshold)?;
-    Ok((cfg, domain, destination_caller))
+    if finality_threshold == cctp::FINALITY_THRESHOLD_FAST && max_fee == 0 {
+        return Err(HyperionError::InvalidLimit);
+    }
+    cctp::validate_burn_boundary(amount, destination, max_fee, finality_threshold)?;
+    Ok((cfg, domain, destination_caller, finality_threshold))
 }
