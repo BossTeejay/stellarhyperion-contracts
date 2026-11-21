@@ -23,6 +23,7 @@ import {
     Unauthorized,
     UnexpectedRailContract,
     UnknownChain,
+    UnsupportedHookVersion,
     ZeroAddress
 } from "../HyperionErrors.sol";
 import {AddressKind, Destination, Origin, RouteKind} from "../HyperionTypes.sol";
@@ -133,6 +134,7 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     mapping(string axelarChain => bool retired) private _retiredAxelarNames;
     mapping(string chain => Peer peer) private _peers;
     mapping(string chain => PeerRotation) private _pendingRotations;
+    mapping(string chain => uint8 version) private _requiredNoteVersions;
 
     /// @dev Reverse lookup, so an inbound delivery can check the chain it names against the peer
     /// that is allowed to speak for it without the caller telling us which key to look under.
@@ -152,6 +154,9 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
 
     /// @notice A chain was turned on or off.
     event PeerEnabled(string chain, bool enabled);
+
+    /// @notice Minimum Hyperion note version required by a destination.
+    event NoteVersionRequirementSet(string indexed chain, uint8 requiredVersion);
 
     /// @notice A peer rotation was proposed.
     event PeerRotationQueued(string indexed chain, bytes currentPeer, bytes newPeer, uint64 eta);
@@ -307,6 +312,8 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         address sender
     ) private returns (bytes32) {
         (Peer memory peer, bytes32 tokenId, AddressKind kind) = _dispatchPlan(token, amount, destination);
+        uint8 noteVersion = HyperionNotes.negotiateNoteVersion(requiredNoteVersion(destination.chain));
+        if (noteVersion != 1) revert UnsupportedHookVersion();
         bytes memory note = HyperionNotes.encodeInboundNote(kind, destination.strkey, nonce);
         bytes32 destinationBinding =
             keccak256(abi.encode(destination.chain, destination.strkey, peer.axelarChain, peer.peer));
@@ -508,6 +515,22 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         emit PeerEnabled(chain, enabled);
     }
 
+    /// @notice Set the minimum note version a destination requires.
+    /// @dev An unavailable version remains a hard dispatch blocker until a compatible codec is
+    /// implemented; it is never downgraded to v1.
+    function setRequiredNoteVersion(string calldata chain, uint8 requiredVersion) external onlyOwner {
+        if (!_peers[chain].configured) revert UnknownChain();
+        if (requiredVersion == 0) revert InvalidAmount();
+        _requiredNoteVersions[chain] = requiredVersion;
+        emit NoteVersionRequirementSet(chain, requiredVersion);
+    }
+
+    /// @notice The destination's minimum note version; legacy peers default to v1.
+    function requiredNoteVersion(string calldata chain) public view returns (uint8) {
+        uint8 version = _requiredNoteVersions[chain];
+        return version == 0 ? 1 : version;
+    }
+
     /// @notice Propose a rotation of the trusted peer contract on a remote chain.
     /// @param chain The Hyperion chain name.
     /// @param newPeer The new peer address (wire format).
@@ -607,6 +630,24 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
     /// @notice Hyperion's own name for whatever Axelar calls a chain.
     function chainForAxelarName(string calldata axelarChain) external view returns (string memory) {
         return _byAxelarName[axelarChain];
+    }
+
+    /// @notice Read-only inspection of an Axelar outbound note payload.
+    function inspectOutboundNote(bytes calldata payload)
+        external
+        pure
+        returns (address recipient, uint64 nonce)
+    {
+        return HyperionNotes.decodeOutboundNote(payload);
+    }
+
+    /// @notice Read-only inspection of an Axelar inbound note payload.
+    function inspectInboundNote(bytes calldata payload)
+        external
+        pure
+        returns (AddressKind kind, string memory strkey, uint64 nonce)
+    {
+        return HyperionNotes.decodeInboundNote(payload);
     }
 
     /// @dev Reject empty or all-zero wire addresses without narrowing chain-specific formats.

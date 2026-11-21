@@ -297,6 +297,59 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "inspectInboundNote",
+    "inputs": [
+      {
+        "name": "payload",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "kind",
+        "type": "uint8",
+        "internalType": "enum AddressKind"
+      },
+      {
+        "name": "strkey",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "nonce",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "inspectOutboundNote",
+    "inputs": [
+      {
+        "name": "payload",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "recipient",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "nonce",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
     "name": "ITS",
     "inputs": [],
     "outputs": [
@@ -537,6 +590,25 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "requiredNoteVersion",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "route",
     "inputs": [],
     "outputs": [
@@ -597,6 +669,24 @@ export const axelarItsAdapterAbi = [
         "name": "enabled",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setRequiredNoteVersion",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "requiredVersion",
+        "type": "uint8",
+        "internalType": "uint8"
       }
     ],
     "outputs": [],
@@ -843,62 +933,19 @@ export const axelarItsAdapterAbi = [
   },
   {
     "type": "event",
-    "name": "GasToppedUp",
+    "name": "NoteVersionRequirementSet",
     "inputs": [
       {
-        "name": "intentId",
-        "type": "bytes32",
+        "name": "chain",
+        "type": "string",
         "indexed": true,
-        "internalType": "bytes32"
+        "internalType": "string"
       },
       {
-        "name": "amount",
-        "type": "uint256",
+        "name": "requiredVersion",
+        "type": "uint8",
         "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "totalSpent",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "GasTopUpBound",
-    "inputs": [
-      {
-        "name": "intentId",
-        "type": "bytes32",
-        "indexed": true,
-        "internalType": "bytes32"
-      },
-      {
-        "name": "txHash",
-        "type": "bytes32",
-        "indexed": true,
-        "internalType": "bytes32"
-      },
-      {
-        "name": "logIndex",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "refundAddress",
-        "type": "address",
-        "indexed": false,
-        "internalType": "address"
-      },
-      {
-        "name": "maxNativeSpend",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
+        "internalType": "uint8"
       }
     ],
     "anonymous": false

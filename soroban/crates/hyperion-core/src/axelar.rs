@@ -17,7 +17,7 @@
 //! and it lets an indexer say *this delivery is that transfer* rather than guessing from amounts
 //! and timestamps.
 
-use soroban_sdk::{Bytes, BytesN, Env};
+use soroban_sdk::{contracttype, Bytes, BytesN, Env, String};
 
 use crate::error::HyperionError;
 use crate::strkey::StrkeyDestination;
@@ -27,6 +27,28 @@ use crate::strkey::StrkeyDestination;
 /// Shared with [`crate::cctp::HOOK_VERSION`] on purpose. Two rails, one envelope version, so a
 /// reader never has to remember which rail numbers its payloads differently from the other.
 pub const NOTE_VERSION: u8 = 1;
+pub const NOTE_VERSION_V1: u8 = NOTE_VERSION;
+pub const SUPPORTED_NOTE_VERSIONS: [u8; 1] = [NOTE_VERSION_V1];
+
+/// Whether this build has a decoder and encoder for a note version.
+pub fn supports_note_version(version: u8) -> bool {
+    matches!(version, NOTE_VERSION_V1)
+}
+
+/// Negotiate a version without falling below the destination's declared minimum.
+pub fn negotiate_note_version(
+    required_version: u8,
+    local_versions: &[u8],
+    destination_versions: &[u8],
+) -> Result<u8, HyperionError> {
+    local_versions
+        .iter()
+        .copied()
+        .filter(|version| *version >= required_version && supports_note_version(*version))
+        .filter(|version| destination_versions.contains(version))
+        .max()
+        .ok_or(HyperionError::UnsupportedHookVersion)
+}
 
 /// Minimum delay required before a proposed peer rotation can become active.
 ///
@@ -49,6 +71,7 @@ const NONCE_LEN: u32 = 8;
 /// Wire form is `[version][20 byte recipient][8 byte big-endian nonce]`, packed rather than ABI
 /// encoded. The consumer is one Solidity function reading three fixed slices, and a packed
 /// layout is both cheaper for it and something this crate can write without an ABI encoder.
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboundNote {
     /// Who the tokens are for once they arrive.
@@ -79,11 +102,16 @@ impl OutboundNote {
     /// nobody can prove round trips, and this one has to agree with a Solidity reader byte for
     /// byte.
     pub fn decode(env: &Env, raw: &Bytes) -> Result<Self, HyperionError> {
+        let version = raw.get(0).ok_or(HyperionError::MalformedMessage)?;
+        match version {
+            NOTE_VERSION_V1 => Self::decode_v1(env, raw),
+            _ => Err(HyperionError::UnsupportedHookVersion),
+        }
+    }
+
+    fn decode_v1(env: &Env, raw: &Bytes) -> Result<Self, HyperionError> {
         if raw.len() != OUTBOUND_NOTE_LEN {
             return Err(HyperionError::MalformedMessage);
-        }
-        if raw.get(0).ok_or(HyperionError::MalformedMessage)? != NOTE_VERSION {
-            return Err(HyperionError::UnsupportedHookVersion);
         }
         let mut address = [0u8; 20];
         let mut i = 0u32;
@@ -108,6 +136,7 @@ impl OutboundNote {
 /// is exactly what [`StrkeyDestination::encode`] produces. Variable length, because a muxed
 /// strkey is thirteen characters longer than a plain one, and the length byte inside the
 /// destination is what says which.
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InboundNote {
     /// Where the tokens go once the adapter has handed them to the router.
@@ -135,11 +164,16 @@ impl InboundNote {
     /// refuses one: a payload we cannot read is a destination we would be guessing at, and
     /// guessing here means paying the wrong person.
     pub fn decode(env: &Env, raw: &Bytes) -> Result<Self, HyperionError> {
+        let version = raw.get(0).ok_or(HyperionError::MalformedMessage)?;
+        match version {
+            NOTE_VERSION_V1 => Self::decode_v1(env, raw),
+            _ => Err(HyperionError::UnsupportedHookVersion),
+        }
+    }
+
+    fn decode_v1(env: &Env, raw: &Bytes) -> Result<Self, HyperionError> {
         if raw.len() < INBOUND_NOTE_MIN {
             return Err(HyperionError::MalformedMessage);
-        }
-        if raw.get(0).ok_or(HyperionError::MalformedMessage)? != NOTE_VERSION {
-            return Err(HyperionError::UnsupportedHookVersion);
         }
         let nonce = read_nonce(raw, raw.len() - NONCE_LEN)?;
         let destination = StrkeyDestination::decode(env, &raw.slice(1..raw.len() - NONCE_LEN))?;
@@ -150,6 +184,135 @@ impl InboundNote {
     pub fn needs_trustline(&self) -> bool {
         self.destination.kind.needs_trustline()
     }
+}
+
+/// Discrepancy identified during Axelar note-to-payment reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconciliationDiscrepancy {
+    /// The recipient identified in the source note disagrees with the candidate payment recipient.
+    RecipientMismatch,
+    /// The Axelar token ID in the source dispatch disagrees with the candidate payment token ID.
+    TokenIdMismatch,
+    /// The integer amount dispatched disagrees with the candidate payment amount.
+    AmountMismatch,
+    /// Full command identity is missing, empty or malformed on the source or candidate receipt.
+    CommandIdentityMissing,
+    /// The complete source identity differs from the destination receipt identity.
+    CommandIdentityMismatch,
+    /// Amounts must be positive; matching invalid values do not establish a payment.
+    InvalidAmount,
+    /// An absent source token binding cannot establish agreement.
+    InvalidTokenIdentity,
+}
+
+/// Candidate ITS payment receipt for an outbound transfer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidatePayment {
+    /// Candidate command identity; equality is development evidence, never proof of execution.
+    pub command_id: BytesN<32>,
+    /// Token ID delivered.
+    pub token_id: BytesN<32>,
+    /// Exact integer amount delivered.
+    pub amount: i128,
+    /// Final recipient address on the destination chain.
+    pub recipient: BytesN<20>,
+}
+
+/// Candidate ITS payment receipt arriving on Stellar.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateInboundPayment {
+    /// Axelar command / message identifier.
+    pub message_id: String,
+    /// Token ID delivered.
+    pub token_id: BytesN<32>,
+    /// Exact integer amount delivered.
+    pub amount: i128,
+    /// Final destination strkey on Stellar.
+    pub recipient: StrkeyDestination,
+}
+
+/// Verify that an outbound note's intent and an ITS destination payment agree exactly.
+///
+/// Acceptance criteria:
+/// - Recipient, token ID, amount and full command identity must all agree.
+/// - Returns Err with specific discrepancy if any field differs or command identity is missing.
+/// - Does not rely on the display nonce for verification correctness.
+///
+/// This compares supplied development evidence; it does not authenticate an event, verify finality,
+/// authorize a dispatch or establish that the destination executed a payment.
+pub fn verify_outbound_reconciliation(
+    note: &OutboundNote,
+    dispatched_token_id: &BytesN<32>,
+    dispatched_amount: i128,
+    expected_command_id: &BytesN<32>,
+    candidate: &CandidatePayment,
+) -> Result<(), ReconciliationDiscrepancy> {
+    let empty_id = BytesN::from_array(candidate.token_id.env(), &[0u8; 32]);
+    if expected_command_id == &empty_id || candidate.command_id == empty_id {
+        return Err(ReconciliationDiscrepancy::CommandIdentityMissing);
+    }
+    if expected_command_id != &candidate.command_id {
+        return Err(ReconciliationDiscrepancy::CommandIdentityMismatch);
+    }
+    if dispatched_amount <= 0 || candidate.amount <= 0 {
+        return Err(ReconciliationDiscrepancy::InvalidAmount);
+    }
+    if dispatched_token_id == &empty_id {
+        return Err(ReconciliationDiscrepancy::InvalidTokenIdentity);
+    }
+    if note.recipient != candidate.recipient {
+        return Err(ReconciliationDiscrepancy::RecipientMismatch);
+    }
+    if dispatched_token_id != &candidate.token_id {
+        return Err(ReconciliationDiscrepancy::TokenIdMismatch);
+    }
+    if dispatched_amount != candidate.amount {
+        return Err(ReconciliationDiscrepancy::AmountMismatch);
+    }
+    Ok(())
+}
+
+/// Verify that an inbound note's intent and an ITS destination payment agree exactly.
+pub fn verify_inbound_reconciliation(
+    note: &InboundNote,
+    dispatched_token_id: &BytesN<32>,
+    dispatched_amount: i128,
+    expected_message_id: &String,
+    candidate: &CandidateInboundPayment,
+) -> Result<(), ReconciliationDiscrepancy> {
+    if !valid_message_identity(expected_message_id)
+        || !valid_message_identity(&candidate.message_id)
+    {
+        return Err(ReconciliationDiscrepancy::CommandIdentityMissing);
+    }
+    if expected_message_id != &candidate.message_id {
+        return Err(ReconciliationDiscrepancy::CommandIdentityMismatch);
+    }
+    if dispatched_amount <= 0 || candidate.amount <= 0 {
+        return Err(ReconciliationDiscrepancy::InvalidAmount);
+    }
+    if dispatched_token_id == &BytesN::from_array(dispatched_token_id.env(), &[0; 32]) {
+        return Err(ReconciliationDiscrepancy::InvalidTokenIdentity);
+    }
+    if note.destination != candidate.recipient {
+        return Err(ReconciliationDiscrepancy::RecipientMismatch);
+    }
+    if dispatched_token_id != &candidate.token_id {
+        return Err(ReconciliationDiscrepancy::TokenIdMismatch);
+    }
+    if dispatched_amount != candidate.amount {
+        return Err(ReconciliationDiscrepancy::AmountMismatch);
+    }
+    Ok(())
+}
+
+/// Bound opaque message identities consistently with the development CLI and SDK.
+fn valid_message_identity(identity: &String) -> bool {
+    if identity.is_empty() || identity.len() > 512 {
+        return false;
+    }
+    let bytes = identity.to_bytes();
+    (0..bytes.len()).all(|index| matches!(bytes.get(index), Some(0x21..=0x7e)))
 }
 
 /// Eight big-endian bytes starting at `offset`.
@@ -358,6 +521,167 @@ mod tests {
         // One envelope version across both rails. If these ever diverge it should be because
         // somebody changed one deliberately, and this is the test that makes them notice.
         assert_eq!(NOTE_VERSION, crate::cctp::HOOK_VERSION);
+    }
+
+    #[test]
+    fn outbound_reconciliation_verifies_on_exact_match() {
+        let env = Env::default();
+        let note = OutboundNote::new(evm(&env, 0x01), 42);
+        let token_id = BytesN::from_array(&env, &[0xAAu8; 32]);
+        let amount = 10_000_000i128;
+        let command_id = BytesN::from_array(&env, &[0x55u8; 32]);
+
+        let candidate = CandidatePayment {
+            command_id: command_id.clone(),
+            token_id: token_id.clone(),
+            amount,
+            recipient: evm(&env, 0x01),
+        };
+
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn outbound_reconciliation_detects_mismatches() {
+        let env = Env::default();
+        let note = OutboundNote::new(evm(&env, 0x01), 42);
+        let token_id = BytesN::from_array(&env, &[0xAAu8; 32]);
+        let amount = 10_000_000i128;
+        let command_id = BytesN::from_array(&env, &[0x55u8; 32]);
+
+        // Recipient mismatch
+        let mut candidate = CandidatePayment {
+            command_id: command_id.clone(),
+            token_id: token_id.clone(),
+            amount,
+            recipient: evm(&env, 0x02),
+        };
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
+            Err(ReconciliationDiscrepancy::RecipientMismatch)
+        );
+
+        // Token ID mismatch
+        candidate.recipient = evm(&env, 0x01);
+        candidate.token_id = BytesN::from_array(&env, &[0xBBu8; 32]);
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
+            Err(ReconciliationDiscrepancy::TokenIdMismatch)
+        );
+
+        // Amount mismatch
+        candidate.token_id = token_id.clone();
+        candidate.amount = 9_999_999i128;
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
+            Err(ReconciliationDiscrepancy::AmountMismatch)
+        );
+
+        // A nonempty destination identity still cannot establish the source command.
+        candidate.amount = amount;
+        candidate.command_id = BytesN::from_array(&env, &[0x66; 32]);
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
+            Err(ReconciliationDiscrepancy::CommandIdentityMismatch)
+        );
+        candidate.command_id = command_id.clone();
+        candidate.amount = -1;
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token_id, -1, &command_id, &candidate),
+            Err(ReconciliationDiscrepancy::InvalidAmount)
+        );
+
+        // Missing command ID
+        candidate.amount = amount;
+        candidate.command_id = BytesN::from_array(&env, &[0u8; 32]);
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token_id, amount, &command_id, &candidate),
+            Err(ReconciliationDiscrepancy::CommandIdentityMissing)
+        );
+    }
+
+    #[test]
+    fn inbound_reconciliation_verifies_and_detects_mismatches() {
+        let env = Env::default();
+        let note = inbound(&env, AddressKind::Account, G_ADDR, 99);
+        let token_id = BytesN::from_array(&env, &[0xAAu8; 32]);
+        let amount = 5_000_000i128;
+        let message_id = String::from_str(&env, "0xfeed-1");
+
+        let candidate = CandidateInboundPayment {
+            message_id: message_id.clone(),
+            token_id: token_id.clone(),
+            amount,
+            recipient: StrkeyDestination::new(AddressKind::Account, String::from_str(&env, G_ADDR)),
+        };
+
+        assert_eq!(
+            verify_inbound_reconciliation(&note, &token_id, amount, &message_id, &candidate),
+            Ok(())
+        );
+
+        let wrong_source_id = String::from_str(&env, "different-complete-source-id");
+        assert_eq!(
+            verify_inbound_reconciliation(&note, &token_id, amount, &wrong_source_id, &candidate),
+            Err(ReconciliationDiscrepancy::CommandIdentityMismatch)
+        );
+
+        // Missing message ID
+        let empty_candidate = CandidateInboundPayment {
+            message_id: String::from_str(&env, ""),
+            token_id: token_id.clone(),
+            amount,
+            recipient: candidate.recipient.clone(),
+        };
+        assert_eq!(
+            verify_inbound_reconciliation(&note, &token_id, amount, &message_id, &empty_candidate),
+            Err(ReconciliationDiscrepancy::CommandIdentityMissing)
+        );
+    }
+
+    #[test]
+    fn reconciliation_requires_source_binding_and_positive_amounts() {
+        let env = Env::default();
+        let note = OutboundNote::new(evm(&env, 1), 42);
+        let token = BytesN::from_array(&env, &[0xaa; 32]);
+        let command = BytesN::from_array(&env, &[0x55; 32]);
+        let empty = BytesN::from_array(&env, &[0; 32]);
+        let candidate = CandidatePayment {
+            command_id: command.clone(),
+            token_id: token.clone(),
+            amount: 1,
+            recipient: note.recipient.clone(),
+        };
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token, 1, &empty, &candidate),
+            Err(ReconciliationDiscrepancy::CommandIdentityMissing)
+        );
+        let empty_token_candidate = CandidatePayment {
+            token_id: empty.clone(),
+            ..candidate.clone()
+        };
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &empty, 1, &command, &empty_token_candidate),
+            Err(ReconciliationDiscrepancy::InvalidTokenIdentity)
+        );
+        let zero_candidate = CandidatePayment {
+            amount: 0,
+            ..candidate
+        };
+        assert_eq!(
+            verify_outbound_reconciliation(&note, &token, 0, &command, &zero_candidate),
+            Err(ReconciliationDiscrepancy::InvalidAmount)
+        );
+        for invalid in ["", " ", "ethereum-transaction-17\n"] {
+            assert!(!valid_message_identity(&String::from_str(&env, invalid)));
+        }
+        assert!(valid_message_identity(&String::from_str(
+            &env,
+            "ethereum-transaction-17"
+        )));
     }
 
     #[test]
