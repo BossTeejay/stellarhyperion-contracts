@@ -1021,7 +1021,6 @@ struct OutboundPlan {
     adapter_addr: Address,
 }
 
-#[inline(never)]
 fn plan_outbound(
     env: &Env,
     request: &OutboundRequest,
@@ -1116,7 +1115,6 @@ fn plan_outbound(
     })
 }
 
-#[inline(never)]
 fn bounded_plan(
     env: &Env,
     request: &OutboundRequest,
@@ -1165,7 +1163,6 @@ fn bounded_plan(
     }
 }
 
-#[inline(never)]
 fn bridge_out_inner(
     env: Env,
     sender: Address,
