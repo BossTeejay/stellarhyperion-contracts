@@ -64,7 +64,8 @@ describe("dated snapshot comparison", () => {
     for (const row of output) {
       expect(row.status).toBe(SnapshotStatus.Fresh);
       expect(row.quotes.map((q) => q.route)).toEqual(ROUTE_KINDS);
-      expect(row.quote!.route).toBe(RouteKind.AxelarIts);
+      // CCTP and ITS both await attestation; enum order resolves this complete tie.
+      expect(row.quote!.route).toBe(RouteKind.Cctp);
       expect(row.planningOnly).toBe(true);
     }
   });
