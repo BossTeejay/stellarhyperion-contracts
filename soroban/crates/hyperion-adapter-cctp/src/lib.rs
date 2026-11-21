@@ -69,8 +69,8 @@ use soroban_sdk::{
 };
 
 use rail::{MessageTransmitterClient, TokenMessengerClient};
-pub use types::{DispatchQuote, FinalityPolicy};
 use types::{Config, DomainLink};
+pub use types::{DispatchQuote, FinalityPolicy};
 
 /// Ceiling on `max_fee_bps`.
 ///
@@ -673,10 +673,12 @@ impl CctpAdapter {
             return Err(HyperionError::InvalidAmount);
         }
         let cfg = storage::config(&env)?;
+        if cfg.max_fee_bps > MAX_FEE_BPS_CEILING {
+            return Err(HyperionError::FeeTooHigh);
+        }
         let destination_domain =
             storage::domain_of(&env, &chain).ok_or(HyperionError::UnknownChain)?;
-        let min_finality_threshold =
-            storage::finality_policy(&env, destination_domain).threshold();
+        let min_finality_threshold = storage::finality_policy(&env, destination_domain).threshold();
         if min_finality_threshold == cctp::FINALITY_THRESHOLD_FAST && cfg.max_fee_bps == 0 {
             return Err(HyperionError::InvalidLimit);
         }
@@ -715,6 +717,9 @@ impl CctpAdapter {
         let cfg = storage::config(&env)?;
         if amount <= 0 {
             return Err(HyperionError::InvalidAmount);
+        }
+        if cfg.max_fee_bps > MAX_FEE_BPS_CEILING {
+            return Err(HyperionError::FeeTooHigh);
         }
         Ok(amount
             .checked_mul(i128::from(cfg.max_fee_bps))
@@ -877,6 +882,9 @@ fn validate_dispatch(
     let cfg = storage::config(env)?;
     if caller != &cfg.router {
         return Err(HyperionError::Unauthorized);
+    }
+    if cfg.max_fee_bps > MAX_FEE_BPS_CEILING {
+        return Err(HyperionError::FeeTooHigh);
     }
     if amount <= 0 || gas_amount.is_some_and(|gas| gas <= 0 || gas >= amount) {
         return Err(HyperionError::InvalidAmount);

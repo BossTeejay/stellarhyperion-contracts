@@ -60,12 +60,7 @@ export type Asset = EvmAsset | StellarAsset;
 
 /** Explicit provider-side token addresses, kept separate from canonical asset metadata. */
 export type ProviderAddressOverrides = Readonly<
-  Partial<
-    Record<
-      ChainKey,
-      Readonly<Record<string, Partial<Record<RouteKindType, string>>>>
-    >
-  >
+  Partial<Record<ChainKey, Readonly<Record<string, Partial<Record<RouteKindType, string>>>>>>
 >;
 
 export interface ProviderAddressPair {
@@ -96,10 +91,7 @@ function providerAddress(value: unknown, path: string, chainKey: ChainKey): stri
   if (network.family === "evm" && !/^0x[0-9a-fA-F]{40}$/.test(value)) {
     throw new ProviderAddressError(path, "expected a 20 byte EVM address");
   }
-  if (
-    network.family === "stellar" &&
-    (!value.startsWith("C") || !isStellarAddress(value))
-  ) {
+  if (network.family === "stellar" && (!value.startsWith("C") || !isStellarAddress(value))) {
     throw new ProviderAddressError(path, "expected a Stellar contract id");
   }
   return value;
@@ -115,9 +107,8 @@ export function parseProviderAddressOverrides(value: unknown): ProviderAddressOv
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new ProviderAddressError("$", "expected an object keyed by chain");
   }
-  const output: Partial<
-    Record<ChainKey, Record<string, Partial<Record<RouteKindType, string>>>>
-  > = {};
+  const output: Partial<Record<ChainKey, Record<string, Partial<Record<RouteKindType, string>>>>> =
+    {};
   for (const [chainName, chainValue] of Object.entries(value)) {
     const chainPath = `$.${chainName}`;
     if (!isChainKey(chainName)) throw new ProviderAddressError(chainPath, "unknown chain key");
@@ -125,7 +116,7 @@ export function parseProviderAddressOverrides(value: unknown): ProviderAddressOv
       throw new ProviderAddressError(chainPath, "expected an object keyed by asset symbol");
     }
     const chainOverrides: Record<string, Partial<Record<RouteKindType, string>>> = {};
-    for (const [symbol, symbolValue] of Object.entries(chainValue)) {
+    for (const [symbol, symbolValue] of Object.entries(chainValue as Record<string, unknown>)) {
       const symbolPath = `${chainPath}.${symbol}`;
       const asset = assetOn(chainName, symbol);
       if (asset === null) throw new ProviderAddressError(symbolPath, "unknown asset on chain");
@@ -133,7 +124,7 @@ export function parseProviderAddressOverrides(value: unknown): ProviderAddressOv
         throw new ProviderAddressError(symbolPath, "expected an object keyed by provider rail");
       }
       const routeOverrides: Partial<Record<RouteKindType, string>> = {};
-      for (const [slug, addressValue] of Object.entries(symbolValue)) {
+      for (const [slug, addressValue] of Object.entries(symbolValue as Record<string, unknown>)) {
         const path = `${symbolPath}.${slug}`;
         const route = tryRouteFromSlug(slug);
         if (route === null) throw new ProviderAddressError(path, "unknown provider rail slug");
@@ -171,12 +162,15 @@ export function resolveProviderAddressPair(
     );
   }
   const sourceAsset = assetOn(sourceChain, symbol);
-  if (sourceAsset === null || !sourceAsset.routes.includes(route)) {
+  if (!sourceAsset?.routes.includes(route)) {
     throw new ProviderAddressError("sourceChain", "asset or provider capability is unavailable");
   }
   const destinationAsset = assetOn(destinationChain, symbol);
-  if (destinationAsset === null || !destinationAsset.routes.includes(route)) {
-    throw new ProviderAddressError("destinationChain", "asset or provider capability is unavailable");
+  if (!destinationAsset?.routes.includes(route)) {
+    throw new ProviderAddressError(
+      "destinationChain",
+      "asset or provider capability is unavailable",
+    );
   }
   const source = overrides[sourceChain]?.[symbol]?.[route];
   if (source === undefined) {

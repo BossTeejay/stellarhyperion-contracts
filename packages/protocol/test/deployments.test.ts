@@ -122,7 +122,11 @@ describe("reading a record that holds together", () => {
         }),
       }),
     );
-    const token = tokenFor(parsed, "base", "USDC");
+    const deployment = parsed.networks.base;
+    if (deployment === undefined || !isEvmDeployment(deployment)) {
+      throw new Error("expected an EVM Base deployment");
+    }
+    const token = deployment.tokens.USDC;
     expect(token?.address).toBe("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
     expect(token?.decimals).toBe(6);
     expect(token?.providerAddresses?.[RouteKind.Cctp]).toBe(

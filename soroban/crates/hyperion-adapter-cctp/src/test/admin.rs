@@ -239,7 +239,8 @@ fn a_finality_threshold_outside_circles_range_is_refused() {
     );
     w.adapter()
         .set_fee_policy(&0, &cctp::FINALITY_THRESHOLD_FINALIZED);
-    w.adapter().set_fee_policy(&5, &cctp::FINALITY_THRESHOLD_FINALIZED);
+    w.adapter()
+        .set_fee_policy(&5, &cctp::FINALITY_THRESHOLD_FINALIZED);
     w.adapter()
         .set_lane_finality_policy(&ETHEREUM_DOMAIN, &FinalityPolicy::Fast);
     assert_eq!(
@@ -253,10 +254,8 @@ fn a_finality_threshold_outside_circles_range_is_refused() {
         50
     );
     assert_eq!(
-        w.adapter().try_set_lane_finality_policy(
-            &UNLINKED_DOMAIN,
-            &FinalityPolicy::Fast
-        ),
+        w.adapter()
+            .try_set_lane_finality_policy(&UNLINKED_DOMAIN, &FinalityPolicy::Fast),
         Err(Ok(HyperionError::UnknownChain))
     );
 }

@@ -440,12 +440,15 @@ export function deployedChains(set: DeploymentSet): readonly ChainKey[] {
 export function providerAddressOverridesFromDeploymentSet(
   set: DeploymentSet,
 ): ProviderAddressOverrides {
-  const overrides: Partial<
-    Record<ChainKey, Record<string, Partial<Record<RouteKind, string>>>>
-  > = {};
-  for (const [chainName, deployment] of Object.entries(set.networks)) {
-    if (deployment === undefined || !isChainKey(chainName)) continue;
-    for (const [symbol, token] of Object.entries(deployment.tokens)) {
+  const overrides: Partial<Record<ChainKey, Record<string, Partial<Record<RouteKind, string>>>>> =
+    {};
+  for (const chainName of Object.keys(set.networks)) {
+    if (!isChainKey(chainName)) continue;
+    const deployment = set.networks[chainName];
+    if (deployment === undefined) continue;
+    for (const symbol of Object.keys(deployment.tokens)) {
+      const token = deployment.tokens[symbol];
+      if (token === undefined) continue;
       if (token.providerAddresses === undefined) continue;
       const bySymbol = (overrides[chainName] ??= {});
       bySymbol[symbol] = token.providerAddresses;

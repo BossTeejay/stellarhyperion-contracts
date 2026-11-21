@@ -53,13 +53,9 @@ describe("provider address overrides", () => {
     });
 
     expect(parsed["stellar-testnet"]?.USDC?.[RouteKind.Cctp]).toBe(C_ADDR);
-    expect(resolveProviderAddressPair(
-      "stellar-testnet",
-      "base-sepolia",
-      "USDC",
-      RouteKind.Cctp,
-      parsed,
-    )).toMatchObject({
+    expect(
+      resolveProviderAddressPair("stellar-testnet", "base-sepolia", "USDC", RouteKind.Cctp, parsed),
+    ).toMatchObject({
       sourceChain: "stellar-testnet",
       destinationChain: "base-sepolia",
       symbol: "USDC",
@@ -72,9 +68,15 @@ describe("provider address overrides", () => {
     for (const [value, path] of [
       [{ unknown: { USDC: { cctp: BASE_SEPOLIA_ADDRESS } } }, "$.unknown"],
       [{ "base-sepolia": { MISSING: { cctp: BASE_SEPOLIA_ADDRESS } } }, "$.base-sepolia.MISSING"],
-      [{ "base-sepolia": { USDC: { wormhole: BASE_SEPOLIA_ADDRESS } } }, "$.base-sepolia.USDC.wormhole"],
+      [
+        { "base-sepolia": { USDC: { wormhole: BASE_SEPOLIA_ADDRESS } } },
+        "$.base-sepolia.USDC.wormhole",
+      ],
       [{ "base-sepolia": { USDC: { cctp: "not-an-address" } } }, "$.base-sepolia.USDC.cctp"],
-      [{ "base-sepolia": { USDC: { allbridge: BASE_SEPOLIA_ADDRESS } } }, "$.base-sepolia.USDC.allbridge"],
+      [
+        { "base-sepolia": { USDC: { allbridge: BASE_SEPOLIA_ADDRESS } } },
+        "$.base-sepolia.USDC.allbridge",
+      ],
       [{ "stellar-testnet": { USDC: { cctp: G_ADDR } } }, "$.stellar-testnet.USDC.cctp"],
     ] as const) {
       try {
@@ -92,13 +94,7 @@ describe("provider address overrides", () => {
       "base-sepolia": { USDC: { cctp: BASE_SEPOLIA_ADDRESS } },
     });
     expect(() =>
-      resolveProviderAddressPair(
-        "base-sepolia",
-        "sepolia",
-        "USDC",
-        RouteKind.Cctp,
-        sourceOnly,
-      ),
+      resolveProviderAddressPair("base-sepolia", "sepolia", "USDC", RouteKind.Cctp, sourceOnly),
     ).toThrow("providerAddresses.sepolia.USDC.cctp");
   });
 
@@ -107,13 +103,7 @@ describe("provider address overrides", () => {
       resolveProviderAddressPair("base", "sepolia", "USDC", RouteKind.Cctp, overrides),
     ).toThrow(/same network/);
     expect(() =>
-      resolveProviderAddressPair(
-        "base-sepolia",
-        "sepolia",
-        "USDC",
-        RouteKind.Allbridge,
-        overrides,
-      ),
+      resolveProviderAddressPair("base-sepolia", "sepolia", "USDC", RouteKind.Allbridge, overrides),
     ).toThrow(/capability is unavailable/);
   });
 

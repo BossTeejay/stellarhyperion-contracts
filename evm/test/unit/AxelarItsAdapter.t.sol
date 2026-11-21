@@ -8,8 +8,8 @@ import {
     DecimalOverflow,
     InvalidAmount,
     InvalidDestination,
-    MalformedMessage,
     InvalidLimit,
+    MalformedMessage,
     ProviderBudgetExceeded,
     RailNotConfigured,
     RefundFailed,
@@ -1031,9 +1031,8 @@ contract AxelarItsAdapterTest is Fixture {
         bytes32 txHash = keccak256("the.transaction.that.ran.short");
         vm.deal(alice, 1 ether);
 
-        AxelarItsAdapter.TopUpMetadata memory metadata = _topUpMetadata(
-            intentId, destinationBinding, txHash, 3, alice, 0.5 ether
-        );
+        AxelarItsAdapter.TopUpMetadata memory metadata =
+            _topUpMetadata(intentId, destinationBinding, txHash, 3, alice, 0.5 ether);
         vm.deal(stranger, 1 ether);
         vm.prank(stranger);
         vm.expectRevert(Unauthorized.selector);
@@ -1070,9 +1069,8 @@ contract AxelarItsAdapterTest is Fixture {
         (bytes32 intentId, bytes32 destinationBinding) = _dispatchIntent();
         bytes32 txHash = keccak256("the.transaction.that.ran.short");
         vm.deal(alice, 1 ether);
-        AxelarItsAdapter.TopUpMetadata memory metadata = _topUpMetadata(
-            intentId, destinationBinding, txHash, 3, alice, 0.5 ether
-        );
+        AxelarItsAdapter.TopUpMetadata memory metadata =
+            _topUpMetadata(intentId, destinationBinding, txHash, 3, alice, 0.5 ether);
 
         vm.prank(alice);
         adapter.topUpGas{value: 0.2 ether}(metadata);
@@ -1100,15 +1098,13 @@ contract AxelarItsAdapterTest is Fixture {
         bytes32 txHash = keccak256("one Axelar source transaction");
         vm.deal(alice, 1 ether);
 
-        AxelarItsAdapter.TopUpMetadata memory first = _topUpMetadata(
-            firstIntent, firstDestination, txHash, 3, alice, 1 ether
-        );
+        AxelarItsAdapter.TopUpMetadata memory first =
+            _topUpMetadata(firstIntent, firstDestination, txHash, 3, alice, 1 ether);
         vm.prank(alice);
         adapter.topUpGas{value: 0.1 ether}(first);
 
-        AxelarItsAdapter.TopUpMetadata memory second = _topUpMetadata(
-            secondIntent, secondDestination, txHash, 3, alice, 1 ether
-        );
+        AxelarItsAdapter.TopUpMetadata memory second =
+            _topUpMetadata(secondIntent, secondDestination, txHash, 3, alice, 1 ether);
         vm.prank(alice);
         vm.expectRevert(TopUpBindingMismatch.selector);
         adapter.topUpGas{value: 0.1 ether}(second);
@@ -1118,9 +1114,8 @@ contract AxelarItsAdapterTest is Fixture {
     function test_top_up_rejects_changed_destination_token_or_original_amount() public {
         (bytes32 intentId, bytes32 destinationBinding) = _dispatchIntent();
         vm.deal(alice, 1 ether);
-        AxelarItsAdapter.TopUpMetadata memory metadata = _topUpMetadata(
-            intentId, destinationBinding, keccak256("source transaction"), 0, alice, 1 ether
-        );
+        AxelarItsAdapter.TopUpMetadata memory metadata =
+            _topUpMetadata(intentId, destinationBinding, keccak256("source transaction"), 0, alice, 1 ether);
 
         metadata.destinationBinding = keccak256("another destination");
         vm.prank(alice);
@@ -1199,9 +1194,7 @@ contract AxelarItsAdapterTest is Fixture {
         vm.prank(alice);
         vm.expectRevert(InvalidAmount.selector);
         adapter.topUpGas(
-            _topUpMetadata(
-                intentId, destinationBinding, keccak256("source transaction"), 0, alice, 1 ether
-            )
+            _topUpMetadata(intentId, destinationBinding, keccak256("source transaction"), 0, alice, 1 ether)
         );
     }
 
@@ -1219,14 +1212,12 @@ contract AxelarItsAdapterTest is Fixture {
     }
 
     function test_dispatch_bounds_destination_metadata_for_top_up_intents() public {
-        string memory tooLongChain =
-            string(new bytes(adapter.MAX_DESTINATION_CHAIN_LENGTH() + 1));
+        string memory tooLongChain = string(new bytes(adapter.MAX_DESTINATION_CHAIN_LENGTH() + 1));
         vm.prank(address(router));
         vm.expectRevert(InvalidLimit.selector);
         adapter.dispatch(address(usdc), AMOUNT, Destination(tooLongChain, G_ADDR), NONCE);
 
-        string memory tooLongAddress =
-            string(new bytes(adapter.MAX_DESTINATION_STRKEY_LENGTH() + 1));
+        string memory tooLongAddress = string(new bytes(adapter.MAX_DESTINATION_STRKEY_LENGTH() + 1));
         vm.prank(address(router));
         vm.expectRevert(InvalidLimit.selector);
         adapter.dispatch(address(usdc), AMOUNT, Destination(STELLAR, tooLongAddress), NONCE);
@@ -1271,10 +1262,7 @@ contract AxelarItsAdapterTest is Fixture {
         return _dispatchIntentAt(NONCE);
     }
 
-    function _dispatchIntentAt(uint64 nonce)
-        internal
-        returns (bytes32 intentId, bytes32 destinationBinding)
-    {
+    function _dispatchIntentAt(uint64 nonce) internal returns (bytes32 intentId, bytes32 destinationBinding) {
         _fund(AMOUNT);
         AxelarItsAdapter.Peer memory peer = adapter.peerOf(STELLAR);
         destinationBinding = keccak256(abi.encode(STELLAR, G_ADDR, peer.axelarChain, peer.peer));

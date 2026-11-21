@@ -72,7 +72,11 @@ function rustFunction(source: string, name: string): string {
 }
 
 function solidityFunction(source: string, name: string): string {
-  return bracedBlock(source, new RegExp(`\\bfunction\\s+${name}\\s*\\(`), `Solidity function ${name}`);
+  return bracedBlock(
+    source,
+    new RegExp(`\\bfunction\\s+${name}\\s*\\(`),
+    `Solidity function ${name}`,
+  );
 }
 
 function requireEvidence(source: string, pattern: RegExp, label: string): void {
@@ -247,7 +251,7 @@ describe("the documented inbound trust surface", () => {
     const methods = [...routerInterface.matchAll(/^\s*fn\s+([A-Za-z0-9_]+)\s*\(/gm)].map(
       (item) => item[1],
     );
-    expect(methods).toEqual(["bridge_in", "treasury"]);
+    expect(methods).toEqual(["is_paused", "bridge_in", "treasury"]);
   });
 
   it("binds inbound provider authentication to each active Soroban adapter", () => {
@@ -372,22 +376,16 @@ describe("the documented inbound trust surface", () => {
   });
 
   it("fails closed when a local interface or trust check is absent", () => {
-    expect(() =>
+    expect(() => {
       requireEvidence(
         "interface with no receiver",
         /MessageTransmitter/,
         "fixture provider interface",
-      ),
-    )
-      .toThrow("fixture provider interface trust-surface evidence changed");
-    expect(() =>
-      requireEvidence(
-        "function setLane() external",
-        /onlyOwner/,
-        "fixture authority setter",
-      ),
-    )
-      .toThrow("fixture authority setter trust-surface evidence changed");
+      );
+    }).toThrow("fixture provider interface trust-surface evidence changed");
+    expect(() => {
+      requireEvidence("function setLane() external", /onlyOwner/, "fixture authority setter");
+    }).toThrow("fixture authority setter trust-surface evidence changed");
   });
 });
 

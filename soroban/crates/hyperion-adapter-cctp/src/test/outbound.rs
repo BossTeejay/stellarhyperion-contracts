@@ -38,9 +38,7 @@ fn request(world: &World, amount: i128) -> OutboundRequest {
 fn a_transfer_walks_from_the_router_through_the_adapter_into_circles_burn() {
     let w = World::new();
 
-    let quote = w
-        .adapter()
-        .quote_dispatch(&w.ethereum(), &net_of(HUNDRED));
+    let quote = w.adapter().quote_dispatch(&w.ethereum(), &net_of(HUNDRED));
     assert_eq!(quote.destination_domain, ETHEREUM_DOMAIN);
     assert_eq!(
         quote.min_finality_threshold,
@@ -101,6 +99,10 @@ fn preview_and_dispatch_share_burn_boundary_for_invalid_stored_fee_policy() {
             &evm(&w, 0x11),
             &None,
         ),
+        Err(Ok(HyperionError::FeeTooHigh))
+    );
+    assert_eq!(
+        w.adapter().try_quote_dispatch(&w.ethereum(), &HUNDRED),
         Err(Ok(HyperionError::FeeTooHigh))
     );
     assert_eq!(
@@ -252,7 +254,7 @@ fn the_fee_budget_is_quoted_with_the_same_arithmetic_it_is_charged_with() {
         .set_lane_finality_policy(&ETHEREUM_DOMAIN, &FinalityPolicy::Fast);
     // A quote the app can show and a budget the contract sends have to be the same number, or the
     // worst case a user was promised is not the worst case they get.
-    for amount in [1i128, 999, HUNDRED, HUNDRED * 9] {
+    for amount in [1_429i128, 9_999, HUNDRED, HUNDRED * 9] {
         assert_eq!(
             w.adapter().quote_dispatch(&w.ethereum(), &amount).max_fee,
             amount * 7 / 10_000

@@ -319,14 +319,7 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
             keccak256(abi.encode(destination.chain, destination.strkey, peer.axelarChain, peer.peer));
         bytes32 intentId = keccak256(
             abi.encode(
-                block.chainid,
-                address(this),
-                nonce,
-                destinationBinding,
-                tokenId,
-                token,
-                amount,
-                sender
+                block.chainid, address(this), nonce, destinationBinding, tokenId, token, amount, sender
             )
         );
         if (_topUpIntents[intentId].exists) revert TopUpBindingMismatch();
@@ -472,9 +465,7 @@ contract AxelarItsAdapter is IRailAdapter, IInterchainTokenExecutable, Ownable2S
         ) revert ProviderBudgetExceeded();
         uint256 totalSpent = intent.nativeSpent + msg.value;
         intent.nativeSpent = totalSpent;
-        GAS_SERVICE.addNativeGas{value: msg.value}(
-            metadata.txHash, metadata.logIndex, metadata.refundAddress
-        );
+        GAS_SERVICE.addNativeGas{value: msg.value}(metadata.txHash, metadata.logIndex, metadata.refundAddress);
         emit GasToppedUp(metadata.intentId, msg.value, totalSpent);
     }
 
