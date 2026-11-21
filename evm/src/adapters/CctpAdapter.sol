@@ -50,6 +50,41 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
     /// @notice Version for CCTP approval diagnostics.
     uint32 public constant APPROVAL_DIAGNOSTICS_VERSION = 1;
 
+    enum ProviderReadStatus {
+        Unknown,
+        Usable,
+        Paused
+    }
+
+    struct LaneReadiness {
+        uint32 version;
+        bool routerPaused;
+        ProviderReadStatus messenger;
+        ProviderReadStatus transmitter;
+        address messengerContract;
+        address transmitterContract;
+        bool laneAvailable;
+    }
+
+    enum AttestationCondition {
+        Unverified,
+        Verified,
+        Expired,
+        UnsupportedRecovery
+    }
+
+    struct RenewalPlan {
+        uint32 version;
+        AttestationCondition condition;
+        bytes32 sourceMessageId;
+        bytes32 payoutIntent;
+        uint256 expiresAt;
+        bool recoverySupported;
+    }
+
+    /// @notice CCTP message transmitter used to attest provider lane readiness.
+    address public messageTransmitter;
+
     /// @notice Expected residual allowance on the token messenger.
     uint256 public constant DOCUMENTED_RESIDUAL_ALLOWANCE = 0;
 
@@ -117,6 +152,9 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
         uint256 allowanceAfter,
         bool isClean
     );
+
+    /// @notice Emitted when the configured CCTP message transmitter changes.
+    event MessageTransmitterSet(address indexed transmitter);
 
     constructor(address router, address tokenMessenger, address usdc, address owner_) Ownable(owner_) {
         if (router == address(0) || tokenMessenger == address(0) || usdc == address(0)) {
@@ -280,6 +318,70 @@ contract CctpAdapter is IRailAdapter, Ownable2Step {
             isClean: isClean,
             finding: finding
         });
+    }
+
+    /// @notice Configure the optional transmitter identity for provider pause diagnostics.
+    function setMessageTransmitter(address transmitter) external onlyOwner {
+        if (transmitter == address(0)) revert ZeroAddress();
+        messageTransmitter = transmitter;
+        emit MessageTransmitterSet(transmitter);
+    }
+
+    /// @notice Coherent lane readiness across router and upstream providers.
+    function laneReadiness() external view returns (LaneReadiness memory) {
+        bool routerPaused = false;
+        (bool routerRead, bytes memory routerResult) = ROUTER.staticcall(abi.encodeWithSignature("paused()"));
+        if (routerRead && routerResult.length == 32) {
+            routerPaused = abi.decode(routerResult, (bool));
+        } else {
+            routerPaused = true;
+        }
+
+        ProviderReadStatus messenger = _providerPause(address(TOKEN_MESSENGER));
+        ProviderReadStatus transmitter = messageTransmitter == address(0)
+            ? ProviderReadStatus.Unknown
+            : _providerPause(messageTransmitter);
+        bool available = !routerPaused && messenger == ProviderReadStatus.Usable
+            && transmitter == ProviderReadStatus.Usable;
+
+        return LaneReadiness({
+            version: 1,
+            routerPaused: routerPaused,
+            messenger: messenger,
+            transmitter: transmitter,
+            messengerContract: address(TOKEN_MESSENGER),
+            transmitterContract: messageTransmitter,
+            laneAvailable: available
+        });
+    }
+
+    /// @notice Classify renewal evidence without verification or mint mutation.
+    function prepareRenewal(
+        bytes32 sourceMessageId,
+        bytes32 payoutIntent,
+        uint256 expiresAt,
+        bool verifiedAttestation,
+        bool recoverySupported
+    ) external view returns (RenewalPlan memory) {
+        AttestationCondition condition = expiresAt <= block.timestamp
+            ? AttestationCondition.Expired
+            : !recoverySupported
+                ? AttestationCondition.UnsupportedRecovery
+                : verifiedAttestation ? AttestationCondition.Verified : AttestationCondition.Unverified;
+        return RenewalPlan({
+            version: 1,
+            condition: condition,
+            sourceMessageId: sourceMessageId,
+            payoutIntent: payoutIntent,
+            expiresAt: expiresAt,
+            recoverySupported: recoverySupported && expiresAt > block.timestamp
+        });
+    }
+
+    function _providerPause(address provider) private view returns (ProviderReadStatus) {
+        (bool readable, bytes memory result) = provider.staticcall(abi.encodeWithSignature("paused()"));
+        if (!readable || result.length != 32) return ProviderReadStatus.Unknown;
+        return abi.decode(result, (bool)) ? ProviderReadStatus.Paused : ProviderReadStatus.Usable;
     }
 
     /// @dev Adapters hold nothing. Anything sent here goes straight back to the router, which

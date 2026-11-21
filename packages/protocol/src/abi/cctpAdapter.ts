@@ -308,6 +308,69 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "laneReadiness",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct CctpAdapter.LaneReadiness",
+        "components": [
+          {
+            "name": "version",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "routerPaused",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "messenger",
+            "type": "uint8",
+            "internalType": "enum CctpAdapter.ProviderReadStatus"
+          },
+          {
+            "name": "transmitter",
+            "type": "uint8",
+            "internalType": "enum CctpAdapter.ProviderReadStatus"
+          },
+          {
+            "name": "messengerContract",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "transmitterContract",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "laneAvailable",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "messageTransmitter",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "owner",
     "inputs": [],
     "outputs": [
@@ -328,6 +391,77 @@ export const cctpAdapterAbi = [
         "name": "",
         "type": "address",
         "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "prepareRenewal",
+    "inputs": [
+      {
+        "name": "sourceMessageId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "payoutIntent",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "expiresAt",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "verifiedAttestation",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "recoverySupported",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct CctpAdapter.RenewalPlan",
+        "components": [
+          {
+            "name": "version",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "condition",
+            "type": "uint8",
+            "internalType": "enum CctpAdapter.AttestationCondition"
+          },
+          {
+            "name": "sourceMessageId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "payoutIntent",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "expiresAt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "recoverySupported",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
       }
     ],
     "stateMutability": "view"
@@ -425,6 +559,19 @@ export const cctpAdapterAbi = [
         "name": "enabled",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setMessageTransmitter",
+    "inputs": [
+      {
+        "name": "transmitter",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [],
@@ -608,6 +755,19 @@ export const cctpAdapterAbi = [
         "type": "bool",
         "indexed": false,
         "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MessageTransmitterSet",
+    "inputs": [
+      {
+        "name": "transmitter",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
       }
     ],
     "anonymous": false

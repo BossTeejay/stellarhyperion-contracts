@@ -57,7 +57,7 @@ mod test;
 
 use hyperion_core::{
     address::{assert_route_supports, bytes32_to_evm, evm_to_bytes32},
-    axelar::{InboundNote, OutboundNote},
+    axelar::{negotiate_note_version, InboundNote, OutboundNote, SUPPORTED_NOTE_VERSIONS},
     inbound::{Origin, Recipient, RouterClient},
     AdapterKeyCoverage, HyperionError, MaintenanceSummary, RouteKind, MAX_MAINTENANCE_BATCH,
     MIN_PEER_ROTATION_DELAY,
@@ -160,6 +160,11 @@ impl AxelarAdapter {
             &destination,
             None,
         )?;
+        if cfg.route == RouteKind::AxelarGmp {
+            let required = u8::try_from(storage::required_note_version(&env, &destination_chain))
+                .map_err(|_| HyperionError::UnsupportedHookVersion)?;
+            negotiate_note_version(required, &SUPPORTED_NOTE_VERSIONS, &SUPPORTED_NOTE_VERSIONS)?;
+        }
 
         let this = env.current_contract_address();
         let its = InterchainTokenServiceClient::new(&env, &cfg.its);
@@ -739,6 +744,25 @@ impl AxelarAdapter {
         Ok(())
     }
 
+    /// Require a minimum note version for a destination.
+    ///
+    /// Versions above the local registry are accepted as requirements but block dispatch until
+    /// this adapter implements a compatible codec; they are never silently sent as v1.
+    pub fn set_required_note_version(
+        env: Env,
+        chain: String,
+        version: u32,
+    ) -> Result<(), HyperionError> {
+        require_admin(&env)?;
+        storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        if version == 0 || version > u8::MAX as u32 {
+            return Err(HyperionError::InvalidLimit);
+        }
+        storage::set_required_note_version(&env, &chain, version);
+        events::NoteVersionRequired { chain, version }.publish(&env);
+        Ok(())
+    }
+
     /// Permanently retire both chain names and remove the active forward/reverse mapping.
     pub fn unlink_chain(env: Env, chain: String) -> Result<(), HyperionError> {
         require_admin(&env)?;
@@ -805,6 +829,11 @@ impl AxelarAdapter {
 
     pub fn get_link(env: Env, chain: String) -> Result<ChainLink, HyperionError> {
         storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)
+    }
+
+    pub fn get_required_note_version(env: Env, chain: String) -> Result<u32, HyperionError> {
+        storage::link(&env, &chain).ok_or(HyperionError::UnknownChain)?;
+        Ok(storage::required_note_version(&env, &chain))
     }
 
     pub fn get_pending_rotation(
