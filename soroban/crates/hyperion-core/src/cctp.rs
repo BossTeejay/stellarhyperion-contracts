@@ -9,7 +9,7 @@
 //! field for field, which is the definition the on-chain contracts read from. Everything here is
 //! a pure function over bytes so the whole parser can be tested without a rail in sight.
 
-use soroban_sdk::{contracttype, Bytes, BytesN, Env};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env};
 
 use crate::address::{AddressKind, StellarDestination};
 use crate::error::HyperionError;
@@ -280,6 +280,81 @@ impl HyperionHook {
 
 /// Diagnostic format version for CCTP approval lifecycle audits.
 pub const APPROVAL_DIAGNOSTICS_VERSION: u32 = 1;
+
+/// Provider/attestation diagnostics versions remain independent from CCTP message versions.
+pub const LANE_READINESS_VERSION: u32 = 1;
+pub const EXPIRY_TOOL_VERSION: u32 = 1;
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ProviderReadStatus {
+    Unknown = 0,
+    Usable = 1,
+    Paused = 2,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum AttestationCondition {
+    Unverified = 0,
+    Verified = 1,
+    Expired = 2,
+    UnsupportedRecovery = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneReadiness {
+    pub version: u32,
+    pub router_paused: bool,
+    pub messenger: ProviderReadStatus,
+    pub transmitter: ProviderReadStatus,
+    pub messenger_contract: Address,
+    pub transmitter_contract: Address,
+    pub lane_available: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenewalPlan {
+    pub version: u32,
+    pub condition: AttestationCondition,
+    pub source_message_id: BytesN<32>,
+    pub payout_intent: BytesN<32>,
+    pub expires_at: i128,
+    pub recovery_supported: bool,
+}
+
+impl RenewalPlan {
+    pub fn classify(
+        source_message_id: BytesN<32>,
+        payout_intent: BytesN<32>,
+        expires_at: i128,
+        now: i128,
+        has_verified_attestation: bool,
+        recovery_supported: bool,
+    ) -> Self {
+        let condition = if expires_at <= now {
+            AttestationCondition::Expired
+        } else if !recovery_supported {
+            AttestationCondition::UnsupportedRecovery
+        } else if has_verified_attestation {
+            AttestationCondition::Verified
+        } else {
+            AttestationCondition::Unverified
+        };
+        Self {
+            version: EXPIRY_TOOL_VERSION,
+            condition,
+            source_message_id,
+            payout_intent,
+            expires_at,
+            recovery_supported: recovery_supported && expires_at > now,
+        }
+    }
+}
 
 /// Documented residual allowance expected between adapter and token messenger.
 /// Hyperion leaves no standing allowance on any rail messenger; expected residual is always zero.

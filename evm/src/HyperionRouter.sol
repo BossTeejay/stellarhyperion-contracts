@@ -91,6 +91,8 @@ import {StellarAddress} from "./libraries/StellarAddress.sol";
 contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyGuard {
     /// @notice Maximum claim IDs attempted in one settlement batch.
     uint256 public constant MAX_CLAIMS_PER_BATCH = 50;
+    /// @notice Maximum inbound amount representable at the router/provider boundary.
+    uint256 public constant MAX_SUPPORTED_INBOUND_AMOUNT = type(uint128).max;
     using SafeERC20 for IERC20;
     using FlowGuard for FlowWindow;
 
@@ -393,6 +395,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         if (expected == address(0)) revert AdapterNotSet();
         if (msg.sender != expected) revert NotRailReceiver();
         if (amount == 0) revert InvalidAmount();
+        if (amount > MAX_SUPPORTED_INBOUND_AMOUNT) revert AmountNotRepresentable();
         if (recipient == address(0)) revert ZeroAddress();
 
         bytes32 replayKey = keccak256(abi.encode(route, origin.messageId));

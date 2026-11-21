@@ -25,6 +25,9 @@ pub enum DataKey {
     Token(BytesN<32>),
     /// Pending peer rotation for a chain.
     PendingRotation(String),
+    /// Minimum note version required by the configured destination. Missing means v1 for
+    /// installations predating version negotiation.
+    RequiredNoteVersion(String),
     /// Emergency disable flag for a chain.
     Disabled(String),
     /// Retired names cannot be reused to bypass a peer rotation delay.
@@ -206,7 +209,24 @@ pub fn remove_link(env: &Env, chain: &String) {
         .persistent()
         .remove(&DataKey::Link(chain.clone()));
     clear_pending_rotation(env, chain);
+    env.storage()
+        .instance()
+        .remove(&DataKey::RequiredNoteVersion(chain.clone()));
     set_chain_disabled(env, chain, false);
+}
+
+pub fn required_note_version(env: &Env, chain: &String) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::RequiredNoteVersion(chain.clone()))
+        .unwrap_or(u32::from(hyperion_core::axelar::NOTE_VERSION_V1))
+}
+
+pub fn set_required_note_version(env: &Env, chain: &String, version: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::RequiredNoteVersion(chain.clone()), &version);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
 }
 
 pub fn touch_token(env: &Env, token: &Address) -> u32 {
