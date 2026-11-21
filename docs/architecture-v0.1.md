@@ -100,8 +100,41 @@ The Route Planner is the only place that "knows" about all four rails. Everythin
 | Native USDC, Stellar ⇄ any CCTP-connected chain | **Circle CCTP V2** (Stellar = domain 27) | Official Circle rail, zero-slippage burn-and-mint, no wrapped asset |
 | XLM or another Stellar-native asset needs a canonical EVM representation | **Axelar Interchain Token Service** | Canonical registration, decentralized validator security, built-in flow limits |
 | Arbitrary cross-chain instruction (e.g. "bridge and stake in one step") | **Axelar GMP** or **LayerZero OApp** | General message passing; pick per desired trust model — Axelar's PoS/amplifier validators vs. LayerZero's configurable DVN set |
-| Non-USDC stablecoin, or any asset where waiting on attestation is worse than pool slippage | **Allbridge Core (development only; gated)** | Not eligible for activation until its trust and accounting assumptions are independently validated |
+| Non-USDC stablecoin, or any asset where waiting on attestation is worse than pool slippage | **Allbridge Core (development only; gated)** | Not eligible for activation until its configured-validator trust, pool liquidity, authorization and accounting assumptions are independently validated |
 | "I hold asset A anywhere, I want asset B on Stellar" | **NEAR Intents** | Solver network quotes/executes the swap directly into XLM or Stellar USDC |
+
+### Allbridge activation evidence gate
+
+Allbridge's Soroban adapter is not part of the active deployment. The live deployment remains
+Stellar Testnet outbound ITS/CCTP; Allbridge, EVM, and other rail development stays gated until
+the candidate lane has independently validated evidence. The read-only evaluator is
+`node script/stellar/check-allbridge-activation.mjs <candidate.json> --trusted-key <acceptor-public-key.pem> --acceptor-id <id>`.
+The Ed25519 public key and acceptor identity must be trusted out of band.
+
+The candidate manifest binds evidence for:
+
+- router/admin authorization and dispatch authority;
+- the local Allbridge pool and its token;
+- available pool liquidity as a positive exact `amountAtomic` decimal string (never a JSON number);
+- Allbridge's configured validator key, its authority, and its trust model; and
+- independent validation scoped to the exact `sourceNetwork:direction:destination` lane.
+
+Every evidence record must be marked `verified`, cite one or more references, name its verifier,
+and carry valid `checkedAt` and future `expiresAt` timestamps. Missing, expired, malformed, or
+development-only records block readiness. The complete candidate and evidence document must
+carry an Ed25519 signature from the externally trusted acceptor; its signature covers the
+canonical JSON document with only `signedAcceptance.signatureBase64` omitted. Canonical JSON
+recursively sorts object keys, preserves array order, and uses UTF-8 without whitespace. The
+independent-validation verifier must differ from the acceptance signer. See
+`script/stellar/check-allbridge-activation.mjs` for the precise manifest fields and validation
+rules.
+
+The report identifies Allbridge configured-validator trust separately from Circle CCTP and
+Axelar assurances. Circle or Axelar evidence cannot satisfy Allbridge validator evidence.
+`ready` means only that the submitted evidence is complete and signed; the command never enables
+a route, alters contract state, or submits a transaction. The gate does not change deployed
+contract storage, entrypoints, or wire formats, so it requires no on-chain migration. It is an
+off-chain review control and does not make existing deployments activation-ready.
 
 ## 6. Stellar-Side Contracts (Soroban)
 
