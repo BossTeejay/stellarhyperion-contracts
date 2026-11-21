@@ -327,9 +327,7 @@ describe("destination minimum inversion", () => {
     expect(inverse.recipientDestinationAmount).toBeGreaterThanOrEqual(
       inverse.minimumDestinationAmount,
     );
-    expect(inverse.roundingOvershoot).toBeLessThanOrEqual(
-      inverse.roundingBoundDestinationAmount,
-    );
+    expect(inverse.roundingOvershoot).toBeLessThanOrEqual(inverse.roundingBoundDestinationAmount);
 
     const forward = planForwardQuote(
       {

@@ -28,6 +28,12 @@ import {
   isRouteKind,
   waitsOnAttestation,
 } from "./routes.js";
+import {
+  resolveProviderAddressPair,
+  type ProviderAddressOverrides,
+  type ProviderAddressPair,
+} from "./registry/assets.js";
+import type { ChainKey } from "./chains.js";
 
 /**
  * Why a rail turned a quote down. Same integers as the Solidity enum and the Soroban one, in
@@ -248,6 +254,42 @@ export interface InverseQuotePlan {
   readonly quote: RouteQuote | null;
 }
 
+/** Explicit provider context for callers that need provider-side token addresses with a quote. */
+export interface ProviderAwareQuoteRequest extends QuoteRequest {
+  readonly sourceChain: ChainKey;
+  readonly destinationChain: ChainKey;
+  readonly symbol: string;
+  readonly providerAddressOverrides: ProviderAddressOverrides;
+}
+
+export interface ProviderAwareQuoteResult {
+  readonly quote: RouteQuote;
+  readonly providerAddresses: ProviderAddressPair;
+}
+
+/**
+ * Quote one route while resolving both explicit provider addresses.
+ *
+ * Chain and precision continue to come from the request and snapshot; provider addresses are
+ * metadata only and cannot silently rewrite either.
+ */
+export function planQuoteWithProviderAddresses(
+  request: ProviderAwareQuoteRequest,
+  snapshot: RouterSnapshot,
+): ProviderAwareQuoteResult {
+  const providerAddresses = resolveProviderAddressPair(
+    request.sourceChain,
+    request.destinationChain,
+    request.symbol,
+    request.route,
+    request.providerAddressOverrides,
+  );
+  return {
+    quote: planQuote(request, snapshot),
+    providerAddresses,
+  };
+}
+
 function blocked(base: RouteQuote, reason: QuoteBlocker): RouteQuote {
   return { ...base, available: false, reason };
 }
@@ -328,6 +370,21 @@ export function planQuote(request: QuoteRequest, snapshot: RouterSnapshot): Rout
  * This is an amount budget, not a gas-price conversion: it is reserved in destination token
  * base units and does not model native-token provider pricing.
  */
+function validForwardingBudget(value: unknown): value is ForwardingBudget {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("unit" in value) ||
+    !("destinationAmount" in value)
+  )
+    return false;
+  return (
+    value.unit === "destination-token-base-units" &&
+    typeof value.destinationAmount === "bigint" &&
+    value.destinationAmount >= 0n
+  );
+}
+
 export function planForwardQuote(
   request: ForwardQuoteRequest,
   snapshot: RouterSnapshot,
@@ -345,9 +402,7 @@ export function planForwardQuote(
   const validInputs =
     typeof minimumDestinationAmount === "bigint" &&
     minimumDestinationAmount > 0n &&
-    forwardingBudget?.unit === "destination-token-base-units" &&
-    typeof forwardingBudget.destinationAmount === "bigint" &&
-    forwardingBudget.destinationAmount >= 0n;
+    validForwardingBudget(forwardingBudget);
 
   if (!validInputs) {
     return {
@@ -383,9 +438,7 @@ export function planForwardQuote(
     recipientDestinationAmount,
     minimumDestinationAmount,
     forwardingBudget,
-    roundingOvershoot: meetsMinimum
-      ? recipientDestinationAmount - minimumDestinationAmount
-      : null,
+    roundingOvershoot: meetsMinimum ? recipientDestinationAmount - minimumDestinationAmount : null,
     roundingBoundDestinationAmount,
   };
 }
@@ -412,15 +465,11 @@ export function planInverseQuote(
       ? destinationRoundingBound(snapshot.tokenDecimals, destinationDecimals)
       : 0n;
   const requiredDestinationAmount =
-    typeof minimumDestinationAmount === "bigint" &&
-    typeof forwardingBudget?.destinationAmount === "bigint"
+    typeof minimumDestinationAmount === "bigint" && validForwardingBudget(forwardingBudget)
       ? minimumDestinationAmount + forwardingBudget.destinationAmount
       : 0n;
 
-  const failure = (
-    reason: string,
-    blocker: QuoteBlocker | null = null,
-  ): InverseQuotePlan => ({
+  const failure = (reason: string, blocker: QuoteBlocker | null = null): InverseQuotePlan => ({
     available: false,
     reason,
     blocker,
@@ -437,20 +486,14 @@ export function planInverseQuote(
   if (
     typeof minimumDestinationAmount !== "bigint" ||
     minimumDestinationAmount <= 0n ||
-    forwardingBudget?.unit !== "destination-token-base-units" ||
-    typeof forwardingBudget.destinationAmount !== "bigint" ||
-    forwardingBudget.destinationAmount < 0n
+    !validForwardingBudget(forwardingBudget)
   ) {
     return failure(
       "minimum must be positive and forwarding budget non-negative, both in destination-token-base-units",
     );
   }
   if (!isRouteKind(route)) return failure("route is not a recognized rail");
-  if (
-    !Number.isInteger(snapshot.feeBps) ||
-    snapshot.feeBps < 0 ||
-    snapshot.feeBps > MAX_FEE_BPS
-  ) {
+  if (!Number.isInteger(snapshot.feeBps) || snapshot.feeBps < 0 || snapshot.feeBps > MAX_FEE_BPS) {
     return failure(`fee assumption must be an integer from 0 to ${String(MAX_FEE_BPS)} bps`);
   }
   if (
@@ -482,11 +525,7 @@ export function planInverseQuote(
   while (low < high) {
     const middle = (low + high + 1n) >> 1n;
     const fee = (middle * feeBps) / BPS_DENOMINATOR;
-    const net = floorToRepresentable(
-      middle - fee,
-      snapshot.tokenDecimals,
-      destinationDecimals,
-    );
+    const net = floorToRepresentable(middle - fee, snapshot.tokenDecimals, destinationDecimals);
     if (net <= flowHeadroom) low = middle;
     else high = middle - 1n;
   }
@@ -528,15 +567,11 @@ export function planInverseQuote(
     }
   }
 
-  const quote = planQuote(
-    { route, amount: searchLow, strkey, destinationDecimals },
-    snapshot,
-  );
+  const quote = planQuote({ route, amount: searchLow, strkey, destinationDecimals }, snapshot);
   if (!quote.available) {
     return failure(BLOCKER_COPY[quote.reason].detail, quote.reason);
   }
-  const recipientDestinationAmount =
-    quote.destinationAmount - forwardingBudget.destinationAmount;
+  const recipientDestinationAmount = quote.destinationAmount - forwardingBudget.destinationAmount;
   const roundingOvershoot = recipientDestinationAmount - minimumDestinationAmount;
 
   return {
